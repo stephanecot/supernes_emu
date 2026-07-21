@@ -1,0 +1,16 @@
+[package]
+name = "snes-frontend"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "snes-frontend"
+path = "src/main.rs"
+
+[dependencies]
+snes-core = { path = "../core" }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+png = "0.17"
+winit = "0.30"
+pixels = "0.15"
+cpal = "0.15"

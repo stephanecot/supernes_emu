@@ -1,0 +1,15 @@
+# Rust build output
+target/
+
+# Battery saves
+*.srm
+
+# Debug output (traces, frame/audio dumps)
+target/debug-out/
+*.wav
+
+# ROMs are copyrighted commercial games — never commit them.
+roms/
+*.smc
+*.sfc
+*.zip
