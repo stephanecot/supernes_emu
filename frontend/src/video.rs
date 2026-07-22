@@ -8,6 +8,7 @@
 //! coarse — a few ms on some hosts — so a plain sleep-to-deadline would
 //! frequently overshoot).
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -23,6 +24,7 @@ use snes_core::{Cartridge, JoypadState, Snes, SCREEN_HEIGHT, SCREEN_WIDTH};
 
 use crate::audio::AudioOutput;
 use crate::input;
+use crate::save;
 
 /// Integer upscale factor for the 256x224 native framebuffer.
 pub const WINDOW_SCALE: u32 = 3;
@@ -34,7 +36,13 @@ const SPIN_SLACK: Duration = Duration::from_micros(1200);
 /// Run the windowed frontend (M5): winit event loop + pixels present, paced
 /// to the cartridge region's native field rate (PAL 50.007 Hz / NTSC
 /// 60.0988 Hz, from `Region::frames_per_second`) via an absolute deadline.
-pub fn run(cart: Cartridge) -> Result<(), String> {
+///
+/// `save_path`/`sram_baseline` come from `save::load_sram` (already applied
+/// to `cart.sram` by the caller); battery SRAM is written back to
+/// `save_path` once the event loop exits, however it exits (window close,
+/// Esc, or a fatal window/surface creation error), since `app` is still
+/// owned here after `run_app` returns.
+pub fn run(cart: Cartridge, save_path: PathBuf, sram_baseline: Vec<u8>) -> Result<(), String> {
     let title = format!("snes-frontend - {}", cart.title.trim());
     let region = cart.region;
     let snes = Snes::new(cart);
@@ -59,7 +67,9 @@ pub fn run(cart: Cartridge) -> Result<(), String> {
         audio,
         audio_scratch: Vec::new(),
     };
-    event_loop.run_app(&mut app).map_err(|e| format!("event loop: {e}"))
+    let result = event_loop.run_app(&mut app).map_err(|e| format!("event loop: {e}"));
+    save::save_if_dirty(&app.snes.bus.cart, &save_path, &sram_baseline);
+    result
 }
 
 struct App {

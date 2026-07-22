@@ -68,7 +68,8 @@ pub struct Apu {
     timers: [Timer; 3],
     /// $F0 TEST (power-on $0A: RAM writes + timers enabled).
     test: u8,
-    /// $F1 CONTROL last written value.
+    /// $F1 CONTROL last written value. Power-on / reset = $80 (bit7 IPL-ROM
+    /// enable set; timers disabled).
     control: u8,
     /// $F2 DSPADDR (bit7 = write-protect DSP data).
     dspaddr: u8,
@@ -117,7 +118,7 @@ impl Apu {
             dsp: Dsp::new(),
             timers: [Timer::new(T01_PERIOD), Timer::new(T01_PERIOD), Timer::new(T2_PERIOD)],
             test: 0x0A,
-            control: 0,
+            control: 0x80,
             dspaddr: 0,
             ipl_enabled: true,
             master_hz: 21_477_272,
@@ -149,7 +150,14 @@ impl Apu {
     }
 
     /// Re-fetch the reset vector and jump the SPC700 to the IPL entry ($FFC0).
+    /// Restores CONTROL to its power-on value $80: IPL ROM enabled at $FFC0, all
+    /// three timers disabled.
     pub fn reset(&mut self) {
+        self.control = 0x80;
+        self.ipl_enabled = true;
+        for t in self.timers.iter_mut() {
+            t.enabled = false;
+        }
         let Apu {
             spc,
             ram,
@@ -357,11 +365,11 @@ impl<'a> SpcMem<'a> {
             0xF1 => {
                 for i in 0..3 {
                     let en = val & (1 << i) != 0;
-                    // 0->1 transition resets the timer's internal counter and TnOUT.
+                    // 0->1 transition resets only the stage-2 counter and the
+                    // 4-bit TnOUT; the free-running stage-1 prescaler is untouched.
                     if en && !self.timers[i].enabled {
                         self.timers[i].stage = 0;
                         self.timers[i].out = 0;
-                        self.timers[i].prescaler = 0;
                     }
                     self.timers[i].enabled = en;
                 }
@@ -456,6 +464,50 @@ mod tests {
             t.tick(1, false); // TEST halt => no ticks
         }
         assert_eq!(t.out, 0);
+    }
+
+    #[test]
+    fn control_power_on_and_reset_is_80() {
+        // Power-on CONTROL = $80: IPL ROM enabled, timers disabled.
+        let mut apu = Apu::new();
+        assert_eq!(apu.control, 0x80);
+        assert!(apu.ipl_enabled);
+        // A driver may clear IPL enable / enable timers; reset restores $80.
+        {
+            let Apu {
+                ram, dsp, timers, test, control, dspaddr, ipl_enabled, ports_from_cpu, ports_to_cpu, ..
+            } = &mut apu;
+            let mut mem = SpcMem {
+                ram, dsp, timers, test, control, dspaddr, ipl_enabled, ports_from_cpu, ports_to_cpu,
+            };
+            mem.io_write(0xF1, 0x07); // enable timers 0/1/2, clear IPL enable
+        }
+        assert_eq!(apu.control, 0x07);
+        assert!(!apu.ipl_enabled);
+        apu.reset();
+        assert_eq!(apu.control, 0x80);
+        assert!(apu.ipl_enabled);
+        assert!(!apu.timers[0].enabled);
+    }
+
+    #[test]
+    fn timer_enable_transition_keeps_prescaler() {
+        // CONTROL 0->1 resets stage-2 counter and TnOUT but NOT the stage-1
+        // prescaler divider.
+        let mut apu = Apu::new();
+        let Apu {
+            ram, dsp, timers, test, control, dspaddr, ipl_enabled, ports_from_cpu, ports_to_cpu, ..
+        } = &mut apu;
+        let mut mem = SpcMem {
+            ram, dsp, timers, test, control, dspaddr, ipl_enabled, ports_from_cpu, ports_to_cpu,
+        };
+        mem.timers[0].prescaler = 100;
+        mem.timers[0].stage = 5;
+        mem.timers[0].out = 9;
+        mem.io_write(0xF1, 0x01); // enable timer 0 (0->1)
+        assert_eq!(mem.timers[0].prescaler, 100, "prescaler must be preserved");
+        assert_eq!(mem.timers[0].stage, 0);
+        assert_eq!(mem.timers[0].out, 0);
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 A Super Nintendo (SNES / Super Famicom) emulator written from scratch in Rust — CPU, PPU, and a full audio path, no platform SDKs beyond a pure-Rust window/input/audio stack.
 
-![SMAS select menu](docs/menu_m6.png)
+![SMAS select menu](docs/screenshots/smas_menu.png)
 
 *Super Mario All-Stars "SELECT GAME" menu, rendered by the emulator (background layers + sprites + color-math subscreen compositing).*
 
@@ -12,18 +12,26 @@ Playable rendering and audio for base-console (no cartridge coprocessors) LoROM/
 
 | Area | State |
 |---|---|
-| 65C816 CPU | Full instruction set, emulation/native modes, BCD, interrupts |
+| 65C816 CPU | Full instruction set, emulation/native modes, BCD, interrupts, native-stack ops |
 | SPC700 + IPL | Complete; runs games' real sound drivers |
 | S-DSP audio | BRR, Gaussian interpolation, ADSR/GAIN, noise, pitch modulation, echo |
 | PPU | BG modes 0–6 (2/4/8bpp), sprites, windows, color math, mosaic, HDMA |
 | Mode 7 | Code-complete + unit-tested, not yet validated on an in-game screen |
 | DMA | GDMA + HDMA (indirect, per-line) |
-| Cartridge | LoROM / HiROM detection, SRAM, region detection |
-| Frontend | winit + pixels window, cpal audio, headless mode with PNG/WAV/trace dumps |
+| Timing / IRQ | NMI, H/V IRQ ($4207–$420A), FastROM ($420D), open-bus (MDR) |
+| Cartridge | LoROM / HiROM detection, region detection, battery SRAM |
+| Frontend | winit + pixels window, cpal audio, headless mode with PNG/WAV/trace dumps, battery-SRAM persistence |
 
-183 core unit tests pass. Verified end-to-end on commercial games (backgrounds, sprites, color-math menus, and real in-game music confirmed by WAV analysis).
+195 core unit tests pass. Verified end-to-end on all three test games: backgrounds, sprites,
+color-math menus, real in-game music (WAV-analysed), and input-driven gameplay — Mario runs and
+jumps through a level, the camera scrolls, and H/V-IRQ raster splits and battery saves work.
 
-Not yet done: on-disk SRAM persistence, cycle-accurate FastROM timing, H/V IRQ edge cases, a broad compatibility pass, and an in-game Mode 7 gate. See `docs/PUNCHLIST.md`.
+![Gameplay](docs/screenshots/smb1_gameplay.png)
+
+Known gaps: the Super Mario World *attract-mode intro* reaches gameplay but its cutscene state
+machine doesn't advance to the overworld (diagnosed, root cause not yet isolated); Mode 7 is not
+gated on a real in-game screen; an in-game SRAM save-menu write hasn't been exercised. See
+`docs/PUNCHLIST.md`.
 
 ## Build & run
 
@@ -45,6 +53,12 @@ Controls:
 
 Emulator hotkeys: `P` pause, `N` frame-advance (while paused), `Esc` quit.
 
+Battery-backed cartridges save to a `.srm` sidecar next to the ROM (e.g.
+`game.sfc` -> `game.srm`; for a `.zip`, next to the zip using its base name).
+The save loads on startup and is written back on exit, but only if SRAM
+contents actually changed (an untouched save is never rewritten). Override
+the path with `--save PATH`.
+
 ### Headless / debugging
 
 ```sh
@@ -53,6 +67,7 @@ cargo run --release -p snes-frontend -- game.sfc --headless --frames 600 --dump-
 cargo run --release -p snes-frontend -- game.sfc --headless --frames 1500 --dump-audio out.wav
 cargo run --release -p snes-frontend -- game.sfc --disasm                # disassemble from reset vector
 cargo run --release -p snes-frontend -- game.sfc --trace t.log --trace-start-frame 0 --trace-end-frame 2
+cargo run --release -p snes-frontend -- game.sfc --save /path/to/slot1.srm  # override the default sidecar
 ```
 
 Trace output is Mesen2-compatible for diffing against a reference emulator.

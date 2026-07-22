@@ -205,6 +205,39 @@ impl Cpu {
         lo | (hi << 8)
     }
 
+    /// Stack push for the "new" 65C816 stack ops (PEA/PEI/PER/PHD/PLD/JSL/RTL).
+    /// The stack pointer is the full 16-bit register: even in emulation mode S is
+    /// decremented mod $10000 with no per-byte page-1 wrap, so a multi-byte push
+    /// may temporarily leave page 1. `stack_end` re-imposes SH=$01 afterwards.
+    pub(crate) fn push8_new<B: CpuBus>(&mut self, bus: &mut B, v: u8) {
+        bus.write(self.s as u32, v);
+        self.s = self.s.wrapping_sub(1);
+    }
+
+    pub(crate) fn pull8_new<B: CpuBus>(&mut self, bus: &mut B) -> u8 {
+        self.s = self.s.wrapping_add(1);
+        bus.read(self.s as u32)
+    }
+
+    pub(crate) fn push16_new<B: CpuBus>(&mut self, bus: &mut B, v: u16) {
+        self.push8_new(bus, (v >> 8) as u8);
+        self.push8_new(bus, v as u8);
+    }
+
+    pub(crate) fn pull16_new<B: CpuBus>(&mut self, bus: &mut B) -> u16 {
+        let lo = self.pull8_new(bus) as u16;
+        let hi = self.pull8_new(bus) as u16;
+        lo | (hi << 8)
+    }
+
+    /// Re-impose emulation-mode SH=$01 after a "new" stack op completes; a no-op
+    /// in native mode where S is already a full 16-bit register.
+    pub(crate) fn stack_end(&mut self) {
+        if self.emulation {
+            self.s = 0x0100 | (self.s & 0x00FF);
+        }
+    }
+
     // ---- Register width helpers ----
 
     /// True when the accumulator/memory is 8-bit (P.M=1).
@@ -397,6 +430,98 @@ mod tests {
         }
         assert_eq!(cpu.a & 0xFF, 0x42);
         assert_eq!(cpu.pc, 0x8004); // returned to instruction after JSR, then STP fetched
+    }
+
+    /// Fetch the opcode at PBR:PC and execute it, bypassing the interrupt path.
+    fn run_one(cpu: &mut Cpu, bus: &mut FlatBus) {
+        let op = cpu.fetch8(bus);
+        cpu.execute(bus, op);
+    }
+
+    #[test]
+    fn native_stack_wraps_full_16bit() {
+        // Native mode 16-bit PHA at S=$0000: full 16-bit stack, no page-1 confine.
+        let mut bus = FlatBus::new();
+        let mut cpu = Cpu::new();
+        cpu.emulation = false;
+        cpu.p.set_m(false);
+        cpu.s = 0x0000;
+        cpu.a = 0x1234;
+        cpu.pbr = 0;
+        cpu.pc = 0x8000;
+        bus.load(0x008000, &[0x48]); // PHA
+        run_one(&mut cpu, &mut bus);
+        assert_eq!(cpu.s, 0xFFFE);
+        assert_eq!(bus.read(0x000000), 0x12); // high byte pushed first
+        assert_eq!(bus.read(0x00FFFF), 0x34); // low byte wraps below $0000
+    }
+
+    #[test]
+    fn emu_new_op_pea_does_not_page1_wrap() {
+        // Emulation mode PEA at S=$0100: hi→$000100, lo→$0000FF (no page-1 wrap),
+        // then SH forced back to $01 (ref example: S=$0100 → S=$01FE).
+        let mut bus = FlatBus::new();
+        let mut cpu = Cpu::new();
+        cpu.s = 0x0100;
+        cpu.pbr = 0;
+        cpu.pc = 0x8000;
+        bus.load(0x008000, &[0xF4, 0xCD, 0xAB]); // PEA #$ABCD
+        run_one(&mut cpu, &mut bus);
+        assert_eq!(bus.read(0x000100), 0xAB);
+        assert_eq!(bus.read(0x0000FF), 0xCD);
+        assert_eq!(cpu.s, 0x01FE);
+    }
+
+    #[test]
+    fn emu_old_op_pha_still_page1_wraps() {
+        // Emulation mode PHA at S=$0100 must confine to page 1: S wraps to $01FF.
+        let mut bus = FlatBus::new();
+        let mut cpu = Cpu::new();
+        cpu.s = 0x0100;
+        cpu.a = 0x42;
+        cpu.pbr = 0;
+        cpu.pc = 0x8000;
+        bus.load(0x008000, &[0x48]); // PHA (8-bit in emulation)
+        run_one(&mut cpu, &mut bus);
+        assert_eq!(bus.read(0x000100), 0x42);
+        assert_eq!(cpu.s, 0x01FF);
+    }
+
+    #[test]
+    fn emu_stack_relative_crosses_page_no_wrap() {
+        // Stack-relative is a "new" mode: S+off is a 16-bit bank-0 address that
+        // does not page-wrap. LDA $02,S at S=$01FF reads $000201, not $000101.
+        let mut bus = FlatBus::new();
+        let mut cpu = Cpu::new();
+        cpu.s = 0x01FF;
+        cpu.pbr = 0;
+        cpu.pc = 0x8000;
+        bus.load(0x008000, &[0xA3, 0x02]); // LDA $02,S
+        bus.load(0x000201, &[0x77]);
+        bus.load(0x000101, &[0x55]); // would be read if it wrongly wrapped
+        run_one(&mut cpu, &mut bus);
+        assert_eq!(cpu.a & 0xFF, 0x77);
+    }
+
+    #[test]
+    fn jsl_rtl_roundtrip_native() {
+        // JSL pushes PBR + 16-bit return; RTL restores both. Verify across banks.
+        let mut bus = FlatBus::new();
+        let mut cpu = Cpu::new();
+        cpu.emulation = false;
+        cpu.s = 0x1FFF;
+        cpu.pbr = 0x12;
+        cpu.pc = 0x8000;
+        bus.load(0x128000, &[0x22, 0x34, 0x12, 0x7E]); // JSL $7E1234
+        bus.load(0x7E1234, &[0x6B]); // RTL
+        run_one(&mut cpu, &mut bus); // JSL
+        assert_eq!(cpu.pbr, 0x7E);
+        assert_eq!(cpu.pc, 0x1234);
+        assert_eq!(cpu.s, 0x1FFC); // pushed PBR + 2 return bytes
+        run_one(&mut cpu, &mut bus); // RTL
+        assert_eq!(cpu.pbr, 0x12);
+        assert_eq!(cpu.pc, 0x8004); // return addr ($8003, last JSL byte) + 1
+        assert_eq!(cpu.s, 0x1FFF);
     }
 
     #[test]

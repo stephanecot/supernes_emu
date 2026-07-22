@@ -3,6 +3,7 @@
 
 mod audio;
 mod input;
+mod save;
 mod video;
 
 use std::cell::RefCell;
@@ -36,6 +37,7 @@ struct Args {
     script: Option<PathBuf>,
     dump_state: Option<PathBuf>,
     dump_audio: Option<PathBuf>,
+    save: Option<PathBuf>,
 }
 
 const USAGE: &str = "usage: snes-frontend <rom.sfc|.smc|.zip> [flags]
@@ -50,7 +52,8 @@ const USAGE: &str = "usage: snes-frontend <rom.sfc|.smc|.zip> [flags]
   --watch BB:AAAA                       log every read/write at a bus address
   --script PATH                         input script: <frame> <button> <held>
   --dump-state DIR                      dump wram/vram/cgram/oam/apuram on exit
-  --dump-audio PATH.wav                 headless: write 32kHz 16-bit stereo WAV";
+  --dump-audio PATH.wav                 headless: write 32kHz 16-bit stereo WAV
+  --save PATH                           battery SRAM file (default: <rom>.srm)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -104,6 +107,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             "--script" => a.script = Some(value(&mut it, "--script")?.into()),
             "--dump-state" => a.dump_state = Some(value(&mut it, "--dump-state")?.into()),
             "--dump-audio" => a.dump_audio = Some(value(&mut it, "--dump-audio")?.into()),
+            "--save" => a.save = Some(value(&mut it, "--save")?.into()),
             "--help" | "-h" => return Err("help requested".into()),
             s if s.starts_with("--") => return Err(format!("unknown flag: {s}")),
             _ => {
@@ -135,7 +139,14 @@ fn parse_bus_addr(s: &str) -> Result<(u8, u16), String> {
 fn run(args: Args) -> Result<(), String> {
     let rom_path = args.rom.as_ref().unwrap();
     let bytes = load_rom_bytes(rom_path)?;
-    let cart = Cartridge::from_bytes(bytes)?;
+    let mut cart = Cartridge::from_bytes(bytes)?;
+
+    // Sidecar SRAM save: loaded before Snes::new so the game's own init code
+    // (which typically reads its save-flag byte early) sees restored state.
+    // `sram_baseline` is the post-load snapshot; save::save_if_dirty diffs
+    // against it on exit so an untouched cart is never rewritten.
+    let save_path = args.save.clone().unwrap_or_else(|| save::default_save_path(rom_path));
+    let sram_baseline = save::load_sram(&mut cart, &save_path);
 
     if args.info {
         print_info(&cart);
@@ -152,7 +163,7 @@ fn run(args: Args) -> Result<(), String> {
         if args.dump_audio.is_some() {
             eprintln!("--dump-audio requires --headless; ignoring (windowed mode plays live)");
         }
-        return video::run(cart);
+        return video::run(cart, save_path, sram_baseline);
     }
 
     let script = match &args.script {
@@ -223,6 +234,11 @@ fn run(args: Args) -> Result<(), String> {
             }
         }
     }
+
+    // Persist SRAM as soon as the run loop is done, ahead of the optional
+    // dump/trace-flush steps below, so a failure writing a debug artifact
+    // never costs the player their save.
+    save::save_if_dirty(&snes.bus.cart, &save_path, &sram_baseline);
 
     if let Some(w) = trace_writer.as_mut() {
         w.flush().map_err(|e| format!("flush trace: {e}"))?;

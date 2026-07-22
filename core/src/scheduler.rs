@@ -172,12 +172,12 @@ impl Scheduler {
         }
     }
 
-    /// Recompute `irq_target` for the current line from `irq_mode`/`htime`/
-    /// `vtime`. Called once per line and whenever the H/V-IRQ registers are
-    /// written. Per-line granularity: does not model the sub-line 4-8 cycle
+    /// Compute the H/V-IRQ trigger timestamp for the current line from
+    /// `irq_mode`/`htime`/`vtime`, or `None` if the mode does not fire this
+    /// line. Per-line granularity: does not model the sub-line 4-8 cycle
     /// read-ack window of timing.md ยง6.
-    fn rearm_irq(&mut self) {
-        self.irq_target = match self.irq_mode {
+    fn compute_irq_target(&self) -> Option<u64> {
+        match self.irq_mode {
             0 => None,
             1 => Some(self.line_start + Self::h_irq_offset(self.htime)),
             2 => {
@@ -195,6 +195,28 @@ impl Scheduler {
                 }
             }
             _ => None,
+        }
+    }
+
+    /// End-of-line rearm: unconditional. Must arm even a target that is already
+    /// <= `clock`, because a long/DMA `tick` can jump `clock` past the trigger
+    /// point of the line just entered; `check_irq` then fires it correctly.
+    fn rearm_irq(&mut self) {
+        self.irq_target = self.compute_irq_target();
+    }
+
+    /// Register-write rearm ($4200 mode / HTIME / VTIME). The H/V comparator
+    /// matches the live counter: once H has already passed the (new) trigger
+    /// position on the current line, no match occurs until H wraps at the next
+    /// scanline (timing.md ยง6). Arm `None` when the computed trigger is strictly
+    /// in the past this line so that writing a smaller HTIME mid-line does not
+    /// spuriously retrigger; the unconditional `end_of_line` rearm handles all
+    /// subsequent lines. A trigger landing exactly on `clock` still fires
+    /// (timing.md ยง6: "enabling IRQs exactly on the trigger cycle still fires").
+    fn rearm_irq_write(&mut self) {
+        self.irq_target = match self.compute_irq_target() {
+            Some(t) if t < self.clock => None,
+            other => other,
         };
     }
 
@@ -235,27 +257,27 @@ impl Scheduler {
         if self.irq_mode == 0 {
             self.irq_pending = false;
         }
-        self.rearm_irq();
+        self.rearm_irq_write();
     }
 
     pub fn set_htime_lo(&mut self, value: u8) {
         self.htime = (self.htime & 0x100) | value as u16;
-        self.rearm_irq();
+        self.rearm_irq_write();
     }
 
     pub fn set_htime_hi(&mut self, value: u8) {
         self.htime = (self.htime & 0x0FF) | (((value & 1) as u16) << 8);
-        self.rearm_irq();
+        self.rearm_irq_write();
     }
 
     pub fn set_vtime_lo(&mut self, value: u8) {
         self.vtime = (self.vtime & 0x100) | value as u16;
-        self.rearm_irq();
+        self.rearm_irq_write();
     }
 
     pub fn set_vtime_hi(&mut self, value: u8) {
         self.vtime = (self.vtime & 0x0FF) | (((value & 1) as u16) << 8);
-        self.rearm_irq();
+        self.rearm_irq_write();
     }
 
     /// Horizontal position in master cycles within the current line.
@@ -380,6 +402,43 @@ mod tests {
             assert!(!s.irq_pending);
         }
         s.tick(20); // past the H=~2.5-dot trigger point of line 5
+        assert!(s.irq_pending);
+    }
+
+    #[test]
+    fn rewriting_past_htime_midline_does_not_retrigger() {
+        let mut s = Scheduler::new(Region::Pal);
+        s.set_htime_lo(10); // trigger at 14 + 10*4 = 54 cycles into the line
+        s.set_htime_hi(0);
+        s.set_irq_mode(1);
+        s.tick(54);
+        assert!(s.irq_pending);
+        s.irq_pending = false;
+        // Mid-line, past the trigger position: rewriting a <= current HTIME must
+        // NOT arm a past timestamp that re-fires this line (timing.md ยง6).
+        s.tick(100); // now ~154 cycles into the line, past H=10's trigger
+        s.set_htime_lo(5); // trigger would be at 34 cycles, already passed
+        s.tick(1);
+        assert!(!s.irq_pending);
+        // The next line's unconditional rearm still fires H-mode.
+        s.tick(CYCLES_PER_LINE);
+        assert!(s.irq_pending);
+    }
+
+    #[test]
+    fn rewriting_future_htime_midline_arms_this_line() {
+        let mut s = Scheduler::new(Region::Pal);
+        s.set_htime_lo(10);
+        s.set_htime_hi(0);
+        s.set_irq_mode(1);
+        s.tick(54);
+        assert!(s.irq_pending);
+        s.irq_pending = false;
+        // Still before a later trigger position: rewriting a larger HTIME arms a
+        // future same-line match, which the live comparator would still hit.
+        s.tick(20); // ~74 cycles into the line
+        s.set_htime_lo(200); // trigger at 14 + 200*4 = 814 cycles
+        s.tick(814 - 74);
         assert!(s.irq_pending);
     }
 

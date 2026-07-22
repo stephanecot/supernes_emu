@@ -31,6 +31,12 @@ const CPU_VERSION: u8 = 2;
 /// from the read start at vblank (timing.md §7-8).
 const AUTO_JOYPAD_CYCLES: u64 = 4224;
 
+/// Master-cycle offset from the vblank line start (H=0) to the auto-joypad read
+/// start. Hardware begins between H=32.5 and H=95.5 (H=74.5 on the first frame);
+/// 74.5 dots * 4 = 298 master cycles (timing.md §8). The JOY snapshot value is
+/// input-latch-invariant within a frame, so only the busy window is offset here.
+const AUTO_JOYPAD_START_OFFSET: u64 = 298;
+
 /// GP-DMA master-cycle costs (timing.md §10). Alignment padding (2-8 cycles
 /// before/after each pause) is not modeled; documented approximation.
 const GDMA_WHOLE_OVERHEAD: u64 = 8;
@@ -202,13 +208,25 @@ impl Bus {
                 // First 8KB of WRAM mirrored in every system bank.
                 0x0000..=0x1FFF => self.wram[off as usize],
                 0x2100..=0x213F => {
-                    // $2137 SLHV latches the live H/V counters; feed them from
-                    // the scheduler first (mmio.md §7). 1 dot = 4 master cycles.
+                    // $2137 SLHV latches the live H/V counters into OPHCT/OPVCT,
+                    // but only when $4201 (WRIO) bit7 is set: every H/V-counter
+                    // latch trigger is gated by WRIO.7 (fullsnes: "working only
+                    // if WRIO.Bit7 is (or was) set"). Feed the scheduler H/V
+                    // first. 1 dot = 4 master cycles. $2137 always drives CPU
+                    // open bus (mmio.md §7).
                     if off == 0x2137 {
-                        let h = (self.scheduler.h_cycles() / 4) as u16;
-                        self.ppu.set_hv_counters(h, self.scheduler.v);
+                        if self.wrio & 0x80 != 0 {
+                            // OPHCT range is 0-339 (fullsnes); a latch in the
+                            // final ~2 dots of the 1364-cycle line would compute
+                            // 340 without the long-dot layout, so clamp.
+                            let h = ((self.scheduler.h_cycles() / 4) as u16).min(339);
+                            self.ppu.set_hv_counters(h, self.scheduler.v);
+                            self.ppu.read(0x37);
+                        }
+                        self.mdr
+                    } else {
+                        self.ppu.read((off & 0xFF) as u8).unwrap_or(self.mdr)
                     }
-                    self.ppu.read((off & 0xFF) as u8).unwrap_or(self.mdr)
                 }
                 // APU ports, mirrored every 4 bytes across $2140-$217F. Catch
                 // the APU up to the current master-clock time before every
@@ -225,6 +243,14 @@ impl Bus {
                     v
                 }
                 // $2181-$2183 are write-only: open bus.
+                // Divergence (timing.md §8, mmio.md line 114): on hardware,
+                // reading $4016/$4017 or $4218-$421F while the auto-joypad busy
+                // window ($4212.0) is active returns values corrupted by the
+                // auto-read shift state machine. We return the clean values
+                // regardless; games are required to poll $4212.0 first, so a
+                // correctly-written game never observes the difference, and
+                // returning open-bus garbage risks breaking a game that reads
+                // without polling. Not modeled by design.
                 // $4016 JOYA: bit0 = port1 data1, bit1 = port1 data2 (no
                 // multitap modeled -> 0), bits7-2 open bus (mmio.md §6).
                 0x4016 => (self.mdr & 0xFC) | (self.joypads[0].read() & 1),
@@ -448,10 +474,13 @@ impl Bus {
     }
 
     /// Latch the PPU H/V counters exactly as a $2137 SLHV read does, feeding
-    /// the live scheduler H/V first. Shared by the $4201 bit7 1->0 edge
-    /// (mmio.md §7). 1 dot = 4 master cycles.
+    /// the live scheduler H/V first. Called on the $4201 bit7 1->0 edge
+    /// (mmio.md §7). The WRIO.7 gate that guards $2137 is inherently satisfied
+    /// here: the pin "was set" immediately before this falling edge. 1 dot =
+    /// 4 master cycles.
     fn latch_hv_counters(&mut self) {
-        let h = (self.scheduler.h_cycles() / 4) as u16;
+        // OPHCT range 0-339 (fullsnes); clamp the flat dot count (see $2137).
+        let h = ((self.scheduler.h_cycles() / 4) as u16).min(339);
         self.ppu.set_hv_counters(h, self.scheduler.v);
         self.ppu.read(0x37);
     }
@@ -467,8 +496,12 @@ impl Bus {
             // 8, PUNCHLIST M5). Busy flag then held for 4224 master cycles.
             if self.nmitimen & 0x01 != 0 && !self.joypads[0].strobe {
                 self.latch_auto_joypad();
-                self.auto_joypad_busy_until =
-                    self.scheduler.clock + AUTO_JOYPAD_CYCLES;
+                // Read starts at H≈74.5 of the vblank line, not H=0 where this
+                // pulse fires; anchor the busy window to the line start so its
+                // start/end land ~298 cycles later (timing.md §8).
+                self.auto_joypad_busy_until = self.scheduler.line_start
+                    + AUTO_JOYPAD_START_OFFSET
+                    + AUTO_JOYPAD_CYCLES;
             }
         }
         // HDMA (init at V=0, per-line transfers at H=278 of V=0..vblank_line-1)
@@ -1268,6 +1301,62 @@ mod tests {
     }
 
     #[test]
+    fn counter_latch_read_sequence() {
+        let mut bus = test_bus();
+        // WRIO bit7 is set at reset ($FF): the SLHV latch gate is open.
+        bus.scheduler.tick(300 * 4); // dot 300 of line 0 (V=0)
+        bus.read_no_tick(0x00_2137); // SLHV: latch H=300, V=0
+        assert!(bus.ppu.counter_latched); // $213F bit6
+        // OPHCT $213C flip-flop: 1st read = low byte, 2nd read = high bit (+
+        // PPU2 open bus in the upper 7 bits, so mask bit0).
+        assert_eq!(bus.read_no_tick(0x00_213C), (300 & 0xFF) as u8);
+        assert_eq!(bus.read_no_tick(0x00_213C) & 0x01, ((300 >> 8) & 1) as u8);
+        // OPVCT $213D: low then high; V=0.
+        assert_eq!(bus.read_no_tick(0x00_213D), 0);
+        assert_eq!(bus.read_no_tick(0x00_213D) & 0x01, 0);
+        // Reading $213F resets both read flip-flops and the latch flag.
+        bus.read_no_tick(0x00_213F);
+        assert!(!bus.ppu.counter_latched);
+        // Flip-flop reset: the next $213C read is the low byte again.
+        assert_eq!(bus.read_no_tick(0x00_213C), (300 & 0xFF) as u8);
+    }
+
+    #[test]
+    fn slhv_latch_gated_by_wrio_bit7() {
+        let mut bus = test_bus();
+        // Clearing WRIO bit7 is itself a 1->0 edge that latches once.
+        bus.scheduler.tick(50 * 4);
+        CpuBus::write(&mut bus, 0x00_4201, 0x00);
+        assert!(bus.ppu.counter_latched);
+        bus.read_no_tick(0x00_213F); // reset latch flag + flip-flops
+        assert!(!bus.ppu.counter_latched);
+        // With WRIO bit7 clear the gate is closed: reading $2137 must NOT latch.
+        bus.scheduler.tick(100 * 4);
+        bus.read_no_tick(0x00_2137);
+        assert!(!bus.ppu.counter_latched);
+    }
+
+    #[test]
+    fn timeup_read_clears_and_deasserts_irq() {
+        let mut bus = test_bus();
+        CpuBus::write(&mut bus, 0x00_4209, 3); // VTIME low = 3
+        CpuBus::write(&mut bus, 0x00_420A, 0); // VTIME high
+        CpuBus::write(&mut bus, 0x00_4200, 0x20); // mode 2 = V-IRQ once/frame
+        while bus.scheduler.v < 3 {
+            bus.scheduler.tick(CYCLES_PER_LINE);
+            bus.post_tick();
+        }
+        bus.scheduler.tick(20); // past the V=VTIME H=~2.5 trigger
+        bus.post_tick();
+        assert!(CpuBus::irq_level(&mut bus));
+        let timeup = CpuBus::read(&mut bus, 0x00_4211);
+        assert_eq!(timeup & 0x80, 0x80); // TIMEUP bit7 set
+        assert!(!CpuBus::irq_level(&mut bus)); // read-ack de-asserted the line
+        // Second read: flag already cleared.
+        assert_eq!(CpuBus::read(&mut bus, 0x00_4211) & 0x80, 0);
+    }
+
+    #[test]
     fn joypad_read_open_bus_and_driven_bits() {
         let mut bus = test_bus();
         bus.set_inputs([
@@ -1301,7 +1390,13 @@ mod tests {
         }
         assert_eq!(bus.read_no_tick(0x00_4212) & 0x01, 0x01); // busy set
         assert_eq!(bus.read_no_tick(0x00_4218), 0x80); // A -> low-byte bit7
-        bus.scheduler.tick(AUTO_JOYPAD_CYCLES); // reach busy_until exactly
+        // The read starts at H≈74.5 (AUTO_JOYPAD_START_OFFSET) of the vblank
+        // line, so the busy window ends AUTO_JOYPAD_CYCLES after that, later
+        // than the H=0 pulse. Advance to just before `busy_until`.
+        let remaining = bus.auto_joypad_busy_until - bus.scheduler.clock;
+        bus.scheduler.tick(remaining - 1);
+        assert_eq!(bus.read_no_tick(0x00_4212) & 0x01, 0x01); // still busy
+        bus.scheduler.tick(1); // reach busy_until exactly
         assert_eq!(bus.read_no_tick(0x00_4212) & 0x01, 0x00); // busy cleared
     }
 

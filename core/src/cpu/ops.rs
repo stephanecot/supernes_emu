@@ -1160,19 +1160,26 @@ impl Cpu {
                 self.pc = target;
             }
             0x22 => {
-                let addr = self.fetch24(bus);
-                self.push8(bus, self.pbr);
+                // Hardware order: fetch AAL, AAH; push PBR; internal cycle; fetch
+                // AAB; push PCH, PCL. "New" op: no page-1 stack wrap in emulation.
+                let lo = self.fetch8(bus) as u32;
+                let mid = self.fetch8(bus) as u32;
+                self.push8_new(bus, self.pbr);
                 bus.idle();
+                let hi = self.fetch8(bus) as u32;
                 let ret = self.pc.wrapping_sub(1);
-                self.push16(bus, ret);
-                self.pbr = (addr >> 16) as u8;
-                self.pc = addr as u16;
+                self.push16_new(bus, ret);
+                self.stack_end();
+                self.pbr = hi as u8;
+                self.pc = (lo | (mid << 8)) as u16;
             }
             0xFC => {
                 let ptr = self.fetch16(bus);
                 bus.idle();
                 let ret = self.pc.wrapping_sub(1);
-                self.push16(bus, ret);
+                // "New" op: full 16-bit stack, SH forced to $01 afterward in emu.
+                self.push16_new(bus, ret);
+                self.stack_end();
                 let base = ptr.wrapping_add(self.x);
                 let lo = bus.read(((self.pbr as u32) << 16) | base as u32) as u16;
                 let hi =
@@ -1189,9 +1196,10 @@ impl Cpu {
             0x6B => {
                 bus.idle();
                 bus.idle();
-                let lo = self.pull16(bus);
+                let lo = self.pull16_new(bus);
+                self.pbr = self.pull8_new(bus);
+                self.stack_end();
                 self.pc = lo.wrapping_add(1);
-                self.pbr = self.pull8(bus);
             }
             0x40 => {
                 bus.idle();
@@ -1280,18 +1288,21 @@ impl Cpu {
             }
             0x0B => {
                 bus.idle();
-                self.push16(bus, self.d);
+                self.push16_new(bus, self.d);
+                self.stack_end();
             }
             0x2B => {
                 bus.idle();
                 bus.idle();
-                let v = self.pull16(bus);
+                let v = self.pull16_new(bus);
+                self.stack_end();
                 self.d = v;
                 self.set_nz16(v);
             }
             0xF4 => {
                 let v = self.fetch16(bus);
-                self.push16(bus, v);
+                self.push16_new(bus, v);
+                self.stack_end();
             }
             0xD4 => {
                 let off = self.fetch8(bus) as u16;
@@ -1301,13 +1312,15 @@ impl Cpu {
                 let a = self.d.wrapping_add(off);
                 let lo = bus.read(a as u32) as u16;
                 let hi = bus.read(a.wrapping_add(1) as u32) as u16;
-                self.push16(bus, lo | (hi << 8));
+                self.push16_new(bus, lo | (hi << 8));
+                self.stack_end();
             }
             0x62 => {
                 let disp = self.fetch16(bus) as i16;
                 bus.idle();
                 let v = (self.pc as i16).wrapping_add(disp) as u16;
-                self.push16(bus, v);
+                self.push16_new(bus, v);
+                self.stack_end();
             }
 
             // ---- Transfers ----
