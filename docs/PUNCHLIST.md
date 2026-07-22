@@ -31,6 +31,17 @@ Minor findings from adversarial verification + gate notes, deferred to the miles
 - M6 color math + subscreen compositing + windows + HDMA + mosaic: DONE and visually verified. SMAS "SELECT GAME" menu renders in full color (was black); Secret of Mana title + layered French intro render correctly (HiROM + HDMA). 169 core tests pass.
 - M7 (Mode 7): code-complete in ppu/mode7.rs + 3 unit tests, but NOT gated on a real in-game screen — neither SMAS nor SoM reaches Mode 7 in a headless budget (SoM's Flammie world map is deep in gameplay). Revisit opportunistically: script SMW to a Bowser fight (Mode 7) or a longer SoM run.
 
+## SMW attract-mode intro hang (KNOWN ISSUE, narrowed, unsolved)
+Super Mario World reaches gameplay (Mario runs/jumps, camera scrolls — proven) but its attract-mode INTRO cutscene ("Welcome! This is Dinosaur Land… Bowser is at it again!") never advances to the overworld.
+
+Established (not the bug): CPU alive; per-frame NMI-sync flag $00:0010 set/consumed normally; NMI every frame; H/V IRQ taken (vector $00:FFEE, VTIME splits 55/36, NMITIMEN toggles $A1/$81); auto-joypad + input all work. So NMI/IRQ/input are NOT the cause — the intro state machine advances each frame but its completion condition is never met.
+
+Narrowed to: the intro-advance gate depends on WRAM $1426 and $13BF (and $13D2 downstream). At the hang, the dump shows $1426=1 while the ROM's decision logic given ($1426=1, $13BF=0) correctly yields $13D2=0 — so the divergence is UPSTREAM in how $1426/$13BF get set during message setup. The write of $1426=1 comes from a bank not yet watched (00/30/35 were only seen writing them =0). Hot intro-handler addresses: 30:8E0C-8E30, 30:AE4A-AE4E.
+
+Next step for a fresh session (with stable infra): --watch $00:1426 and $00:13BF across ALL banks during the message-setup window, find the instruction that writes $1426=1, and trace back what condition it reflects (likely a mistimed PPU/IRQ/APU event or an open-bus/counter-latch read the message-setup polls). Three automated debug attempts were killed by API/infra errors mid-investigation, not by lack of a lead.
+
+Impact: also blocks the Mode 7 real-screen gate (SMW's Mode 7 is the Bowser fight, behind this intro).
+
 ## Tooling
 - `--trace-spc` is a no-op: expose an SPC700 trace hook in the APU core (needed for M8 debugging). DO THIS IN M8.
 - `--log-mmio` matches on low-16-bits only, so WRAM shadow writes at `$7E/$7F:21xx`/`:42xx` are logged as FAKE `$21xx/$42xx` register events — actively misleading. Fix: only log when the access is to a real mapped register bank ($00-$3F/$80-$BF). DO THIS IN M8 (audio debugging depends on trustworthy MMIO logs).
