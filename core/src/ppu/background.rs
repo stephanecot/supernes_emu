@@ -59,12 +59,21 @@ pub fn render_bg_line(ppu: &Ppu, bg_index: usize, line: u16, out: &mut [LayerPix
     let tile16 = ppu.bg_tile_size[bg_index];
     let tile_px: u32 = if tile16 { 16 } else { 8 };
 
+    // Modes 5/6 are hires (512 dots): the PPU forces BG tiles to 16 px WIDE
+    // (char N = left 8, char N+1 = right 8, i.e. the horizontal half of a
+    // 16x16 tile — ppu.md §4). The 512-dot line is decimated 2:1 into the
+    // 256-wide framebuffer, keeping the main-screen even half-dots (ppu.md §11).
+    // Vertical tile size is unaffected by hires.
+    let hires = matches!(ppu.bg_mode, 5 | 6);
+    let tw_px: u32 = if hires { 16 } else { tile_px };
+    let th_px: u32 = tile_px;
+
     let map_base = ppu.bg_map_base[bg_index] as u32;
     let map_size = ppu.bg_map_size[bg_index];
     let width_tiles: u32 = if map_size & 0x01 != 0 { 64 } else { 32 };
     let height_tiles: u32 = if map_size & 0x02 != 0 { 64 } else { 32 };
-    let map_w_px = width_tiles * tile_px;
-    let map_h_px = height_tiles * tile_px;
+    let map_w_px = width_tiles * tw_px;
+    let map_h_px = height_tiles * th_px;
 
     let char_base = ppu.bg_char_base[bg_index] as u32;
     // Words per tile: 2bpp=8, 4bpp=16, 8bpp=32.
@@ -97,11 +106,14 @@ pub fn render_bg_line(ppu: &Ppu, bg_index: usize, line: u16, out: &mut [LayerPix
             x as u32
         };
 
-        let fx = (sx + hofs) & (map_w_px - 1);
+        // Hires: display column x samples the even half-dot 2*x of the 512-dot
+        // BG field (scroll folded in at hires resolution).
+        let field_x = if hires { sx * 2 } else { sx };
+        let fx = (field_x + hofs) & (map_w_px - 1);
         let fy = (sy + vofs) & (map_h_px - 1);
 
-        let tile_col = fx / tile_px;
-        let tile_row = fy / tile_px;
+        let tile_col = fx / tw_px;
+        let tile_row = fy / th_px;
 
         let entry_addr = tilemap_entry_addr(map_base, map_size, tile_col, tile_row);
         let entry = ppu.vram[entry_addr as usize];
@@ -112,14 +124,14 @@ pub fn render_bg_line(ppu: &Ppu, bg_index: usize, line: u16, out: &mut [LayerPix
         let hflip = entry & 0x4000 != 0;
         let vflip = entry & 0x8000 != 0;
 
-        // In-tile coordinates with flips applied (0..tile_px).
-        let mut ix = fx % tile_px;
-        let mut iy = fy % tile_px;
+        // In-tile coordinates with flips applied (0..tw_px / 0..th_px).
+        let mut ix = fx % tw_px;
+        let mut iy = fy % th_px;
         if hflip {
-            ix = tile_px - 1 - ix;
+            ix = tw_px - 1 - ix;
         }
         if vflip {
-            iy = tile_px - 1 - iy;
+            iy = th_px - 1 - iy;
         }
         // 16x16 tiles are four 8x8 subtiles at char +0,+1,+16,+17.
         let sub_x = ix / 8;

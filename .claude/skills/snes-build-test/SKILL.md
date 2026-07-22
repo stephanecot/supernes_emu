@@ -16,7 +16,7 @@ description: Build, test, lint and run the SNES emulator (Rust workspace) — ru
 
 `cargo run --release -p snes-frontend -- <rom> [flags]`
 
-`<rom>` accepts `.sfc`/`.smc` raw or `.zip` (first ROM entry inside). **This contract is what all agents rely on — if you change a flag, update this file in the same change.**
+`<rom>` accepts `.sfc`/`.smc` raw or `.zip` (first ROM entry inside). If omitted and `--headless` is not set, a native file-open dialog (rfd, filtered to `.sfc`/`.smc`/`.zip`, starting in `roms/` if present) is shown instead — not usable from a headless/agent shell; agents must always pass `<rom>` explicitly. `--headless` still requires `<rom>` explicitly (errors otherwise). **This contract is what all agents rely on — if you change a flag, update this file in the same change.**
 
 | Flag | Behavior |
 |---|---|
@@ -31,6 +31,8 @@ description: Build, test, lint and run the SNES emulator (Rust workspace) — ru
 | `--watch BB:AAAA` | Log every read/write at a bus address |
 | `--script PATH` | Headless input script; each line: `<frame> <button> <frames_held>` with buttons `A B X Y L R Start Select Up Down Left Right` |
 | `--dump-state DIR` | On exit dump `wram.bin vram.bin cgram.bin oam.bin apuram.bin` into DIR |
+| `--load-state FILE` | Headless: `Snes::load_state` from FILE before emulating frame 0 (rejects a state saved from a different ROM) |
+| `--save-state-at FRAME FILE` | Headless: write `Snes::save_state` to FILE right after emulating frame FRAME |
 
 # ROMs (all PAL — the emulator must run them at 50 Hz)
 

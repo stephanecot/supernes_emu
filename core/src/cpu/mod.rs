@@ -5,9 +5,11 @@ pub mod addressing;
 pub mod algorithms;
 pub mod ops;
 
+use serde::{Deserialize, Serialize};
+
 /// Processor status register P. Bit layout: N V M X D I Z C (bit7..bit0).
 /// In emulation mode, bit5 (M position) is unused and bit4 (X position) is the B flag.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Flags(pub u8);
 
 macro_rules! flag_accessors {
@@ -63,6 +65,7 @@ pub trait CpuBus {
     fn irq_level(&mut self) -> bool;
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct Cpu {
     /// Accumulator (C = B:A; 8-bit A when P.M=1).
     pub a: u16,

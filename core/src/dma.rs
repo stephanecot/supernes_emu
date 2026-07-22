@@ -22,6 +22,7 @@ const TRANSFER_PATTERNS: [&[u8]; 8] = [
     &[0, 0, 1, 1], // mode 7: 4 bytes - same pattern as mode 3
 ];
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Dma {
     /// $43x0-$43xA per channel (16 bytes reserved per channel; $B-$F mirror).
     pub channels: [[u8; 12]; 8],

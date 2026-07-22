@@ -40,7 +40,13 @@ Requires a recent stable Rust toolchain.
 ```sh
 cargo build --release
 cargo run --release -p snes-frontend -- path/to/game.sfc   # or .smc / .zip
+cargo run --release -p snes-frontend                        # no path: opens a ROM picker
 ```
+
+Launching without a ROM path (and without `--headless`) opens a native
+file-open dialog filtered to `.sfc`/`.smc`/`.zip`, starting in `roms/` if that
+directory exists. Cancelling the dialog exits cleanly. `--headless` still
+requires an explicit ROM path (there is no window to attach a dialog to).
 
 Controls:
 
@@ -51,12 +57,37 @@ Controls:
 | L / R | Q / W |
 | Start / Select | Enter / Right-Shift |
 
-Emulator hotkeys: `P` pause, `N` frame-advance (while paused), `Esc` quit.
+Emulator hotkeys: `P` pause, `N` frame-advance (while paused), `O` open a
+different ROM (native file dialog; saves the current game's SRAM first,
+cancelling keeps the current game running), `F5` save state, `F9` load state,
+`Esc` quit.
+
+On macOS the windowed build also installs a native menu bar (top of screen):
+
+| Menu | Item | Shortcut | Action |
+|---|---|---|---|
+| File | Open ROM… | Cmd+O | same as the `O` hotkey |
+| File | Quit | Cmd+Q | quit (flushes battery SRAM first, same as `Esc`/window-close) |
+| Emulation | Pause / Resume | Cmd+P | same as the `P` hotkey |
+| Emulation | Reset | Cmd+R | reload the running ROM in place (power-on reset; keeps battery SRAM, same as pulling and re-inserting the same cartridge) |
+| Emulation | Save State | Cmd+S | same as `F5` |
+| Emulation | Load State | Cmd+L | same as `F9` |
+
+Keyboard hotkeys keep working alongside the menu.
+
+Save states snapshot the whole console (CPU/PPU/APU/DSP/DMA and all RAM) to a
+`.state` sidecar next to the ROM (e.g. `game.sfc` -> `game.state`; for a
+`.zip`, next to the zip using its base name). `F5`/Cmd+S writes it; `F9`/Cmd+L
+restores it. The blob stores no ROM image (the running ROM is reattached on
+load) and carries the ROM's checksum, so loading a state saved from a different
+game is rejected and the running game is left untouched. Any load error is
+printed and emulation continues.
 
 Battery-backed cartridges save to a `.srm` sidecar next to the ROM (e.g.
 `game.sfc` -> `game.srm`; for a `.zip`, next to the zip using its base name).
-The save loads on startup and is written back on exit, but only if SRAM
-contents actually changed (an untouched save is never rewritten). Override
+The save loads on startup and is written back on exit — including when you quit
+via Cmd+Q or the Quit menu item, not only via `Esc`/window-close — but only if
+SRAM contents actually changed (an untouched save is never rewritten). Override
 the path with `--save PATH`.
 
 ### Headless / debugging

@@ -47,6 +47,7 @@ enum Am {
     XPtr,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Spc700 {
     pub a: u8,
     pub x: u8,

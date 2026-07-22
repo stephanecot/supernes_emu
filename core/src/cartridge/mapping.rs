@@ -14,7 +14,7 @@
 
 use super::sram::Sram;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Mapping {
     LoRom,
     HiRom,

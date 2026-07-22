@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Rapport de construction — Émulateur SNES</title>
+<style>
+  @page { size: A4; margin: 18mm 18mm 20mm 18mm;
+    @bottom-center { content: counter(page); color: #8a8a99; font-size: 9pt; } }
+  * { box-sizing: border-box; }
+  html { font-size: 10.5pt; }
+  body { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; color: #23232b; line-height: 1.5; margin: 0; }
+  .head { border-bottom: 3px solid #4c86e0; padding-bottom: 12px; margin-bottom: 18px; }
+  .dots { display: flex; gap: 7px; margin-bottom: 12px; }
+  .dots span { width: 16px; height: 16px; border-radius: 50%; }
+  .d-blue { background: #4c86e0; } .d-red { background: #e45c5c; } .d-yellow { background: #f0c24a; } .d-green { background: #5bc15b; }
+  h1 { font-size: 21pt; margin: 0 0 4px; color: #1b1b22; }
+  .subtitle { color: #55556a; font-size: 11pt; margin: 0; }
+  h2 { font-size: 14pt; color: #1b1b22; margin: 22px 0 6px; border-bottom: 2px solid #ececf2; padding-bottom: 4px; page-break-after: avoid; }
+  p { margin: 6px 0; text-align: justify; }
+  ul { margin: 6px 0; padding-left: 20px; } li { margin: 3px 0; }
+  strong { color: #14141a; } code { font-family: Menlo, monospace; font-size: 9pt; background: #ececf3; padding: 1px 4px; border-radius: 3px; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 9.2pt; page-break-inside: avoid; }
+  th, td { border: 1px solid #e0e0ea; padding: 5px 8px; text-align: left; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: Menlo, monospace; font-size: 8.8pt; }
+  th { background: #2b2b3a; color: #fff; }
+  tr:nth-child(even) td { background: #f7f7fb; }
+  tr.total td { background: #eef4fb; font-weight: 700; border-top: 2px solid #4c86e0; }
+  .note { background: #fff8e9; border: 1px solid #f2e3bd; border-radius: 8px; padding: 10px 14px; margin: 12px 0; font-size: 9.6pt; page-break-inside: avoid; }
+  .note b { color: #a9853a; }
+  .key { background: #eef4fb; border: 1px solid #cfe0f4; border-radius: 8px; padding: 10px 14px; margin: 12px 0; page-break-inside: avoid; }
+</style>
+</head>
+<body>
+<div class="head">
+  <div class="dots"><span class="d-blue"></span><span class="d-red"></span><span class="d-yellow"></span><span class="d-green"></span></div>
+  <h1>Rapport de construction</h1>
+  <p class="subtitle">Émulateur Super Nintendo en Rust — temps de développement &amp; consommation de tokens</p>
+</div>
+
+<h2>Méthode de mesure</h2>
+<p>
+  L'émulateur a été développé par <strong>orchestration multi‑agents</strong> : des workflows
+  lançant des sous‑agents spécialisés (constructeur, vérificateur adversarial, débogueur), chacun
+  rapportant à sa fin ses <strong>tokens consommés</strong> et sa <strong>durée</strong>. Le
+  tableau agrège ces chiffres réels, phase par phase.
+</p>
+<div class="note">
+  <b>Limites à lire avant les totaux —</b>
+  Les tokens comptés sont ceux des <strong>sous‑agents</strong> (l'essentiel du travail) ; les
+  tokens de la boucle d'orchestration ne sont pas inclus. Les <strong>durées sont le temps
+  horloge de chaque workflow</strong> (parallélisme interne déjà pris en compte) ; elles ne
+  s'additionnent que parce que les workflows ont été lancés séquentiellement.
+  <strong>Deux valeurs sont gonflées par du temps d'attente</strong> (les deux phases « M3–M5 vidéo » :
+  une expiration de session, puis des relances de watchdog) — le travail effectif y est bien
+  moindre. Le temps calendaire (20–22 juillet 2026) inclut de longues pauses.
+</div>
+
+<h2>Détail par phase</h2>
+<table>
+  <tr><th>Phase</th><th>Livrable</th><th>Tokens</th><th>Durée</th></tr>
+  <tr><td>Architecture</td><td>Plan d'implémentation</td><td class="num">13,9 K</td><td class="num">4,3 min</td></tr>
+  <tr><td>Références HW</td><td>5 docs vérifiées vs nesdev/fullsnes</td><td class="num">1 122,7 K</td><td class="num">20,7 min</td></tr>
+  <tr><td>M0 — Scaffold</td><td>Workspace, loader ROM, détection</td><td class="num">96,8 K</td><td class="num">11,2 min</td></tr>
+  <tr><td>M1–M2 — Fondations</td><td>65C816, SPC700, bus, traces</td><td class="num">846,7 K</td><td class="num">72,7 min</td></tr>
+  <tr><td>M3–M5 — Vidéo (1ᵉʳ)</td><td>PPU, GDMA, joypad <em>(interrompu)</em></td><td class="num">362,3 K</td><td class="num">182,1 min *</td></tr>
+  <tr><td>M3–M5 — Vidéo (reprise)</td><td>Intégration + vérif + gate <em>(watchdog)</em></td><td class="num">927,3 K</td><td class="num">162,2 min *</td></tr>
+  <tr><td>M6–M7 — Effets</td><td>Color math, fenêtres, HDMA, Mode 7</td><td class="num">533,8 K</td><td class="num">32,4 min</td></tr>
+  <tr><td>M8 — Audio</td><td>S‑DSP complet + sortie cpal</td><td class="num">526,9 K</td><td class="num">46,1 min</td></tr>
+  <tr><td>M9–M10 — Finition</td><td>SRAM, IRQ H/V, FastROM, compat.</td><td class="num">750,2 K</td><td class="num">48,3 min</td></tr>
+  <tr><td>Bug SoM</td><td>Caractères écran de saisie (Mode 5)</td><td class="num">83,8 K</td><td class="num">12,4 min</td></tr>
+  <tr><td>Sélecteur de jeu</td><td>Dialogue natif macOS</td><td class="num">61,3 K</td><td class="num">6,0 min</td></tr>
+  <tr><td>Barre de menus</td><td>Menu natif macOS</td><td class="num">115,0 K</td><td class="num">11,2 min</td></tr>
+  <tr><td>Save states</td><td>Sérialisation + gate déterministe</td><td class="num">438,3 K</td><td class="num">33,2 min</td></tr>
+  <tr class="total"><td colspan="2">Total mesuré</td><td class="num">≈ 5,88 M</td><td class="num">≈ 642 min</td></tr>
+</table>
+<p style="font-size:9pt;color:#8a8a99;">* Durée gonflée par du temps bloqué/en attente (voir limites).</p>
+
+<h2>Non comptabilisé (estimé)</h2>
+<ul>
+  <li><strong>SA‑1 et SuperFX</strong> (puces mises en pause) : références + une partie du cœur GSU — ≈ 0,4–0,7 M tokens non rapportés.</li>
+  <li><strong>Débogages de l'intro SMW</strong> (3 sessions coupées par l'infra) : quelques centaines de milliers de tokens.</li>
+  <li><strong>Boucle d'orchestration principale</strong> : non mesurée.</li>
+</ul>
+
+<h2>Synthèse</h2>
+<div class="key">
+  <p style="margin-top:0;"><strong>Tokens :</strong> ≈ 5,9 M mesurés côté sous‑agents ; total réaliste avec les chantiers arrêtés et l'orchestration : <strong>≈ 6,5–7 M tokens</strong>.</p>
+  <p><strong>Temps effectif :</strong> le brut de 10,7 h est trompeur ; en retirant le temps bloqué des deux phases vidéo, le travail actif des agents avoisine <strong>5–6 heures</strong>, réparties sur 3 jours calendaires.</p>
+  <p style="margin-bottom:0;"><strong>Résultat :</strong> ≈ 16 000 lignes de Rust, 219 tests, un émulateur qui fait tourner 3 jeux commerciaux (image + son + sauvegardes) et une application macOS double‑cliquable (icône, barre de menus, sélecteur, save states).</p>
+</div>
+<p>
+  Les postes dominants — références matérielles (1,12 M), PPU et les deux CPU (M1–M5) —
+  reflètent la difficulté réelle du matériel émulé. L'investissement le plus rentable a été la
+  <strong>vérification adversariale</strong> des constantes matérielles : c'est l'assurance qui
+  sépare « ça marche à peu près » de « le jeu s'exécute vraiment comme sur la console ».
+</p>
+</body>
+</html>

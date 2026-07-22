@@ -52,7 +52,9 @@ const HDMA_CHANNEL_OVERHEAD: u64 = 8;
 const HDMA_INDIRECT_RELOAD: u64 = 16;
 const HDMA_PER_BYTE: u64 = 8;
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Bus {
+    #[serde(with = "crate::serde_util::boxed_bytes")]
     pub wram: Box<[u8; WRAM_SIZE]>,
     pub cart: Cartridge,
     pub ppu: Ppu,
@@ -112,7 +114,9 @@ pub struct Bus {
     /// NOT guarded so a mid-GP-DMA HDMA transfer point preempts it (timing.md
     /// §10 HDMA priority).
     hdma_running: bool,
-    /// Opt-in stderr taps for the frontend debug flags.
+    /// Opt-in stderr taps for the frontend debug flags. Not part of a save
+    /// state (host-side debug config, not emulated hardware).
+    #[serde(skip)]
     pub debug: DebugHooks,
 }
 

@@ -3,7 +3,10 @@
 
 mod audio;
 mod input;
+mod menu;
+mod picker;
 mod save;
+mod state;
 mod video;
 
 use std::cell::RefCell;
@@ -38,9 +41,12 @@ struct Args {
     dump_state: Option<PathBuf>,
     dump_audio: Option<PathBuf>,
     save: Option<PathBuf>,
+    save_state_at: Option<(u32, PathBuf)>,
+    load_state: Option<PathBuf>,
 }
 
-const USAGE: &str = "usage: snes-frontend <rom.sfc|.smc|.zip> [flags]
+const USAGE: &str = "usage: snes-frontend [rom.sfc|.smc|.zip] [flags]
+  <rom> omitted, windowed mode          open a native file-open dialog to pick a ROM
   --info                                print header info and exit
   --disasm [--addr BB:AAAA] [--count N] disassemble and exit
   --headless --frames N                 emulate N frames without a window
@@ -53,17 +59,33 @@ const USAGE: &str = "usage: snes-frontend <rom.sfc|.smc|.zip> [flags]
   --script PATH                         input script: <frame> <button> <held>
   --dump-state DIR                      dump wram/vram/cgram/oam/apuram on exit
   --dump-audio PATH.wav                 headless: write 32kHz 16-bit stereo WAV
-  --save PATH                           battery SRAM file (default: <rom>.srm)";
+  --save PATH                           battery SRAM file (default: <rom>.srm)
+  --load-state FILE                     headless: load a save-state before frame 0
+  --save-state-at FRAME FILE            headless: write a save-state after FRAME";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let parsed = match parse_args(&args) {
+    let mut parsed = match parse_args(&args) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("error: {e}\n{USAGE}");
             return ExitCode::FAILURE;
         }
     };
+    // No ROM path and not --headless: pick one with a native file dialog
+    // before building anything else, so the rest of `run` sees a ROM path
+    // exactly as if it had been passed on the command line. rfd's dialog
+    // must run on the main thread on macOS; this is the main thread and no
+    // window/event loop exists yet, so the constraint is trivially met.
+    if parsed.rom.is_none() {
+        match picker::pick_rom() {
+            Some(path) => parsed.rom = Some(path),
+            None => {
+                println!("No ROM selected; exiting.");
+                return ExitCode::SUCCESS;
+            }
+        }
+    }
     match run(parsed) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -108,6 +130,12 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             "--dump-state" => a.dump_state = Some(value(&mut it, "--dump-state")?.into()),
             "--dump-audio" => a.dump_audio = Some(value(&mut it, "--dump-audio")?.into()),
             "--save" => a.save = Some(value(&mut it, "--save")?.into()),
+            "--load-state" => a.load_state = Some(value(&mut it, "--load-state")?.into()),
+            "--save-state-at" => {
+                let frame = parse_num(&value(&mut it, "--save-state-at")?)?;
+                let file = value(&mut it, "--save-state-at")?;
+                a.save_state_at = Some((frame, file.into()));
+            }
             "--help" | "-h" => return Err("help requested".into()),
             s if s.starts_with("--") => return Err(format!("unknown flag: {s}")),
             _ => {
@@ -118,7 +146,11 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             }
         }
     }
-    if a.rom.is_none() {
+    // A missing ROM path is only an error in --headless mode (there is no
+    // window to attach a file dialog to, and every headless flag needs cart
+    // data to act on). In windowed mode `main` opens a file-open dialog
+    // instead of failing here.
+    if a.rom.is_none() && a.headless {
         return Err("no ROM path given".into());
     }
     Ok(a)
@@ -163,7 +195,7 @@ fn run(args: Args) -> Result<(), String> {
         if args.dump_audio.is_some() {
             eprintln!("--dump-audio requires --headless; ignoring (windowed mode plays live)");
         }
-        return video::run(cart, save_path, sram_baseline);
+        return video::run(rom_path.clone(), cart, save_path, sram_baseline);
     }
 
     let script = match &args.script {
@@ -172,6 +204,11 @@ fn run(args: Args) -> Result<(), String> {
     };
 
     let mut snes = Snes::new(cart);
+    if let Some(path) = &args.load_state {
+        let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        snes.load_state(&bytes)?;
+        eprintln!("state: loaded {}", path.display());
+    }
     if let Some(dir) = &args.dump_dir {
         std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     }
@@ -231,6 +268,14 @@ fn run(args: Args) -> Result<(), String> {
             if every > 0 && frame % every == 0 {
                 let path = dir.join(format!("frame_{frame:05}.png"));
                 write_frame_png(&snes, &path)?;
+            }
+        }
+        if let Some((at, path)) = &args.save_state_at {
+            if frame == *at {
+                let bytes = snes.save_state();
+                std::fs::write(path, &bytes)
+                    .map_err(|e| format!("write {}: {e}", path.display()))?;
+                println!("wrote {} ({} bytes) at frame {}", path.display(), bytes.len(), at);
             }
         }
     }
@@ -423,8 +468,9 @@ fn print_info(cart: &Cartridge) {
     );
 }
 
-/// Load raw .sfc/.smc bytes, or the first ROM entry of a .zip.
-fn load_rom_bytes(path: &Path) -> Result<Vec<u8>, String> {
+/// Load raw .sfc/.smc bytes, or the first ROM entry of a .zip. `pub(crate)`
+/// so `video.rs` can reuse it for the in-game "open ROM" (`O`) hotkey.
+pub(crate) fn load_rom_bytes(path: &Path) -> Result<Vec<u8>, String> {
     let is_zip = path
         .extension()
         .and_then(|e| e.to_str())

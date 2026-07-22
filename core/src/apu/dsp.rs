@@ -8,6 +8,8 @@
 //! table, filter forms, echo pipeline) come from the APU reference.
 
 use super::brr;
+use serde::{Deserialize, Serialize};
+use serde_big_array::BigArray;
 
 /// Envelope/noise period in samples per rate index (0 = never fires).
 const RATE_PERIOD: [i32; 32] = [
@@ -47,7 +49,7 @@ fn write16(ram: &mut [u8; 0x10000], addr: usize, val: i32) {
     ram[(addr + 1) & 0xFFFF] = (v >> 8) as u8;
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum Phase {
     Attack,
     Decay,
@@ -55,6 +57,7 @@ enum Phase {
     Release,
 }
 
+#[derive(Serialize, Deserialize)]
 struct Voice {
     active: bool,
     /// Samples remaining in the 5-sample post-key-on warm-up.
@@ -103,7 +106,9 @@ impl Voice {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct Dsp {
+    #[serde(with = "BigArray")]
     regs: [u8; 128],
     voices: [Voice; 8],
     /// Shared 15-bit noise LFSR (raw bits; -$4000 at reset).

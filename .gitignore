@@ -13,3 +13,7 @@ roms/
 *.smc
 *.sfc
 *.zip
+
+# Packaged app bundle (build artifact)
+dist/
+*.app

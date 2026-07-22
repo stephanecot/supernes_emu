@@ -14,7 +14,9 @@ pub const NMI_LINE: u16 = 225;
 /// (timing.md ยง2/ยง4).
 pub const OVERSCAN_NMI_LINE: u16 = 240;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Region {
     Ntsc,
     Pal,
@@ -40,6 +42,7 @@ impl Region {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct Scheduler {
     pub region: Region,
     /// Master clock, monotonically increasing for the lifetime of the console.

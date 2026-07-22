@@ -22,7 +22,12 @@ use sram::Sram;
 const LOROM_HEADER: usize = 0x7FC0;
 const HIROM_HEADER: usize = 0xFFC0;
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Cartridge {
+    /// The ROM image is NOT part of a save state (large, and reloaded from the
+    /// game file); `Snes::load_state` reattaches the currently-loaded ROM after
+    /// deserializing, so this restores as an empty vec.
+    #[serde(skip)]
     pub rom: Vec<u8>,
     pub sram: Sram,
     pub mapping: Mapping,

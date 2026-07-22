@@ -11,6 +11,7 @@ pub mod spc700;
 
 use dsp::Dsp;
 use ipl::IPL_ROM;
+use serde::{Deserialize, Serialize};
 use spc700::{Spc700, Spc700Bus};
 
 /// SPC700 nominal CPU clock: 2.048 MHz S-SMP / 2.
@@ -21,6 +22,7 @@ const SPC_CLOCK_HZ: u32 = 1_024_000;
 const T01_PERIOD: u16 = 128;
 const T2_PERIOD: u16 = 16;
 
+#[derive(Serialize, Deserialize)]
 struct Timer {
     enabled: bool,
     /// Stage-2 target ($FA-$FC); $00 means 256.
@@ -56,6 +58,7 @@ impl Timer {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct Apu {
     /// Last value the CPU wrote to each port ($2140-$2143 -> SPC $F4-$F7).
     pub ports_from_cpu: [u8; 4],
@@ -63,6 +66,7 @@ pub struct Apu {
     pub ports_to_cpu: [u8; 4],
 
     spc: Spc700,
+    #[serde(with = "crate::serde_util::boxed_bytes")]
     ram: Box<[u8; 0x10000]>,
     dsp: Dsp,
     timers: [Timer; 3],
@@ -95,6 +99,9 @@ pub struct Apu {
 
     /// Optional `--trace-spc` sink: called with a formatted trace line for each
     /// instruction the SPC700 is about to execute (like the S-CPU trace hook).
+    /// A host-side callback, not emulated state: excluded from save states and
+    /// restored as `None` (any installed trace sink is dropped by `load_state`).
+    #[serde(skip)]
     spc_trace: Option<Box<dyn FnMut(&str)>>,
 }
 
@@ -206,6 +213,39 @@ impl Apu {
     /// Remove the trace sink and return it (drop it to flush any buffered writer).
     pub fn clear_spc_trace(&mut self) -> Option<Box<dyn FnMut(&str)>> {
         self.spc_trace.take()
+    }
+
+    /// Test-only: install a looping BRR sample in ARAM and key on voice 0 at
+    /// full volume with echo-write disabled, so the DSP produces loud, evolving
+    /// audio. Used by the save-state completeness test to make the drained audio
+    /// hash depend on the full APU/DSP/voice serialized state (the framebuffer
+    /// never observes the APU).
+    #[cfg(test)]
+    pub fn test_kon_voice0(&mut self) {
+        let start: u16 = 0x0400;
+        let dir_page: u8 = 0x20;
+        let entry = (dir_page as usize) << 8; // sample directory entry for SRCN 0
+        self.ram[entry] = start as u8;
+        self.ram[entry + 1] = (start >> 8) as u8;
+        self.ram[entry + 2] = start as u8; // loop back to the same block
+        self.ram[entry + 3] = (start >> 8) as u8;
+        // One looping BRR block: header shift 8 / filter 0 / end+loop, nibble 7.
+        self.ram[start as usize] = 0x83;
+        for i in 0..8 {
+            self.ram[start as usize + 1 + i] = 0x77;
+        }
+        self.dsp.write(0x5D, dir_page); // DIR page $20
+        self.dsp.write(0x00, 0x7F); // V0VOLL
+        self.dsp.write(0x01, 0x7F); // V0VOLR
+        self.dsp.write(0x02, 0x00); // pitch low
+        self.dsp.write(0x03, 0x10); // pitch high -> $1000 (1:1)
+        self.dsp.write(0x04, 0x00); // SRCN 0
+        self.dsp.write(0x05, 0x00); // ADSR1: E=0 -> GAIN mode
+        self.dsp.write(0x07, 0x7F); // GAIN direct, env = $7F0
+        self.dsp.write(0x0C, 0x7F); // MVOLL
+        self.dsp.write(0x1C, 0x7F); // MVOLR
+        self.dsp.write(0x6C, 0x20); // FLG: no soft-reset, no mute, echo-write off
+        self.dsp.write(0x4C, 0x01); // KON voice 0
     }
 
     /// CPU read of $2140-$217F (mirrored every 4 bytes): the SPC-side outputs.

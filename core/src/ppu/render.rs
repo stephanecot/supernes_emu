@@ -3,8 +3,9 @@
 //! then applies color math (ppu.md §11), master brightness and forced blank
 //! (ppu.md §15), writing BGR555 into `ppu.framebuffer`.
 //!
-//! Pseudo-hires / true hires (modes 5/6) column doubling is NOT implemented:
-//! those modes render as 256-wide main-screen composites. // STUB(hires)
+//! True hires (modes 5/6) BG layers are rendered at 512 dots and decimated 2:1
+//! to the 256-wide main-screen composite (keeping the even half-dots); see
+//! `background.rs`. Pseudo-hires subscreen blending is not separately modeled.
 
 use crate::ppu::background::render_bg_line;
 use crate::ppu::mode7::render_mode7_line;

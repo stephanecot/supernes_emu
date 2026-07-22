@@ -1,6 +1,7 @@
 //! Battery-backed SRAM byte buffer. Persistence to .srm files is the
 //! frontend's job (core has no I/O).
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Sram {
     data: Vec<u8>,
 }

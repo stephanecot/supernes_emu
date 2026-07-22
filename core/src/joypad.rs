@@ -2,7 +2,9 @@
 //! The bus composes the open-bus/driven upper bits and drives the $4218-$421F
 //! auto-read snapshot; this module only holds the per-pad shift state.
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct JoypadState {
     pub a: bool,
     pub b: bool,
@@ -42,6 +44,7 @@ impl JoypadState {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct Joypad {
     pub state: JoypadState,
     /// $4016 bit0 (OUT0) latch line. While high the controller is continuously

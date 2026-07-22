@@ -3,12 +3,14 @@
 pub mod apu;
 pub mod bus;
 pub mod cartridge;
+pub mod coprocessor;
 pub mod cpu;
 pub mod debug;
 pub mod dma;
 pub mod joypad;
 pub mod ppu;
 pub mod scheduler;
+pub(crate) mod serde_util;
 pub mod snes;
 
 pub use cartridge::{Cartridge, Mapping};

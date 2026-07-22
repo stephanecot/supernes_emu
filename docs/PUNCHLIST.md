@@ -42,6 +42,15 @@ Next step for a fresh session (with stable infra): --watch $00:1426 and $00:13BF
 
 Impact: also blocks the Mode 7 real-screen gate (SMW's Mode 7 is the Bowser fight, behind this intro).
 
+## Secret of Mana — garbled characters on the name-entry screen (USER-REPORTED BUG)
+When SoM prompts for the character's name, strange/garbled characters are displayed. Real rendering bug on a base-console game. Likely candidates to check: the name-entry screen's text tiles (BG mode/priority on that screen), a variable-width-font or dynamic-tile-upload path the game uses for the name grid, or a VRAM/DMA timing issue that corrupts the font tiles for that screen specifically. To diagnose: script SoM into a new game to reach name entry, dump the frame + VRAM/CGRAM state, compare the font tiles against what the game uploaded. Not yet investigated.
+
+## Cartridge coprocessor decision (UPDATED)
+User provided a Yoshi's Island ROM = **SuperFX** (GSU-2), so the target chip pivoted from SA-1 to **SuperFX** (testable against a real ROM). SA-1 reference doc (references/sa1.md) was written and is kept for a future SA-1 pass; SA-1 core was never started. SuperFX is a from-scratch GSU CPU (new instruction set) — larger than SA-1 but now game-validatable on Yoshi's Island.
+
+## Menu bar: Cmd+Q / Quit menu does not flush SRAM
+The native macOS "Quit" (App menu / File menu / Cmd+Q) calls AppKit terminate: directly, bypassing the SRAM-flush-on-exit code that runs after event_loop.run_app() returns. Esc and the red close button still save correctly. Fix: install an NSApplicationWillTerminate observer (or a muda-driven custom Quit that flushes then exits) so battery saves are never lost on Cmd+Q. Do this together with save-states (both need a clean shutdown hook).
+
 ## Tooling
 - `--trace-spc` is a no-op: expose an SPC700 trace hook in the APU core (needed for M8 debugging). DO THIS IN M8.
 - `--log-mmio` matches on low-16-bits only, so WRAM shadow writes at `$7E/$7F:21xx`/`:42xx` are logged as FAKE `$21xx/$42xx` register events — actively misleading. Fix: only log when the access is to a real mapped register bank ($00-$3F/$80-$BF). DO THIS IN M8 (audio debugging depends on trustworthy MMIO logs).

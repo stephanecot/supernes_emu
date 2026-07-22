@@ -51,6 +51,8 @@ pub mod sprites;
 pub mod window;
 
 use crate::FrameBuffer;
+use serde::{Deserialize, Serialize};
+use serde_big_array::BigArray;
 
 /// One pixel emitted by the sprite renderer for a scanline column.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -79,22 +81,29 @@ pub struct LayerPixel {
     pub opaque: bool,
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct Ppu {
     // --- Memories ---
     /// 32K words (64 KB), two byte planes fused into one u16 per word address.
+    #[serde(with = "crate::serde_util::boxed_words")]
     pub vram: Box<[u16; 0x8000]>,
     /// 256 BGR555 colors (`0BBBBBGG GGGRRRRR`).
+    #[serde(with = "BigArray")]
     pub cgram: [u16; 256],
     /// OAM table 1 (512 B): 128 sprites × 4 bytes.
+    #[serde(with = "BigArray")]
     pub oam_lo: [u8; 512],
     /// OAM table 2 (32 B): 2 bits/sprite (X bit8 + size).
     pub oam_hi: [u8; 32],
 
-    /// Final composited frame for the current field.
+    /// Final composited frame for the current field. Regenerated on the next
+    /// rendered frame, so it is excluded from save states.
+    #[serde(skip)]
     pub framebuffer: FrameBuffer,
 
     /// Raw last-written $2100-$213F (window/color-math regs and anything the
     /// typed decode does not break out are read from here by the renderers).
+    #[serde(with = "BigArray")]
     pub regs: [u8; 0x40],
     /// PPU1/PPU2 open-bus data latches (drive undriven read bits).
     pub ppu1_mdr: u8,
