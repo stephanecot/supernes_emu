@@ -92,6 +92,36 @@ pub fn sram_offset(mapping: Mapping, addr: u32) -> Option<usize> {
     }
 }
 
+/// SuperFX / GSU2 SNES-side Game Pak ROM offset (pre-mirror), or `None` if the
+/// address is not in a ROM window (superfx.md §4). GSU carts are Slow-ROM only:
+/// the LoROM window ($00-3F:8000-FFFF) and the linear HiROM window
+/// ($40-5F:0000-FFFF) address the same image ($40:0000 == $00:8000); the fast
+/// banks $80-BF are unused and read as open bus.
+pub fn superfx_rom_offset(addr: u32) -> Option<usize> {
+    let bank = ((addr >> 16) & 0xFF) as usize;
+    let off = (addr & 0xFFFF) as usize;
+    match bank {
+        0x00..=0x3F if off >= 0x8000 => Some(bank * 0x8000 + (off - 0x8000)),
+        0x40..=0x5F => Some((bank - 0x40) * 0x10000 + off),
+        _ => None,
+    }
+}
+
+/// SuperFX / GSU2 SNES-side Game Pak RAM offset, or `None` if the address is
+/// not in a RAM window (superfx.md §4). Banks $70-$71 map the RAM linearly;
+/// $00-3F/$80-BF:6000-7FFF mirror the first 8 KB ($70:0000-1FFF).
+pub fn superfx_ram_offset(addr: u32) -> Option<usize> {
+    let bank = ((addr >> 16) & 0xFF) as usize;
+    let off = (addr & 0xFFFF) as usize;
+    match bank {
+        0x00..=0x3F | 0x80..=0xBF if (0x6000..=0x7FFF).contains(&off) => {
+            Some(off - 0x6000)
+        }
+        0x70..=0x71 => Some((bank - 0x70) * 0x10000 + off),
+        _ => None,
+    }
+}
+
 pub fn read(mapping: Mapping, rom: &[u8], sram: &Sram, addr: u32) -> Option<u8> {
     if let Some(off) = sram_offset(mapping, addr) {
         if !sram.is_empty() {

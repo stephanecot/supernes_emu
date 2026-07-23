@@ -263,27 +263,30 @@ fn branch_taken_and_delay_slot() {
     assert_eq!(fx.r[5], 1); // delay slot executed
 }
 
-// WIP: SuperFX (GSU) development is paused; this branch/flag case is not yet
-// correct and awaits the SuperFX verify/fix pass. Ignored so the base emulator
-// test suite stays green. Remove #[ignore] when SuperFX work resumes.
-#[ignore = "SuperFX GSU WIP — paused; BEQ flag handling not yet verified"]
 #[test]
 fn beq_conditional() {
-    // Force Z=1 then BEQ should take. Set R5=0 then AND to set Z, BEQ to skip STOP.
+    // Prove the taken path diverges from fall-through. AND sets Z=1 so BEQ is
+    // taken; the delay slot (byte after the branch) is a NOP so it clobbers no
+    // flag/register, and INC R5 sits only at the branch target. A taken branch
+    // reaches INC R5 (R5=1); the fall-through would hit STOP first (R5=0), so
+    // R5==1 alone proves the branch was taken. INC then clears Z (R5=1).
     let fx = run(
         |fx| {
             fx.r[1] = 0;
             fx.r[5] = 0;
         },
         &[
-            FROM | 1, TO | 2, 0x70 | 1, // R2 = R1 & R1 = 0 -> Z=1
-            0x09, 0x01, // BEQ +1 -> target 7
-            0xD0 | 5, // delay slot INC R5 (addr 6)
-            STOP,     // addr 7 target
+            FROM | 1, TO | 2, 0x70 | 1, // idx0-2: R2 = R1 & R1 = 0 -> Z=1
+            0x09, 0x02, // idx3-4: BEQ +2
+            0x01,       // idx5: delay slot NOP (always executed)
+            STOP,       // idx6: fall-through target (not-taken lands here)
+            STOP,       // idx7: filler
+            0xD0 | 5,   // idx8: INC R5 (taken target)
+            STOP,       // idx9
         ],
     );
-    assert_eq!(fx.r[5], 1);
-    assert!(fx.z);
+    assert_eq!(fx.r[5], 1); // branch was taken (delay slot did not touch R5)
+    assert!(!fx.z); // INC R5 (R5 1) cleared Z
 }
 
 #[test]

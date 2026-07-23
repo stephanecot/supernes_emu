@@ -114,6 +114,11 @@ pub struct Bus {
     /// NOT guarded so a mid-GP-DMA HDMA transfer point preempts it (timing.md
     /// §10 HDMA priority).
     hdma_running: bool,
+    /// Master-clock timestamp of the last SuperFX/GSU catch-up. The GSU runs as
+    /// a catch-up against elapsed master cycles (elapsed / clock_divider GSU
+    /// clocks), analogous to the APU. Unused (stays equal to the clock) when the
+    /// cart has no GSU.
+    gsu_clock: u64,
     /// Opt-in stderr taps for the frontend debug flags. Not part of a save
     /// state (host-side debug config, not emulated hardware).
     #[serde(skip)]
@@ -154,6 +159,7 @@ impl Bus {
             hdma_line: 0,
             hdma_inited: false,
             hdma_running: false,
+            gsu_clock: 0,
             debug: DebugHooks::default(),
         }
     }
@@ -246,6 +252,13 @@ impl Bus {
                     self.wram_addr = (self.wram_addr + 1) & 0x1FFFF;
                     v
                 }
+                // SuperFX / GSU register file, cache and control registers
+                // ($3000-$34FF, superfx.md §1-3). Catch the GSU up first so a
+                // just-completed run (GO/IRQ in SFR) is reflected.
+                0x3000..=0x34FF if self.cart.superfx.is_some() => {
+                    self.gsu_catch_up(self.scheduler.clock);
+                    self.cart.superfx.as_mut().unwrap().read_mmio(off)
+                }
                 // $2181-$2183 are write-only: open bus.
                 // Divergence (timing.md §8, mmio.md line 114): on hardware,
                 // reading $4016/$4017 or $4218-$421F while the auto-joypad busy
@@ -334,6 +347,14 @@ impl Bus {
                 0x2183 => {
                     self.wram_addr =
                         (self.wram_addr & 0x0FFFF) | (((value & 1) as u32) << 16);
+                }
+                // SuperFX / GSU registers. A write to R15 MSB ($301F) sets GO=1
+                // and starts the GSU (superfx.md §5); rebase the catch-up clock
+                // so a fresh run does not receive a stale time budget.
+                0x3000..=0x34FF if self.cart.superfx.is_some() => {
+                    self.gsu_catch_up(self.scheduler.clock);
+                    self.cart.superfx.as_mut().unwrap().write_mmio(off, value);
+                    self.gsu_clock = self.scheduler.clock;
                 }
                 // $4016 bit0 = OUT0, the shared latch line to BOTH ports.
                 0x4016 => {
@@ -537,6 +558,30 @@ impl Bus {
             // keeps the APU roughly in step even during long stretches with
             // no port access (e.g. while the CPU renders or waits on DMA).
             self.apu.catch_up(self.scheduler.clock);
+            // Same lazy catch-up for the GSU, bounding a run to ~one scanline of
+            // GSU clocks even when the SNES CPU never touches its registers.
+            self.gsu_catch_up(self.scheduler.clock);
+        }
+    }
+
+    /// Advance the SuperFX/GSU by the master cycles elapsed since the last
+    /// sync, divided by its clock divider (2 in 10.7 MHz mode, 1 in 21.4 MHz).
+    /// No-op for non-SuperFX carts; while the GSU is halted the baseline just
+    /// tracks the master clock so the next run starts from the current time.
+    fn gsu_catch_up(&mut self, now: u64) {
+        let running = match self.cart.superfx.as_ref() {
+            Some(fx) => fx.is_running(),
+            None => return,
+        };
+        if !running {
+            self.gsu_clock = now;
+            return;
+        }
+        let div = self.cart.superfx.as_ref().unwrap().clock_divider() as u64;
+        let budget = now.saturating_sub(self.gsu_clock) / div;
+        if budget > 0 {
+            self.cart.superfx_run(budget as i64);
+            self.gsu_clock = now;
         }
     }
 
@@ -828,8 +873,11 @@ impl CpuBus for Bus {
 
     fn irq_level(&mut self) -> bool {
         // Level-held: stays true until $4211 is read or $4200 bits5-4 are
-        // cleared (timing.md ยง6).
-        self.scheduler.irq_pending
+        // cleared (timing.md ยง6). The GSU raises its own level-held IRQ on
+        // STOP (SFR.IRQ, unless masked by CFGR bit7), cleared when the SNES
+        // reads SFR (superfx.md §5).
+        let gsu = self.cart.superfx.as_ref().is_some_and(|fx| fx.irq_line());
+        self.scheduler.irq_pending || gsu
     }
 }
 
@@ -1434,5 +1482,77 @@ mod tests {
         let timeup = CpuBus::read(&mut bus, 0x00_4211);
         assert_eq!(timeup & 0x80, 0x80);
         assert!(!CpuBus::irq_level(&mut bus)); // read-ack cleared it
+    }
+
+    /// LoROM cart with a GSU2 header and `code` at ROM offset 0 (GSU reset PC).
+    fn superfx_bus(code: &[u8]) -> Bus {
+        let mut rom = vec![0u8; 0x10000];
+        rom[..code.len()].copy_from_slice(code);
+        rom[0x7FC0..0x7FC0 + 21].copy_from_slice(b"SUPERFX TEST         ");
+        rom[0x7FC0 + 0x15] = 0x20; // LoROM
+        rom[0x7FC0 + 0x16] = 0x15; // ROM+GSU+RAM+Battery (GSU2)
+        rom[0x7FC0 + 0x19] = 2; // PAL
+        rom[0x7FC0 + 0x3C] = 0x00;
+        rom[0x7FC0 + 0x3D] = 0x80;
+        Bus::new(Cartridge::from_bytes(rom).unwrap())
+    }
+
+    #[test]
+    fn superfx_go_start_and_plot_to_ram() {
+        // GSU program at ROM $0000:
+        //   IBT R1,#5 ; IBT R2,#3 ; IBT R0,#3 ; FROM R0 ; COLOR ; PLOT ;
+        //   RPIX (flush pixel cache to RAM) ; STOP
+        let code = [
+            0xA0 | 1, 0x05, // IBT R1,#5   (plot X)
+            0xA0 | 2, 0x03, // IBT R2,#3   (plot Y)
+            0xA0 | 0, 0x03, // IBT R0,#3   (color 3, 4-color both planes)
+            0xB0 | 0, // FROM R0
+            0x4E, // COLOR -> COLR = R0 & FF
+            0x4C, // PLOT (5,3)
+            0x3D, 0x4C, // RPIX (flushes the pixel cache to Game Pak RAM)
+            0x00, // STOP
+        ];
+        let mut bus = superfx_bus(&code);
+        assert!(bus.cart.superfx.is_some());
+        // SNES grants ROM+RAM to the GSU, 4-color, height 128 (SCMR $18).
+        bus.write_no_tick(0x00_303A, 0x18);
+        assert!(!bus.cart.superfx.as_ref().unwrap().is_running());
+        // Set R15 = $0000 and start: the write of R15 MSB ($301F) sets GO.
+        bus.write_no_tick(0x00_301E, 0x00);
+        bus.write_no_tick(0x00_301F, 0x00);
+        assert!(bus.cart.superfx.as_ref().unwrap().is_running());
+        // Advance the master clock so the per-line GSU catch-up runs it to STOP.
+        for _ in 0..2 {
+            bus.scheduler.tick(CYCLES_PER_LINE);
+            bus.post_tick();
+        }
+        assert!(!bus.cart.superfx.as_ref().unwrap().is_running());
+        // GSU raised its STOP IRQ.
+        assert!(CpuBus::irq_level(&mut bus));
+        // Pixel (5,3) color 3, 4-color, tile 0 row 3: plane0 at RAM offset 6,
+        // plane1 at offset 7, column X=5 -> bit 2 ($04). Read via $70:0006/7.
+        assert_eq!(bus.read_no_tick(0x70_0006), 0x04);
+        assert_eq!(bus.read_no_tick(0x70_0007), 0x04);
+        // And through the $6000-$7FFF mirror of $70:0000-1FFF.
+        assert_eq!(bus.read_no_tick(0x00_6006), 0x04);
+    }
+
+    #[test]
+    fn superfx_snes_locked_out_of_rom_ram_while_running() {
+        let code = [0x42u8]; // distinctive marker byte at ROM offset 0
+        let mut bus = superfx_bus(&code);
+        bus.mdr = 0xA5;
+        // Not running yet: SNES reads ROM/RAM normally.
+        assert_eq!(bus.read_no_tick(0x00_8000), 0x42); // marker byte
+        bus.cart.superfx.as_mut().unwrap().ram_set_abs(0, 0x5C);
+        assert_eq!(bus.read_no_tick(0x70_0000), 0x5C);
+        // Force GO=1 with ROM+RAM granted (SCMR RON|RAN) but do not let it run.
+        bus.write_no_tick(0x00_303A, 0x18);
+        bus.cart.superfx.as_mut().unwrap().go = true;
+        // ROM and RAM now read as open bus (MDR); ROM vector low-nibbles expose
+        // fixed values, but $8000 (nibble 0) is plain open bus.
+        bus.mdr = 0xA5;
+        assert_eq!(bus.read_no_tick(0x00_8000), 0xA5);
+        assert_eq!(bus.read_no_tick(0x70_0000), 0xA5);
     }
 }

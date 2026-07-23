@@ -17,6 +17,7 @@
 /// GSU2 version code returned by VCR ($303B).
 pub const VCR_GSU2: u8 = 0x04;
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SuperFx {
     /// General-purpose registers. R15 is the program counter.
     pub(crate) r: [u16; 16],
@@ -69,6 +70,7 @@ pub struct SuperFx {
     pub(crate) primed: bool,
 
     /// 512-byte code cache (32 lines x 16 bytes).
+    #[serde(with = "crate::serde_util::boxed_bytes")]
     pub(crate) cache: Box<[u8; 512]>,
     pub(crate) cache_valid: [bool; 32],
 
@@ -181,25 +183,25 @@ impl SuperFx {
         }
     }
 
-    /// While GO=1 & RON=1 the SNES sees fixed exception vectors instead of ROM,
-    /// keyed by the low nibble of the address. Returns the byte for `addr16` or
-    /// `None` if that address is not a vector byte.
+    /// While GO=1 & RON=1 the SNES sees fixed exception vectors instead of ROM.
+    /// Only the native CPU vector locations $FFE4-$FFEF expose fixed bytes
+    /// (superfx.md §4); every other locked-out ROM address is open bus, so this
+    /// gates on `addr16 & FFF0 == FFE0` before decoding the vector. Returns the
+    /// byte for `addr16`, or `None` (open bus) if it is not a vector byte.
     pub fn rom_vector_override(&self, addr16: u16) -> Option<u8> {
-        let (lo, val): (u16, u16) = match addr16 & 0x000F {
-            0x4 => (0x4, 0x0104), // COP
-            0x5 => (0x4, 0x0104),
-            0x6 => (0x6, 0x0100), // BRK
-            0x7 => (0x6, 0x0100),
-            0x8 => (0x8, 0x0100), // ABT
-            0x9 => (0x8, 0x0100),
-            0xA => (0xA, 0x0108), // NMI
-            0xB => (0xA, 0x0108),
-            0xC => (0xC, 0x0108), // reset shares NMI/ABT area; unused here
-            0xE => (0xE, 0x010C), // IRQ (H/V + GSU STOP)
-            0xF => (0xE, 0x010C),
-            _ => return None,
+        if addr16 & 0xFFF0 != 0xFFE0 {
+            return None;
+        }
+        let val: u16 = match addr16 & 0x000E {
+            0x4 => 0x0104, // COP  ($FFE4/E5)
+            0x6 => 0x0100, // BRK  ($FFE6/E7)
+            0x8 => 0x0100, // ABT  ($FFE8/E9)
+            0xA => 0x0108, // NMI  ($FFEA/EB)
+            0xE => 0x010C, // IRQ  ($FFEE/EF, H/V-IRQ & GSU STOP)
+            _ => return None, // $FFE0-E3 / $FFEC-ED reserved: open bus
         };
-        let byte = if (addr16 & 0x000F) == lo {
+        // Vectors are word-aligned at even addresses: LSB at even, MSB at odd.
+        let byte = if addr16 & 1 == 0 {
             (val & 0xFF) as u8
         } else {
             (val >> 8) as u8
@@ -215,18 +217,52 @@ impl SuperFx {
         if !self.go {
             return;
         }
+        let dbg = std::env::var("GSU_TRACE").is_ok();
         if !self.primed {
+            if dbg {
+                eprintln!("GSU START pbr={:02X} r15={:04X} scmr={:02X} scbr={:02X} rombr={:02X} rambr={:02X} r0={:04X} r1={:04X} r2={:04X} r13={:04X} r14={:04X} r12={:04X} colr={:02X}",
+                    self.pbr, self.r[15], self.scmr, self.scbr, self.rombr, self.rambr,
+                    self.r[0], self.r[1], self.r[2], self.r[13], self.r[14], self.r[12], self.colr);
+            }
             self.prime(rom);
             self.primed = true;
         }
         while self.go && budget > 0 {
-            // GSU-side WAIT: code fetched from ROM but SNES owns ROM (RON=0).
-            if self.pbr <= 0x5F && !self.rom_granted() {
+            // GSU-side WAIT (superfx.md §4): the next opcode must be fetched from
+            // Game Pak ROM but the SNES owns ROM (RON=0). A fetch that resolves to
+            // a valid cache line needs no ROM bus, so it does not stall.
+            if !self.rom_granted() && self.fetch_needs_rom() {
                 break;
             }
+            if dbg && std::env::var("GSU_TRACE_FULL").is_ok() {
+                eprintln!(
+                    "GSU r15={:04X} op={:02X} z={} cy={} s={} ov={} rombr={:02X} R0={:04X} R6={:04X} R7={:04X} R8={:04X} R9={:04X} R10={:04X} R11={:04X} R14={:04X}",
+                    self.r[15], self.pipe,
+                    self.z as u8, self.cy as u8, self.s as u8, self.ov as u8, self.rombr,
+                    self.r[0], self.r[6], self.r[7], self.r[8], self.r[9], self.r[10], self.r[11], self.r[14]
+                );
+            }
+            let was_go = self.go;
             let c = self.execute_one(rom);
+            if dbg && was_go && !self.go {
+                eprintln!("GSU STOP at pbr={:02X} r15={:04X}", self.pbr, self.r[15]);
+            }
             budget -= c as i64;
         }
+    }
+
+    /// True when the next opcode fetch (at PBR:R15) would touch the Game Pak ROM
+    /// bus: PBR points at a ROM bank ($00-$5F) and R15 is not served by a valid
+    /// code-cache line. Used to decide whether a RON=0 fetch must WAIT.
+    fn fetch_needs_rom(&self) -> bool {
+        if self.pbr > 0x5F {
+            return false; // PBR in RAM banks $70/$71 or cache: not a ROM fetch
+        }
+        let idx = self.r[15].wrapping_sub(self.cbr) as usize;
+        if idx < 0x200 && self.cache_valid[idx >> 4] {
+            return false; // served from a valid cache line
+        }
+        true
     }
 
     /// Execute a single GSU instruction, priming the pipeline first if needed.
@@ -718,7 +754,11 @@ impl SuperFx {
                 self.cy = (result & 0x8000) != 0;
                 self.s = (result as u32 & 0x8000_0000) != 0;
                 self.z = hi == 0;
-                self.set_dst(hi);
+                // FMULT with Dreg=R4 leaves R4 unchanged (superfx.md §9); LMULT
+                // (ALT1) always writes the high word to Dreg, even R4.
+                if self.alt1 || self.dreg != 4 {
+                    self.set_dst(hi);
+                }
                 cycles = if self.alt1 { 9 } else { 4 };
             }
 
@@ -805,6 +845,9 @@ impl SuperFx {
             }
             0xEF => {
                 let b = self.rom_byte(rom, self.rombr, self.r[14]);
+                if std::env::var("GSU_GETB").is_ok() {
+                    eprintln!("GETB rombr={:02X} r14={:04X} -> {:02X}", self.rombr, self.r[14], b);
+                }
                 match (self.alt1, self.alt2) {
                     (false, false) => self.set_dst(b as u16), // GETB
                     (true, false) => {

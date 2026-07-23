@@ -118,10 +118,14 @@ impl SuperFx {
                     self.cbr = 0;
                     self.invalidate_cache();
                     self.primed = false;
-                } else {
+                } else if !self.go {
+                    // GO 0->1 start: the pipeline (re-)primes on the next run.
                     self.go = true;
                     self.primed = false;
                 }
+                // SFR is R/W while the GSU runs (superfx.md §2/§5): a GO=1 write
+                // to an already-running GSU must not restart or re-prime the
+                // pipeline, so `primed` is left untouched here.
             }
             0x3031 => {} // SFR high byte bits are internal; SNES writes ignored.
             0x3033 => self.bramr = value,
