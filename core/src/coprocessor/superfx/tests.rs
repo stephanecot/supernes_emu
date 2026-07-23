@@ -277,7 +277,9 @@ fn beq_conditional() {
         },
         &[
             FROM | 1, TO | 2, 0x70 | 1, // idx0-2: R2 = R1 & R1 = 0 -> Z=1
-            0x09, 0x02, // idx3-4: BEQ +2
+            0x09, 0x03, // idx3-4: BEQ +3. Target = (delay-slot addr 5) + 3 = 8,
+                        // matching hardware/bsnes where R15 at the branch is the
+                        // delay-slot address (opcode+2), NOT opcode+3.
             0x01,       // idx5: delay slot NOP (always executed)
             STOP,       // idx6: fall-through target (not-taken lands here)
             STOP,       // idx7: filler

@@ -5,10 +5,14 @@
 //! The GSU owns Game Pak RAM (`ram`) and borrows the Game Pak ROM image for the
 //! duration of a `run`/`step`.
 //!
-//! Pipeline model: R15 always addresses the *next* opcode. A one-byte prefetch
-//! register (`pipe`) holds the byte at R15-1; `fetch()` returns it and prefetches
-//! the following byte, so the byte after any branch/jump/R15-write is fetched and
-//! executed before the target (real GSU pipeline behavior).
+//! Pipeline model (bsnes `peekpipe`/`pipe` + `main()`): a one-byte prefetch
+//! register (`pipe`) holds the opcode. The opcode fetch (`peek_opcode`) does
+//! NOT advance R15; only operand fetches (`pipe_operand`) and the implicit
+//! end-of-instruction advance do (the latter skipped when the instruction
+//! wrote R15 -- a jump/branch). This keeps R15 == opcode_addr+1 during
+//! execution, so branch targets, LINK, CACHE and MOVE-from-R15 read the same
+//! R15 value real hardware does, and the byte after any branch/jump (the
+//! delay slot) is still fetched and executed before the target.
 //!
 //! Prefix state machine (ALT1/ALT2/ALT3, TO/WITH/FROM) is reset after every
 //! normal opcode; branches ($05-$0F) and the prefix opcodes themselves preserve
@@ -115,6 +119,15 @@ pub struct SuperFx {
     /// clocks (bsnes re-arms strictly after `instruction()` returns).
     #[serde(skip)]
     pub(crate) r14_written: bool,
+    /// Set when the current instruction wrote R15 as a jump/branch target
+    /// (matching bsnes `regs.r[15].modified`). Cleared by the opcode/operand
+    /// pipeline fetches; consulted at the end of `execute_one` to decide the
+    /// implicit post-instruction `R15++` (bsnes `main()`: `if(r15.modified)
+    /// clear; else r15++`). This is what keeps R15 == opcode_addr+1 while an
+    /// instruction runs, so branch/LINK/CACHE/MOVE-from-R15 read the correct
+    /// value (the opcode fetch must NOT pre-advance R15).
+    #[serde(skip)]
+    pub(crate) r15_written: bool,
 
     // Pixel cache: one 8-pixel row buffered before flush to RAM.
     pub(crate) pcache_x: u16,
@@ -184,6 +197,7 @@ impl SuperFx {
             ramar: 0,
             ramcl: 0,
             r14_written: false,
+            r15_written: false,
             pcache_x: 0,
             pcache_y: 0,
             pcache_bits: [0; 8],
@@ -445,6 +459,11 @@ impl SuperFx {
         if n == 14 {
             self.r14_written = true;
         }
+        if n == 15 {
+            // An instruction assigning R15 (JMP via ALU/MOVE into R15, IWT R15,
+            // etc.) is a jump: suppress the implicit post-instruction R15++.
+            self.r15_written = true;
+        }
     }
 
     /// Re-arm the ROM read-ahead countdown after a write to R14 (SNES-side
@@ -617,17 +636,37 @@ impl SuperFx {
     }
 
     fn prime(&mut self, rom: &[u8]) {
+        // Seed the pipeline so that at the start of `execute_one` the invariant
+        // holds: `pipe` = opcode byte at (R15-1), R15 = opcode_addr+1.
         self.pipe_pc = self.r[15];
         self.pipe = self.read_code(rom, self.pbr, self.r[15]);
         self.r[15] = self.r[15].wrapping_add(1);
     }
 
-    /// Consume the prefetched byte and prefetch the next; advances R15.
-    fn fetch(&mut self, rom: &[u8]) -> u8 {
+    /// Opcode fetch (bsnes `peekpipe`): return the prefetched opcode byte and
+    /// prefetch the next byte into `pipe`. Crucially this does NOT advance R15
+    /// -- during instruction execution R15 stays at opcode_addr+1 so that any
+    /// read of R15 (branch base, LINK, CACHE, MOVE-from-R15) sees the same
+    /// value hardware/bsnes does. The implicit advance happens at end of
+    /// `execute_one` (unless the instruction wrote R15).
+    fn peek_opcode(&mut self, rom: &[u8]) -> u8 {
         let out = self.pipe;
         self.pipe_pc = self.r[15];
         self.pipe = self.read_code(rom, self.pbr, self.r[15]);
+        self.r15_written = false;
+        out
+    }
+
+    /// Operand fetch (bsnes `pipe`): advance R15, then return the byte at the
+    /// new position while prefetching the following one. Matches bsnes
+    /// `pipeline = readOpcode(++r15)` and clears the R15-modified flag (a
+    /// natural pipeline advance is not a jump).
+    fn pipe_operand(&mut self, rom: &[u8]) -> u8 {
+        let out = self.pipe;
         self.r[15] = self.r[15].wrapping_add(1);
+        self.pipe_pc = self.r[15];
+        self.pipe = self.read_code(rom, self.pbr, self.r[15]);
+        self.r15_written = false;
         out
     }
 
@@ -677,25 +716,36 @@ impl SuperFx {
     /// still elapses, so a pending ROM/RAM buffer countdown still ticks.
     fn finish_prefix_only(&mut self, rom: &[u8]) -> u32 {
         self.tick_buffers(rom, 1);
+        // Prefix bytes are 1-byte instructions that never write R15, so they
+        // take the same implicit post-instruction R15++ as any normal op
+        // (they return early, bypassing the tail of `execute_one`).
+        self.r[15] = self.r[15].wrapping_add(1);
+        self.r15_written = false;
         1
     }
 
     fn execute_one(&mut self, rom: &[u8]) -> u32 {
-        let op = self.fetch(rom);
+        let op = self.peek_opcode(rom);
         let mut cycles: u32 = 1;
         let mut preserve_prefix = false;
 
         match op {
             // ---- Prefix opcodes (do not reset prefix state) ----
+            // ALT1/ALT2/ALT3 clear the B (WITH) flag (bsnes instructionALT*:
+            // `regs.sfr.b = 0`) so a preceding WITH does not make a following
+            // TO/FROM byte decode as MOVE/MOVES.
             0x3D => {
+                self.b = false;
                 self.alt1 = true;
                 return self.finish_prefix_only(rom);
             }
             0x3E => {
+                self.b = false;
                 self.alt2 = true;
                 return self.finish_prefix_only(rom);
             }
             0x3F => {
+                self.b = false;
                 self.alt1 = true;
                 self.alt2 = true;
                 return self.finish_prefix_only(rom);
@@ -768,6 +818,7 @@ impl SuperFx {
                 self.z = self.r[12] == 0;
                 if !self.z {
                     self.r[15] = self.r[13];
+                    self.r15_written = true;
                 }
             }
 
@@ -1006,10 +1057,12 @@ impl SuperFx {
                     self.r[15] = self.src();
                     self.cbr = self.r[15] & 0xFFF0;
                     self.invalidate_cache();
+                    self.r15_written = true;
                     cycles = 2;
                 } else {
                     // JMP Rn.
                     self.r[15] = self.r[n];
+                    self.r15_written = true;
                 }
             }
             0x9E => {
@@ -1044,7 +1097,7 @@ impl SuperFx {
                 let n = (op & 0x0F) as usize;
                 if self.alt1 {
                     // LMS Rn,(kk): addr = kk*2.
-                    let kk = self.fetch(rom) as u16;
+                    let kk = self.pipe_operand(rom) as u16;
                     let addr = kk << 1;
                     let w = self.ram_buffered_read_word(addr);
                     self.write_reg(n, w);
@@ -1052,14 +1105,14 @@ impl SuperFx {
                     cycles = 10;
                 } else if self.alt2 {
                     // SMS (kk),Rn.
-                    let kk = self.fetch(rom) as u16;
+                    let kk = self.pipe_operand(rom) as u16;
                     let addr = kk << 1;
                     self.ram_buffered_write_word(addr, self.r[n]);
                     self.last_ram_addr = addr;
                     cycles = 8;
                 } else {
                     // IBT Rn,#pp (sign-extended).
-                    let pp = self.fetch(rom);
+                    let pp = self.pipe_operand(rom);
                     self.write_reg(n, pp as i8 as i16 as u16);
                     cycles = 2;
                 }
@@ -1112,7 +1165,8 @@ impl SuperFx {
                     // in-flight prefetch latches under the OLD bank, not the
                     // one this instruction is about to set.
                     self.sync_rom_buffer(rom);
-                    self.rombr = (self.src() & 0xFF) as u8;
+                    // ROMBR is 7-bit (bsnes: `regs.rombr = regs.sr() & 0x7f`).
+                    self.rombr = (self.src() & 0x7F) as u8;
                     cycles = 2;
                 } else {
                     // GETC: COLR = color(romdr). Never reads the bus live.
@@ -1138,17 +1192,21 @@ impl SuperFx {
                 if std::env::var("GSU_GETB").is_ok() {
                     eprintln!("GETB rombr={:02X} r14={:04X} -> {:02X}", self.rombr, self.r[14], b);
                 }
+                // GETBH/GETBL combine the ROM byte with the SOURCE register
+                // (bsnes `sr()`), not the destination: with a TO/FROM prefix
+                // Sreg != Dreg, so the preserved half comes from Sreg while the
+                // result lands in Dreg. Without a prefix Sreg==Dreg==R0 so this
+                // is equivalent to the old dest-based form.
+                let s = self.src();
                 match (self.alt1, self.alt2) {
                     (false, false) => self.set_dst(b as u16), // GETB
                     (true, false) => {
-                        // GETBH: Rd.hi = byte, lo unchanged.
-                        let d = self.r[self.dreg];
-                        self.set_dst((d & 0x00FF) | ((b as u16) << 8));
+                        // GETBH: Rd = byte:Sreg.lo.
+                        self.set_dst(((b as u16) << 8) | (s & 0x00FF));
                     }
                     (false, true) => {
-                        // GETBL: Rd.lo = byte, hi unchanged.
-                        let d = self.r[self.dreg];
-                        self.set_dst((d & 0xFF00) | (b as u16));
+                        // GETBL: Rd = Sreg.hi:byte.
+                        self.set_dst((s & 0xFF00) | (b as u16));
                     }
                     (true, true) => self.set_dst(b as i8 as i16 as u16), // GETBS
                 }
@@ -1160,8 +1218,8 @@ impl SuperFx {
                 let n = (op & 0x0F) as usize;
                 if self.alt1 {
                     // LM Rn,(hilo).
-                    let lo = self.fetch(rom) as u16;
-                    let hi = self.fetch(rom) as u16;
+                    let lo = self.pipe_operand(rom) as u16;
+                    let hi = self.pipe_operand(rom) as u16;
                     let addr = lo | (hi << 8);
                     let w = self.ram_buffered_read_word(addr);
                     self.write_reg(n, w);
@@ -1169,16 +1227,16 @@ impl SuperFx {
                     cycles = 11;
                 } else if self.alt2 {
                     // SM (hilo),Rn.
-                    let lo = self.fetch(rom) as u16;
-                    let hi = self.fetch(rom) as u16;
+                    let lo = self.pipe_operand(rom) as u16;
+                    let hi = self.pipe_operand(rom) as u16;
                     let addr = lo | (hi << 8);
                     self.ram_buffered_write_word(addr, self.r[n]);
                     self.last_ram_addr = addr;
                     cycles = 9;
                 } else {
                     // IWT Rn,#yyxx.
-                    let lo = self.fetch(rom) as u16;
-                    let hi = self.fetch(rom) as u16;
+                    let lo = self.pipe_operand(rom) as u16;
+                    let hi = self.pipe_operand(rom) as u16;
                     self.write_reg(n, lo | (hi << 8));
                     cycles = 3;
                 }
@@ -1205,11 +1263,22 @@ impl SuperFx {
             self.r14_written = false;
             self.arm_rom_buffer();
         }
+
+        // Implicit post-instruction advance (bsnes `main()`): if the
+        // instruction did not itself write R15 (a jump/branch/computed-PC),
+        // step R15 past the just-executed opcode. Combined with `peek_opcode`
+        // not advancing R15 on the opcode fetch, this keeps R15 == opcode+1
+        // during execution so every read of R15 sees the hardware value.
+        if self.r15_written {
+            self.r15_written = false;
+        } else {
+            self.r[15] = self.r[15].wrapping_add(1);
+        }
         cycles
     }
 
     fn branch(&mut self, rom: &[u8], op: u8) {
-        let disp = self.fetch(rom) as i8 as i16;
+        let disp = self.pipe_operand(rom) as i8 as i16;
         let take = match op {
             0x05 => true,                 // BRA
             0x06 => (self.s ^ self.ov) == false, // BGE
@@ -1226,6 +1295,7 @@ impl SuperFx {
         };
         if take {
             self.r[15] = self.r[15].wrapping_add(disp as u16);
+            self.r15_written = true;
         }
     }
 }
