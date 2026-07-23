@@ -34,7 +34,8 @@ pub struct SuperFx {
     pub(crate) go: bool,
     /// SFR bit15 IRQ: set on STOP, cleared when SNES reads SFR high byte.
     pub(crate) irq: bool,
-    /// SFR bit6 R: a GETxx ROM read is in progress (functional model: always 0).
+    /// SFR bit6 R: a GETxx ROM read-ahead is in progress (set by `arm_rom_buffer`
+    /// when R14 is written, cleared when the buffered read completes).
     pub(crate) rom_read: bool,
     pub(crate) alt1: bool,
     pub(crate) alt2: bool,
@@ -85,6 +86,35 @@ pub struct SuperFx {
 
     /// Last RAM word address touched by a load/store (target of SBK).
     pub(crate) last_ram_addr: u16,
+
+    // ---- ROM/RAM read-ahead & write-queue buffers (superfx.md §7; bsnes
+    // timing.cpp romcl/romdr, ramcl/ramar/ramdr). GETB/GETC never read the
+    // bus live: they consume `romdr`, which is (re)loaded `buffer_latency()`
+    // GSU clocks after any write to R14, using ROMBR as it stands at the
+    // moment the countdown reaches zero (natural decay via `tick_buffers`,
+    // or forced immediately by `sync_rom_buffer` before GETB/GETC/ROMB). This
+    // is what makes a ROMB issued between an R14 write and the matching GETB
+    // able to steer which bank is captured, while a ROMB issued *after* the
+    // read has already latched cannot retroactively change it.
+    /// ROM buffer data register: the byte GETB/GETC return.
+    pub(crate) romdr: u8,
+    /// GSU clocks remaining until `romdr` is (re)loaded from [ROMBR:R14]; 0 =
+    /// no read-ahead in flight (romdr holds the last completed read).
+    pub(crate) romcl: u32,
+    /// RAM buffer data register: the byte queued by STW/STB/SM/SMS/SBK,
+    /// written to `ramar` when `ramcl` reaches 0.
+    pub(crate) ramdr: u8,
+    /// RAM address the queued `ramdr` byte targets.
+    pub(crate) ramar: u16,
+    /// GSU clocks remaining until the queued RAM write drains; 0 = idle.
+    pub(crate) ramcl: u32,
+    /// Set for one instruction when this instruction wrote R14 (any write
+    /// counts, even to the same value, matching bsnes `Register::modified`);
+    /// consumed at the end of `execute_one` to re-arm `romcl` so the freshly
+    /// armed countdown is not decremented by the same instruction's own
+    /// clocks (bsnes re-arms strictly after `instruction()` returns).
+    #[serde(skip)]
+    pub(crate) r14_written: bool,
 
     // Pixel cache: one 8-pixel row buffered before flush to RAM.
     pub(crate) pcache_x: u16,
@@ -148,6 +178,12 @@ impl SuperFx {
             cache_valid: [false; 32],
             ram: vec![0; ram_size.max(1)],
             last_ram_addr: 0,
+            romdr: 0,
+            romcl: 0,
+            ramdr: 0,
+            ramar: 0,
+            ramcl: 0,
+            r14_written: false,
             pcache_x: 0,
             pcache_y: 0,
             pcache_bits: [0; 8],
@@ -387,9 +423,127 @@ impl SuperFx {
         lo | (hi << 8)
     }
 
-    fn ram_write_word(&mut self, addr: u16, v: u16) {
-        self.ram_set(addr, (v & 0xFF) as u8);
-        self.ram_set(addr ^ 1, (v >> 8) as u8);
+    // ---- ROM/RAM read-ahead & write-queue buffers --------------------------
+
+    /// GSU clocks for one buffered ROM/RAM transfer: 5 in 21.4 MHz mode
+    /// (CLSR bit0 CLS=1), 6 in 10.7 MHz mode (bsnes `updateROMBuffer`/
+    /// `writeRAMBuffer`: `regs.clsr ? 5 : 6`).
+    fn buffer_latency(&self) -> u32 {
+        if self.clsr & 0x01 != 0 {
+            5
+        } else {
+            6
+        }
+    }
+
+    /// Write register `n` and, if `n == 14`, flag that R14 changed this
+    /// instruction (see `r14_written`). Every write counts, even a write of
+    /// the same value (bsnes `Register::assign` sets `modified` unconditionally).
+    #[inline]
+    fn write_reg(&mut self, n: usize, v: u16) {
+        self.r[n] = v;
+        if n == 14 {
+            self.r14_written = true;
+        }
+    }
+
+    /// Re-arm the ROM read-ahead countdown after a write to R14 (SNES-side
+    /// MMIO write, or a GSU instruction writing R14). Overwrites any prior
+    /// in-flight countdown outright (bsnes `updateROMBuffer`: one buffer
+    /// slot, no queueing of R14 writes). `romdr` keeps its stale value until
+    /// expiry; nothing observes it before then because GETB/GETC/ROMB always
+    /// force completion first via `sync_rom_buffer`.
+    pub(crate) fn arm_rom_buffer(&mut self) {
+        self.romcl = self.buffer_latency();
+        self.rom_read = true;
+    }
+
+    /// Advance the ROM/RAM buffer countdowns by `elapsed` GSU clocks (called
+    /// once per executed instruction with that instruction's own clock cost,
+    /// approximating bsnes' interleaved `step(clocks)` calls during opcode
+    /// fetch/execution). A countdown that reaches zero here latches using
+    /// ROMBR/RAMBR *at this moment* -- the property that lets a ROMB between
+    /// an R14 write and its GETB steer the captured bank.
+    fn tick_buffers(&mut self, rom: &[u8], elapsed: u32) {
+        if self.romcl > 0 {
+            self.romcl = self.romcl.saturating_sub(elapsed);
+            if self.romcl == 0 {
+                self.romdr = self.gsu_bus_read(rom, self.rombr, self.r[14]);
+                self.rom_read = false;
+            }
+        }
+        if self.ramcl > 0 {
+            self.ramcl = self.ramcl.saturating_sub(elapsed);
+            if self.ramcl == 0 {
+                self.ram_set(self.ramar, self.ramdr);
+            }
+        }
+    }
+
+    /// Force any pending ROM read-ahead to complete immediately, using
+    /// ROMBR/R14 as they stand right now. Called before GETB/GETC read
+    /// `romdr` and before ROMB changes ROMBR, so a ROMB that follows an
+    /// in-flight R14 write cannot retroactively change the bank of a read
+    /// hardware already started (bsnes `readROMBuffer`/`instructionGETC_
+    /// RAMB_ROMB` both call `syncROMBuffer()` first). A no-op if nothing is
+    /// pending (`romcl == 0`).
+    fn sync_rom_buffer(&mut self, rom: &[u8]) {
+        if self.romcl > 0 {
+            self.romdr = self.gsu_bus_read(rom, self.rombr, self.r[14]);
+            self.romcl = 0;
+            self.rom_read = false;
+        }
+    }
+
+    /// Force any queued RAM write to drain immediately (bsnes `syncRAMBuffer`).
+    /// Called before RAM reads (LDW/LDB/LM/LMS), before a second buffered
+    /// write reuses the queue slot, and before RAMB changes RAMBR (so the
+    /// queued byte lands in the bank it was written under).
+    pub(crate) fn sync_ram_buffer(&mut self) {
+        if self.ramcl > 0 {
+            self.ram_set(self.ramar, self.ramdr);
+            self.ramcl = 0;
+        }
+    }
+
+    /// Queue one buffered RAM byte write (STB/STW/SBK/SM/SMS byte lanes):
+    /// drain any previous pending write first (it occupies the single
+    /// buffer slot), then queue this one for `buffer_latency()` clocks out.
+    fn ram_buffered_write_byte(&mut self, addr: u16, v: u8) {
+        self.sync_ram_buffer();
+        self.ramar = addr;
+        self.ramdr = v;
+        self.ramcl = self.buffer_latency();
+    }
+
+    fn ram_buffered_write_word(&mut self, addr: u16, v: u16) {
+        self.ram_buffered_write_byte(addr, (v & 0xFF) as u8);
+        self.ram_buffered_write_byte(addr ^ 1, (v >> 8) as u8);
+    }
+
+    /// Buffered RAM byte read: drain any pending queued write first (real
+    /// RAM reads are not read-ahead buffered on GSU, only writes are queued;
+    /// bsnes `readRAMBuffer` syncs then reads directly).
+    fn ram_buffered_read_byte(&mut self, addr: u16) -> u8 {
+        self.sync_ram_buffer();
+        self.ram_byte(addr)
+    }
+
+    fn ram_buffered_read_word(&mut self, addr: u16) -> u16 {
+        self.sync_ram_buffer();
+        self.ram_read_word(addr)
+    }
+
+    /// Force both buffers to complete right away. Called when the GSU stops
+    /// (STOP opcode, or SNES aborting via SFR GO=0) so a still-queued RAM
+    /// write or in-flight ROM read-ahead is not silently lost: on hardware
+    /// the internal clock keeps advancing (and thus keeps draining the
+    /// buffers) even while GO=0 (bsnes `SuperFX::main` still calls `step(6)`
+    /// every cycle when `sfr.g == 0`); our scheduler only advances clocks
+    /// while executing instructions, so this is the equivalent drain point.
+    pub(crate) fn flush_buffers(&mut self, rom: &[u8]) {
+        self.sync_rom_buffer(rom);
+        self.sync_ram_buffer();
     }
 
     /// Absolute (RAMBR-independent) byte access from RAM start; used by plotting,
@@ -490,7 +644,7 @@ impl SuperFx {
 
     #[inline]
     fn set_dst(&mut self, v: u16) {
-        self.r[self.dreg] = v;
+        self.write_reg(self.dreg, v);
     }
 
     /// Update hang-diagnosis counters and, if a sink is installed, emit a
@@ -517,6 +671,15 @@ impl SuperFx {
 
     // ---- Instruction execution ----------------------------------------------
 
+    /// Common tail for prefix-only bytes (ALT1/ALT2/ALT3/TO/WITH/FROM
+    /// selection): these cost 1 GSU clock and must NOT run the prefix-state
+    /// reset (they ARE the prefix state being built), but GSU clock time
+    /// still elapses, so a pending ROM/RAM buffer countdown still ticks.
+    fn finish_prefix_only(&mut self, rom: &[u8]) -> u32 {
+        self.tick_buffers(rom, 1);
+        1
+    }
+
     fn execute_one(&mut self, rom: &[u8]) -> u32 {
         let op = self.fetch(rom);
         let mut cycles: u32 = 1;
@@ -526,26 +689,26 @@ impl SuperFx {
             // ---- Prefix opcodes (do not reset prefix state) ----
             0x3D => {
                 self.alt1 = true;
-                return 1;
+                return self.finish_prefix_only(rom);
             }
             0x3E => {
                 self.alt2 = true;
-                return 1;
+                return self.finish_prefix_only(rom);
             }
             0x3F => {
                 self.alt1 = true;
                 self.alt2 = true;
-                return 1;
+                return self.finish_prefix_only(rom);
             }
             0x10..=0x1F => {
                 let n = (op & 0x0F) as usize;
                 if self.b {
                     // MOVE Rd,Rs (TO byte under B flag). No flags.
-                    self.r[n] = self.r[self.sreg];
+                    self.write_reg(n, self.r[self.sreg]);
                     cycles = 2;
                 } else {
                     self.dreg = n;
-                    return 1;
+                    return self.finish_prefix_only(rom);
                 }
             }
             0x20..=0x2F => {
@@ -553,21 +716,21 @@ impl SuperFx {
                 self.sreg = n;
                 self.dreg = n;
                 self.b = true;
-                return 1;
+                return self.finish_prefix_only(rom);
             }
             0xB0..=0xBF => {
                 let n = (op & 0x0F) as usize;
                 if self.b {
                     // MOVES Rd,Rs. Flags 000vs-z, OV = src bit7.
                     let v = self.r[n];
-                    self.r[self.dreg] = v;
+                    self.write_reg(self.dreg, v);
                     self.ov = v & 0x80 != 0;
                     self.s = v & 0x8000 != 0;
                     self.z = v == 0;
                     cycles = 2;
                 } else {
                     self.sreg = n;
-                    return 1;
+                    return self.finish_prefix_only(rom);
                 }
             }
 
@@ -584,6 +747,10 @@ impl SuperFx {
                 self.go = false;
                 self.irq = true;
                 self.primed = false;
+                // Drain any in-flight ROM read-ahead / queued RAM write: on
+                // hardware the buffer clocks keep advancing after GO=0 (see
+                // `flush_buffers`), so nothing is lost.
+                self.flush_buffers(rom);
             }
             0x01 => {} // NOP (still resets prefix state)
             0x02 => {
@@ -632,10 +799,10 @@ impl SuperFx {
                 let v = self.src();
                 if self.alt1 {
                     // STB
-                    self.ram_set(addr, (v & 0xFF) as u8);
+                    self.ram_buffered_write_byte(addr, (v & 0xFF) as u8);
                     cycles = 4;
                 } else {
-                    self.ram_write_word(addr, v);
+                    self.ram_buffered_write_word(addr, v);
                     cycles = 3;
                 }
                 self.last_ram_addr = addr;
@@ -647,11 +814,11 @@ impl SuperFx {
                 let addr = self.r[n];
                 if self.alt1 {
                     // LDB (zero-extend byte)
-                    let b = self.ram_byte(addr) as u16;
+                    let b = self.ram_buffered_read_byte(addr) as u16;
                     self.set_dst(b);
                     cycles = 6;
                 } else {
-                    let w = self.ram_read_word(addr);
+                    let w = self.ram_buffered_read_word(addr);
                     self.set_dst(w);
                     cycles = 7;
                 }
@@ -791,7 +958,7 @@ impl SuperFx {
                 // SBK: word[last RAM addr] = Rs.
                 let v = self.src();
                 let addr = self.last_ram_addr;
-                self.ram_write_word(addr, v);
+                self.ram_buffered_write_word(addr, v);
             }
             0x91..=0x94 => {
                 // LINK #n: R11 = R15 + n.
@@ -879,20 +1046,21 @@ impl SuperFx {
                     // LMS Rn,(kk): addr = kk*2.
                     let kk = self.fetch(rom) as u16;
                     let addr = kk << 1;
-                    self.r[n] = self.ram_read_word(addr);
+                    let w = self.ram_buffered_read_word(addr);
+                    self.write_reg(n, w);
                     self.last_ram_addr = addr;
                     cycles = 10;
                 } else if self.alt2 {
                     // SMS (kk),Rn.
                     let kk = self.fetch(rom) as u16;
                     let addr = kk << 1;
-                    self.ram_write_word(addr, self.r[n]);
+                    self.ram_buffered_write_word(addr, self.r[n]);
                     self.last_ram_addr = addr;
                     cycles = 8;
                 } else {
                     // IBT Rn,#pp (sign-extended).
                     let pp = self.fetch(rom);
-                    self.r[n] = pp as i8 as i16 as u16;
+                    self.write_reg(n, pp as i8 as i16 as u16);
                     cycles = 2;
                 }
             }
@@ -926,22 +1094,30 @@ impl SuperFx {
             // ---- INC / GETC / RAMB / ROMB ----
             0xD0..=0xDE => {
                 let n = (op & 0x0F) as usize;
-                self.r[n] = self.r[n].wrapping_add(1);
+                self.write_reg(n, self.r[n].wrapping_add(1));
                 self.s = self.r[n] & 0x8000 != 0;
                 self.z = self.r[n] == 0;
             }
             0xDF => {
                 if self.alt2 && !self.alt1 {
-                    // RAMB: RAMBR = Rs AND 01h.
+                    // RAMB: RAMBR = Rs AND 01h. Sync the queued write first
+                    // (bsnes `syncRAMBuffer()` before assigning) so it drains
+                    // into the OLD bank, not the new one.
+                    self.sync_ram_buffer();
                     self.rambr = (self.src() & 0x01) as u8;
                     cycles = 2;
                 } else if self.alt1 && self.alt2 {
-                    // ROMB: ROMBR = Rs AND FFh.
+                    // ROMB: ROMBR = Rs AND FFh. Sync the pending read-ahead
+                    // first (bsnes `syncROMBuffer()` before assigning) so an
+                    // in-flight prefetch latches under the OLD bank, not the
+                    // one this instruction is about to set.
+                    self.sync_rom_buffer(rom);
                     self.rombr = (self.src() & 0xFF) as u8;
                     cycles = 2;
                 } else {
-                    // GETC: COLR = color(byte[ROMBR:R14]).
-                    let b = self.gsu_bus_read(rom, self.rombr, self.r[14]);
+                    // GETC: COLR = color(romdr). Never reads the bus live.
+                    self.sync_rom_buffer(rom);
+                    let b = self.romdr;
                     self.colr = self.apply_color(b);
                 }
             }
@@ -949,12 +1125,16 @@ impl SuperFx {
             // ---- DEC / GETB(H/L/S) ----
             0xE0..=0xEE => {
                 let n = (op & 0x0F) as usize;
-                self.r[n] = self.r[n].wrapping_sub(1);
+                self.write_reg(n, self.r[n].wrapping_sub(1));
                 self.s = self.r[n] & 0x8000 != 0;
                 self.z = self.r[n] == 0;
             }
             0xEF => {
-                let b = self.gsu_bus_read(rom, self.rombr, self.r[14]);
+                // GETB/GETBH/GETBL/GETBS: Rd = romdr (the read-ahead buffer
+                // latched by the last R14 write), never a live bus read
+                // (superfx.md §7; bsnes `readROMBuffer`).
+                self.sync_rom_buffer(rom);
+                let b = self.romdr;
                 if std::env::var("GSU_GETB").is_ok() {
                     eprintln!("GETB rombr={:02X} r14={:04X} -> {:02X}", self.rombr, self.r[14], b);
                 }
@@ -983,7 +1163,8 @@ impl SuperFx {
                     let lo = self.fetch(rom) as u16;
                     let hi = self.fetch(rom) as u16;
                     let addr = lo | (hi << 8);
-                    self.r[n] = self.ram_read_word(addr);
+                    let w = self.ram_buffered_read_word(addr);
+                    self.write_reg(n, w);
                     self.last_ram_addr = addr;
                     cycles = 11;
                 } else if self.alt2 {
@@ -991,14 +1172,14 @@ impl SuperFx {
                     let lo = self.fetch(rom) as u16;
                     let hi = self.fetch(rom) as u16;
                     let addr = lo | (hi << 8);
-                    self.ram_write_word(addr, self.r[n]);
+                    self.ram_buffered_write_word(addr, self.r[n]);
                     self.last_ram_addr = addr;
                     cycles = 9;
                 } else {
                     // IWT Rn,#yyxx.
                     let lo = self.fetch(rom) as u16;
                     let hi = self.fetch(rom) as u16;
-                    self.r[n] = lo | (hi << 8);
+                    self.write_reg(n, lo | (hi << 8));
                     cycles = 3;
                 }
             }
@@ -1010,6 +1191,19 @@ impl SuperFx {
             self.b = false;
             self.sreg = 0;
             self.dreg = 0;
+        }
+
+        // ROM/RAM read-ahead & write-queue bookkeeping (superfx.md §7; bsnes
+        // `step()`/`SuperFX::main`). Decay any countdown that was already
+        // pending *before* this instruction by this instruction's own clock
+        // cost, THEN (not before) re-arm a fresh countdown if this
+        // instruction wrote R14 -- the new countdown must not be shortened
+        // by the clocks of the very instruction that started it (bsnes only
+        // calls `updateROMBuffer()` after `instruction()` has fully returned).
+        self.tick_buffers(rom, cycles);
+        if self.r14_written {
+            self.r14_written = false;
+            self.arm_rom_buffer();
         }
         cycles
     }

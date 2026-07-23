@@ -98,6 +98,16 @@ impl SuperFx {
                 } else {
                     // Odd byte: commit LSB = latch, MSB = value.
                     self.r[n] = (self.latch as u16) | ((value as u16) << 8);
+                    if n == 14 {
+                        // SNES-side R14 write re-arms the ROM read-ahead
+                        // (superfx.md §7; bsnes `writeIO`: `if(n==14)
+                        // updateROMBuffer()`). bsnes fires this on every
+                        // individual byte write since it has no even/odd
+                        // latch; our latch-then-commit model only actually
+                        // changes r[14] on the odd-byte commit, so that is
+                        // the equivalent trigger point here.
+                        self.arm_rom_buffer();
+                    }
                     if addr == 0x301F {
                         // Writing R15 MSB sets GO=1 and starts the GSU.
                         self.go = true;
@@ -113,11 +123,20 @@ impl SuperFx {
                 self.ov = value & 0x10 != 0;
                 let go_new = value & 0x20 != 0;
                 if !go_new {
-                    // Aborting: forces CBR=0 and empties the cache.
+                    // Aborting: forces CBR=0 and empties the cache. Also
+                    // drain any RAM write still queued in the buffer (superfx
+                    // §7) so it is not silently lost -- on hardware the
+                    // internal clock keeps advancing (and draining) even
+                    // while GO=0. The ROM read-ahead buffer's pending
+                    // countdown is left as-is: nothing external observes
+                    // `romdr`, and `rom` (needed to complete it) is not
+                    // available at this MMIO call site; the next GETB/GETC/
+                    // ROMB after a restart forces it to finish anyway.
                     self.go = false;
                     self.cbr = 0;
                     self.invalidate_cache();
                     self.primed = false;
+                    self.sync_ram_buffer();
                 } else if !self.go {
                     // GO 0->1 start: the pipeline (re-)primes on the next run.
                     self.go = true;

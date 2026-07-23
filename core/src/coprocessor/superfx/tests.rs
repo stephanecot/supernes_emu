@@ -347,3 +347,147 @@ fn sfr_write_go0_resets_cache_and_cbr() {
     assert_eq!(fx.cbr, 0);
     assert!(fx.cache_valid.iter().all(|&v| !v));
 }
+
+// ---- ROM/RAM read-ahead buffer (superfx.md §7; bsnes timing.cpp) --------
+
+#[test]
+fn getb_reads_byte_at_rombr_r14() {
+    // Baseline: with no intervening ROMB, GETB just returns the byte at
+    // [ROMBR:R14] (ROMBR=0 by default) once the read-ahead has latched.
+    let fx = run(
+        |_| {},
+        &[
+            0xFE, 0x10, 0x00, // IWT R14,#$0010 -> arms the read-ahead
+            TO | 3, 0xEF,     // GETB: R3 = romdr
+            STOP,
+        ],
+    );
+    // rom[..code.len()] holds the program; offset $10 lands just past it and
+    // defaults to 0x00 (rom is zero-filled), so GETB must return 0.
+    assert_eq!(fx.r[3], 0x00);
+}
+
+#[test]
+fn romb_before_readahead_expiry_changes_captured_bank() {
+    // Core correctness property of the read-ahead buffer (superfx.md §7;
+    // bsnes `SuperFX::readROMBuffer`/`instructionGETC_RAMB_ROMB` both call
+    // `syncROMBuffer()` before touching ROMBR): GETB never reads the bus
+    // live, it returns `romdr`, latched when the pending read (armed by the
+    // preceding IWT R14) completes. ROMB executed *before* that completion
+    // forces the read to finish under the OLD ROMBR first, so the new bank
+    // ROMB sets has NO effect on this GETB's result even though ROMBR now
+    // reads back as the new value.
+    // Marker offset $0100 sits safely past the short program below (which
+    // must NOT overlap it, or the program bytes themselves clobber the
+    // marker read by GETB).
+    let mut rom = vec![0u8; 0x8200];
+    rom[0x0100] = 0xAA; // bank 0 byte at offset $0100
+    rom[0x8100] = 0xBB; // bank 1 byte at the same in-bank offset
+    let code: &[u8] = &[
+        0xFE, 0x00, 0x01, // IWT R14,#$0100 -> arms the read-ahead (ROMBR=0)
+        FROM | 1,         // FROM R1 (Sreg=R1=1)
+        ALT3,             // ALT1+ALT2
+        0xDF,             // ROMB: ROMBR=R1=1 (syncs the read under ROMBR=0 FIRST)
+        TO | 3,           // TO R3
+        0xEF,             // GETB: R3 = romdr
+        STOP,
+    ];
+    rom[..code.len()].copy_from_slice(code);
+    let mut fx = SuperFx::new(0x8000, VCR_GSU2);
+    fx.scmr = 0x18;
+    fx.r[1] = 1;
+    fx.r[15] = 0;
+    fx.pbr = 0;
+    fx.go = true;
+    fx.primed = false;
+    fx.run(&rom, 100_000);
+    assert_eq!(
+        fx.r[3], 0xAA,
+        "GETB must return the byte read under the OLD ROMBR (0), not the new one (1)"
+    );
+    assert_eq!(fx.rombr, 1, "ROMB still takes effect for later reads");
+}
+
+#[test]
+fn getb_returns_latched_byte_not_a_live_reread_after_natural_expiry() {
+    // Same property as above, exercised via the *natural* countdown decay
+    // (several NOPs let `romcl` reach 0 on its own) instead of a forced
+    // sync: a ROMB issued *after* the read has already latched must not
+    // retroactively change an already-captured byte, because GETB always
+    // returns the cached `romdr`, never a live [ROMBR:R14] read.
+    let mut rom = vec![0u8; 0x8200];
+    rom[0x0100] = 0xAA; // bank 0
+    rom[0x8100] = 0xBB; // bank 1
+    let code: &[u8] = &[
+        0xFE, 0x00, 0x01, // IWT R14,#$0100 -> arms the read-ahead (latency 6)
+        0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, // 8x NOP: drains romcl to 0
+        FROM | 1, ALT3, 0xDF, // ROMB: ROMBR=1, AFTER the read already latched
+        TO | 3, 0xEF, // GETB: R3 = romdr (still the pre-ROMB value)
+        STOP,
+    ];
+    rom[..code.len()].copy_from_slice(code);
+    let mut fx = SuperFx::new(0x8000, VCR_GSU2);
+    fx.scmr = 0x18;
+    fx.r[1] = 1;
+    fx.r[15] = 0;
+    fx.pbr = 0;
+    fx.go = true;
+    fx.primed = false;
+    fx.run(&rom, 100_000);
+    assert_eq!(fx.r[3], 0xAA, "already-latched byte must not change retroactively");
+    assert_eq!(fx.rombr, 1);
+}
+
+#[test]
+fn ram_write_queue_round_trip_via_stw_ldw() {
+    // STW queues the write into the RAM buffer (superfx.md §7); LDW must
+    // sync (drain) the pending queue before reading, so a read immediately
+    // following a write to the same address sees the written value.
+    let fx = run(
+        |fx| {
+            fx.r[1] = 0x1234; // value
+            fx.r[2] = 0x0010; // address
+        },
+        &[
+            FROM | 1, 0x30 | 2, // STW (R2): word[R2] = R1
+            TO | 4, 0x40 | 2,   // LDW (R2): R4 = word[R2]
+            STOP,
+        ],
+    );
+    assert_eq!(fx.r[4], 0x1234);
+}
+
+#[test]
+fn ramb_before_write_drain_lands_in_old_bank() {
+    // RAM analog of the ROMB test: RAMB syncs (drains) the pending queued
+    // write BEFORE changing RAMBR (bsnes `syncRAMBuffer()` before assigning),
+    // so a write queued while RAMBR=0 lands in bank 0's RAM even though RAMB
+    // switches to bank 1 before the write's own latency would have drained
+    // it naturally.
+    let mut rom = vec![0u8; 0x400];
+    let code: &[u8] = &[
+        0xF0 | 1, 0x34, 0x12, // IWT R1,#$1234 (value)
+        0xF0 | 2, 0x10, 0x00, // IWT R2,#$0010 (address)
+        FROM | 1, 0x30 | 2,   // STW (R2): queues word[$0010]=$1234 under RAMBR=0
+        FROM | 3, ALT2, 0xDF, // RAMB: RAMBR=R3=1 (syncs the queued write to OLD bank 0 first)
+        STOP,
+    ];
+    rom[..code.len()].copy_from_slice(code);
+    // 128 KB RAM so bank 0 ($700000+) and bank 1 ($710000+) don't alias
+    // through the emulator's `% ram.len()` mirroring (a real cart's RAM is
+    // usually <=64 KB and would alias in practice too, but that would defeat
+    // this specific regression check).
+    let mut fx = SuperFx::new(0x20000, VCR_GSU2);
+    fx.scmr = 0x18;
+    fx.r[3] = 1;
+    fx.r[15] = 0;
+    fx.pbr = 0;
+    fx.go = true;
+    fx.primed = false;
+    fx.run(&rom, 100_000);
+    assert_eq!(fx.rambr, 1);
+    assert_eq!(fx.ram[0x0010], 0x34, "bank 0 got the drained write");
+    assert_eq!(fx.ram[0x0011], 0x12);
+    assert_eq!(fx.ram[0x10010], 0x00, "bank 1 must be untouched");
+    assert_eq!(fx.ram[0x10011], 0x00);
+}
