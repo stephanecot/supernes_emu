@@ -51,14 +51,12 @@ User provided a Yoshi's Island ROM = **SuperFX** (GSU-2), so the target chip piv
 ## Menu bar: Cmd+Q / Quit menu does not flush SRAM
 The native macOS "Quit" (App menu / File menu / Cmd+Q) calls AppKit terminate: directly, bypassing the SRAM-flush-on-exit code that runs after event_loop.run_app() returns. Esc and the red close button still save correctly. Fix: install an NSApplicationWillTerminate observer (or a muda-driven custom Quit that flushes then exits) so battery saves are never lost on Cmd+Q. Do this together with save-states (both need a clean shutdown hook).
 
-## SuperFX / Yoshi's Island — integrated but does not boot (GSU correctness hang)
-The GSU coprocessor is now INTEGRATED: Yoshi's Island is detected as SuperFX (chipset $16), $3000–$32FF register accesses route to the GSU, the ROM/RAM lockout and stepping are wired, and 224 core tests pass (incl. the previously-failing beq branch test, fixed + un-ignored). Base ROMs unaffected (SMAS/SoM still render).
+## SuperFX / GSU — WORKING (Yoshi's Island boots)
+The GSU coprocessor is integrated AND functional. Yoshi's Island is detected as SuperFX, the GSU executes its decompressors, and the game **boots to the LANGUAGE SELECT screen with correctly GSU-decompressed graphics** (border, flags, text). 255 core tests pass; base ROMs unaffected.
 
-BUT Yoshi's Island does not display: **all frames black across 2000 frames.** Diagnosed — this is a HANG, not a pipeline bug:
-- VRAM is 99% full, and DMA from Game Pak RAM (bank $70) → VRAM ($2118) works. The GSU is driven correctly: the game writes R15/$301F, sets SCMR/$303A, and the SFR ($3030) reads back G=0 (GSU ran and stopped). So detection → routing → GSU execution → PLOT → RAM → DMA → VRAM all function.
-- The game re-runs the GSU repeatedly (headless run is ~13 s vs ~1–2 s normal) and keeps forced-blank on / brightness faded to 0 — i.e. it **rejects the GSU's output and loops**, never lifting to a visible screen. Same shape as the SMW intro hang: subsystems alive, completion condition never met — here gated on **GSU compute correctness**.
-- Root cause: a subtle GSU bug (an opcode under some ALT prefix, a flag, MULT/FMULT, or the PLOT/screen-mode format) produces output the game's self-check rejects. The unit tests pass but cover a fraction of real GSU behavior.
-- Next step: add a **GSU trace/disassembler** (like the 65C816 Mesen2 trace) to inspect execution — look for an infinite loop, an unimplemented opcode, or an obviously-wrong result — then diff against a reference emulator. This is a substantial debug effort; the GSU is the hardest part of the emulator.
+Bugs found and fixed along the way (all verified vs bsnes/snes9x source): GSU disassembler + `--trace-gsu` tooling added; PLOT/COLOR bitplane format; ROM/RAM bank decode ($60-7F = Game Pak RAM); RAM word byte-swap (addr^1); ROM/RAM read-ahead buffer (romdr/romcl); and the decisive one — **the GSU opcode fetch pre-advanced R15**, making every R15-derived value (branch targets, LINK, delay-slot immediates) one byte too high and cascading into wrong decompressor loop counts. Fixed by splitting opcode fetch (no R15 advance) from operand fetch, plus an r15_written flag for the implicit end-of-instruction R15++.
+
+Remaining (not blocking boot): deeper Yoshi's Island gameplay past LANGUAGE SELECT is not yet exercised and may surface further GSU edge cases; cycle-accurate GSU/SNES clock arbitration is approximated (per-instruction, not per-clock). Other SuperFX games (Star Fox, Doom, Stunt Race FX) untested. A live bsnes GSU trace remains the fastest way to chase any future GSU divergence.
 
 ## Tooling
 - `--trace-spc` is a no-op: expose an SPC700 trace hook in the APU core (needed for M8 debugging). DO THIS IN M8.
