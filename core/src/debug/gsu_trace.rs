@@ -34,7 +34,7 @@ fn sfr_string(fx: &SuperFx) -> String {
 /// fetch, while the byte about to execute (`pipe`) sits at `r15 - 1` at the
 /// moment this is called (right before `execute_one` consumes it).
 pub fn gsu_trace_line(fx: &SuperFx, fetch: &mut dyn FnMut(u32) -> u8) -> String {
-    let pc = fx.r[15].wrapping_sub(1);
+    let pc = fx.pipe_pc;
     let addr = ((fx.pbr as u32) << 16) | pc as u32;
     let (text, _len) =
         disassemble_one_ex(fetch, addr, fx.alt1, fx.alt2, fx.b, fx.sreg as u8);
@@ -64,6 +64,7 @@ mod tests {
         let mut fx = SuperFx::new(0x8000, VCR_GSU2);
         fx.pbr = 0x00;
         fx.r[15] = 0x0002; // pipeline already prefetched one byte past the opcode
+        fx.pipe_pc = 0x0001; // the prefetched byte was read from PBR:0001
         fx.r[3] = 0x1234;
         fx.z = true;
         fx.cy = true;

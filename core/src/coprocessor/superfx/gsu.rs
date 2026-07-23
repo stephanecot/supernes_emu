@@ -69,6 +69,9 @@ pub struct SuperFx {
 
     /// Prefetched opcode byte (holds mem[R15-1]).
     pub(crate) pipe: u8,
+    /// Address the current `pipe` byte was fetched from (debug/trace only).
+    #[serde(skip)]
+    pub(crate) pipe_pc: u16,
     /// Pipeline has been primed for the current run.
     pub(crate) primed: bool,
 
@@ -139,6 +142,7 @@ impl SuperFx {
             por: 0,
             latch: 0,
             pipe: 0,
+            pipe_pc: 0,
             primed: false,
             cache: Box::new([0; 512]),
             cache_valid: [false; 32],
@@ -371,15 +375,21 @@ impl SuperFx {
         self.ram[o] = v;
     }
 
+    // GSU word RAM access: the low byte lands at `addr`, the high byte at
+    // `addr ^ 1` (superfx.md §9 "word at odd address accesses (addr AND NOT 1)
+    // with LSB/MSB swapped"; bsnes writeRAMBuffer(ramaddr)/(ramaddr^1)). For an
+    // even address this is the usual addr/addr+1; for an odd address the high
+    // byte goes to addr-1, so STW/LDW/SM/LM/SBK to odd addresses byte-swap
+    // rather than crossing into the next word.
     fn ram_read_word(&self, addr: u16) -> u16 {
         let lo = self.ram_byte(addr) as u16;
-        let hi = self.ram_byte(addr.wrapping_add(1)) as u16;
+        let hi = self.ram_byte(addr ^ 1) as u16;
         lo | (hi << 8)
     }
 
     fn ram_write_word(&mut self, addr: u16, v: u16) {
         self.ram_set(addr, (v & 0xFF) as u8);
-        self.ram_set(addr.wrapping_add(1), (v >> 8) as u8);
+        self.ram_set(addr ^ 1, (v >> 8) as u8);
     }
 
     /// Absolute (RAMBR-independent) byte access from RAM start; used by plotting,
@@ -399,14 +409,24 @@ impl SuperFx {
         self.ram[off % n] = v;
     }
 
-    fn underlying_code_byte(&self, rom: &[u8], bank: u8, addr: u16) -> u8 {
-        if bank <= 0x5F {
-            self.rom_byte(rom, bank, addr)
-        } else {
-            // RAM banks $70/$71.
-            let off = ((bank as usize & 1) * 0x10000) + addr as usize;
-            self.ram_byte_abs(off)
+    /// GSU bus read with the hardware bank decode (superfx.md §4; bsnes
+    /// `SuperFX::read`): `$00-3F` LoROM ROM, `$40-5F` HiROM ROM, `$60-7F` Game
+    /// Pak RAM (linear, masked to RAM size), `$80-FF` open bus. Used for both
+    /// opcode fetch (PBR) and GETB/GETC (ROMBR) so a ROMBR pointing at the RAM
+    /// window reads RAM, not a wrapped ROM address.
+    pub(crate) fn gsu_bus_read(&self, rom: &[u8], bank: u8, addr: u16) -> u8 {
+        match bank {
+            0x00..=0x5F => self.rom_byte(rom, bank, addr),
+            0x60..=0x7F => {
+                let off = ((bank as usize) << 16) | addr as usize;
+                self.ram_byte_abs(off)
+            }
+            _ => 0, // $80-$FF: open bus
         }
+    }
+
+    fn underlying_code_byte(&self, rom: &[u8], bank: u8, addr: u16) -> u8 {
+        self.gsu_bus_read(rom, bank, addr)
     }
 
     /// Opcode fetch through the code cache. Addresses inside the 512-byte window
@@ -443,6 +463,7 @@ impl SuperFx {
     }
 
     fn prime(&mut self, rom: &[u8]) {
+        self.pipe_pc = self.r[15];
         self.pipe = self.read_code(rom, self.pbr, self.r[15]);
         self.r[15] = self.r[15].wrapping_add(1);
     }
@@ -450,6 +471,7 @@ impl SuperFx {
     /// Consume the prefetched byte and prefetch the next; advances R15.
     fn fetch(&mut self, rom: &[u8]) -> u8 {
         let out = self.pipe;
+        self.pipe_pc = self.r[15];
         self.pipe = self.read_code(rom, self.pbr, self.r[15]);
         self.r[15] = self.r[15].wrapping_add(1);
         out
@@ -919,7 +941,7 @@ impl SuperFx {
                     cycles = 2;
                 } else {
                     // GETC: COLR = color(byte[ROMBR:R14]).
-                    let b = self.rom_byte(rom, self.rombr, self.r[14]);
+                    let b = self.gsu_bus_read(rom, self.rombr, self.r[14]);
                     self.colr = self.apply_color(b);
                 }
             }
@@ -932,7 +954,7 @@ impl SuperFx {
                 self.z = self.r[n] == 0;
             }
             0xEF => {
-                let b = self.rom_byte(rom, self.rombr, self.r[14]);
+                let b = self.gsu_bus_read(rom, self.rombr, self.r[14]);
                 if std::env::var("GSU_GETB").is_ok() {
                     eprintln!("GETB rombr={:02X} r14={:04X} -> {:02X}", self.rombr, self.r[14], b);
                 }
