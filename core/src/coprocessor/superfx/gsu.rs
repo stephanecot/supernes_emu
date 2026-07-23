@@ -17,6 +17,9 @@
 /// GSU2 version code returned by VCR ($303B).
 pub const VCR_GSU2: u8 = 0x04;
 
+/// Ring-buffer length for `recent_pc` tight-loop diagnosis.
+const RECENT_PC_LEN: usize = 16;
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct SuperFx {
     /// General-purpose registers. R15 is the program counter.
@@ -85,6 +88,25 @@ pub struct SuperFx {
     pub(crate) pcache_y: u16,
     pub(crate) pcache_bits: [u8; 8],
     pub(crate) pcache_flags: u8,
+
+    // ---- Debug-only instrumentation (`--trace-gsu`); not emulated hardware
+    // state, excluded from save states, and never observed by game code. ----
+    /// `--trace-gsu` sink: fires once per executed instruction (including
+    /// prefix-only bytes ALT1/ALT2/ALT3/TO/WITH/FROM, each its own pipeline
+    /// fetch-execute step), immediately before it executes.
+    #[serde(skip)]
+    pub(crate) gsu_trace: Option<Box<dyn FnMut(&str)>>,
+    /// Total GSU instructions executed (including prefix-only bytes), for
+    /// hang diagnosis (e.g. "did the GSU ever run at all").
+    #[serde(skip)]
+    pub(crate) instructions_executed: u64,
+    /// Ring buffer of the last `RECENT_PC_LEN` instruction addresses (R15-1 at
+    /// fetch time). A tight loop shows up as a handful of distinct values
+    /// repeating here even without a trace sink installed.
+    #[serde(skip)]
+    pub(crate) recent_pc: [u16; RECENT_PC_LEN],
+    #[serde(skip)]
+    pub(crate) recent_pc_idx: usize,
 }
 
 impl SuperFx {
@@ -126,7 +148,36 @@ impl SuperFx {
             pcache_y: 0,
             pcache_bits: [0; 8],
             pcache_flags: 0,
+            gsu_trace: None,
+            instructions_executed: 0,
+            recent_pc: [0; RECENT_PC_LEN],
+            recent_pc_idx: 0,
         }
+    }
+
+    // ---- Debug/trace API (--trace-gsu) ---------------------------------------
+
+    /// Install the `--trace-gsu` sink (see `gsu_trace` field doc).
+    pub fn set_gsu_trace(&mut self, sink: Box<dyn FnMut(&str)>) {
+        self.gsu_trace = Some(sink);
+    }
+
+    /// Remove the trace sink and return it (drop it to flush any buffered writer).
+    pub fn clear_gsu_trace(&mut self) -> Option<Box<dyn FnMut(&str)>> {
+        self.gsu_trace.take()
+    }
+
+    /// Total GSU instructions executed since construction (debug counter).
+    pub fn instructions_executed(&self) -> u64 {
+        self.instructions_executed
+    }
+
+    /// Last up to `RECENT_PC_LEN` instruction addresses, oldest first; a tight
+    /// loop shows as a short repeating run here (hang-diagnosis aid).
+    pub fn recent_pc(&self) -> Vec<u16> {
+        (0..RECENT_PC_LEN)
+            .map(|i| self.recent_pc[(self.recent_pc_idx + i) % RECENT_PC_LEN])
+            .collect()
     }
 
     // ---- Public API for the Bus / cartridge integration ----------------------
@@ -243,6 +294,7 @@ impl SuperFx {
                 );
             }
             let was_go = self.go;
+            self.maybe_trace(rom);
             let c = self.execute_one(rom);
             if dbg && was_go && !self.go {
                 eprintln!("GSU STOP at pbr={:02X} r15={:04X}", self.pbr, self.r[15]);
@@ -275,6 +327,7 @@ impl SuperFx {
             self.prime(rom);
             self.primed = true;
         }
+        self.maybe_trace(rom);
         self.execute_one(rom)
     }
 
@@ -376,6 +429,19 @@ impl SuperFx {
         self.underlying_code_byte(rom, bank, addr)
     }
 
+    /// Non-mutating equivalent of `read_code`, for the trace formatter: reads
+    /// a cache line if already filled, otherwise computes the byte the way a
+    /// real fetch would (`underlying_code_byte`) without filling the cache.
+    /// Tracing must never change what/when the cache gets filled, so the
+    /// emulator behaves identically with tracing on or off.
+    pub(crate) fn peek_code(&self, rom: &[u8], bank: u8, addr: u16) -> u8 {
+        let idx = addr.wrapping_sub(self.cbr) as usize;
+        if idx < 0x200 && self.cache_valid[idx >> 4] {
+            return self.cache[idx];
+        }
+        self.underlying_code_byte(rom, bank, addr)
+    }
+
     fn prime(&mut self, rom: &[u8]) {
         self.pipe = self.read_code(rom, self.pbr, self.r[15]);
         self.r[15] = self.r[15].wrapping_add(1);
@@ -403,6 +469,28 @@ impl SuperFx {
     #[inline]
     fn set_dst(&mut self, v: u16) {
         self.r[self.dreg] = v;
+    }
+
+    /// Update hang-diagnosis counters and, if a sink is installed, emit a
+    /// trace line for the instruction about to execute. Called once per
+    /// `execute_one` (see call sites in `run`/`step`), before any register or
+    /// flag mutation. The counter/ring-buffer update is a fixed-size array
+    /// store (no allocation); the trace line itself (which does allocate a
+    /// `String`) is only built when `gsu_trace` is `Some`, so the normal
+    /// (tracing-off) path stays allocation-free per instruction.
+    fn maybe_trace(&mut self, rom: &[u8]) {
+        let pc = self.r[15].wrapping_sub(1);
+        self.recent_pc[self.recent_pc_idx] = pc;
+        self.recent_pc_idx = (self.recent_pc_idx + 1) % RECENT_PC_LEN;
+        self.instructions_executed = self.instructions_executed.wrapping_add(1);
+        if self.gsu_trace.is_none() {
+            return;
+        }
+        let mut fetch = |a: u32| self.peek_code(rom, (a >> 16) as u8, (a & 0xFFFF) as u16);
+        let line = crate::debug::gsu_trace::gsu_trace_line(self, &mut fetch);
+        if let Some(sink) = self.gsu_trace.as_mut() {
+            sink(&line);
+        }
     }
 
     // ---- Instruction execution ----------------------------------------------

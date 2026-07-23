@@ -33,6 +33,7 @@ struct Args {
     dump_dir: Option<PathBuf>,
     trace: Option<PathBuf>,
     trace_spc: Option<PathBuf>,
+    trace_gsu: Option<PathBuf>,
     trace_start_frame: u32,
     trace_end_frame: u32,
     log_mmio: bool,
@@ -54,6 +55,7 @@ const USAGE: &str = "usage: snes-frontend [rom.sfc|.smc|.zip] [flags]
   --dump-frame-every N --dump-dir DIR   write DIR/frame_XXXXX.png every N frames
   --trace PATH [--trace-start-frame A --trace-end-frame B]
   --trace-spc PATH                      SPC700 trace, same bounds
+  --trace-gsu PATH                      GSU/SuperFX trace, same bounds (needs a SuperFX cart)
   --log-mmio                            log named MMIO writes to stderr
   --watch BB:AAAA                       log every read/write at a bus address
   --script PATH                         input script: <frame> <button> <held>
@@ -118,6 +120,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             "--dump-dir" => a.dump_dir = Some(value(&mut it, "--dump-dir")?.into()),
             "--trace" => a.trace = Some(value(&mut it, "--trace")?.into()),
             "--trace-spc" => a.trace_spc = Some(value(&mut it, "--trace-spc")?.into()),
+            "--trace-gsu" => a.trace_gsu = Some(value(&mut it, "--trace-gsu")?.into()),
             "--trace-start-frame" => {
                 a.trace_start_frame = parse_num(&value(&mut it, "--trace-start-frame")?)?
             }
@@ -190,6 +193,9 @@ fn run(args: Args) -> Result<(), String> {
     if args.trace_spc.is_some() && !args.headless {
         eprintln!("--trace-spc requires --headless; ignoring");
     }
+    if args.trace_gsu.is_some() && !args.headless {
+        eprintln!("--trace-gsu requires --headless; ignoring");
+    }
 
     if !args.headless {
         if args.dump_audio.is_some() {
@@ -203,6 +209,7 @@ fn run(args: Args) -> Result<(), String> {
         None => BTreeMap::new(),
     };
 
+    let cart_has_gsu = cart.superfx.is_some();
     let mut snes = Snes::new(cart);
     if let Some(path) = &args.load_state {
         let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
@@ -233,6 +240,18 @@ fn run(args: Args) -> Result<(), String> {
     };
     let mut spc_installed = false;
 
+    // GSU trace shares the same frame bounds; the GSU runs lazily inside Bus
+    // gsu_catch_up, so (like the SPC trace) the sink is installed on the Snes
+    // for the whole frame range rather than driven per-instruction from here.
+    if args.trace_gsu.is_some() && !cart_has_gsu {
+        eprintln!("--trace-gsu: no SuperFX/GSU coprocessor in this cart; skipping");
+    }
+    let gsu_writer = match &args.trace_gsu {
+        Some(path) if cart_has_gsu => Some(Rc::new(RefCell::new(open_trace(path)?))),
+        _ => None,
+    };
+    let mut gsu_installed = false;
+
     let mut audio_pcm: Vec<(i16, i16)> = Vec::new();
 
     for frame in 0..args.frames {
@@ -249,6 +268,18 @@ fn run(args: Args) -> Result<(), String> {
             } else if !in_range && spc_installed {
                 snes.clear_spc_trace();
                 spc_installed = false;
+            }
+        }
+        if let Some(w) = &gsu_writer {
+            if in_range && !gsu_installed {
+                let w = Rc::clone(w);
+                snes.set_gsu_trace(Box::new(move |line: &str| {
+                    let _ = writeln!(w.borrow_mut(), "{line}");
+                }));
+                gsu_installed = true;
+            } else if !in_range && gsu_installed {
+                snes.clear_gsu_trace();
+                gsu_installed = false;
             }
         }
         let tracing = trace_writer.is_some() && in_range;
@@ -294,6 +325,13 @@ fn run(args: Args) -> Result<(), String> {
     }
     if let Some(w) = &spc_writer {
         w.borrow_mut().flush().map_err(|e| format!("flush spc trace: {e}"))?;
+    }
+
+    if gsu_installed {
+        snes.clear_gsu_trace();
+    }
+    if let Some(w) = &gsu_writer {
+        w.borrow_mut().flush().map_err(|e| format!("flush gsu trace: {e}"))?;
     }
 
     if let Some(path) = &args.dump_frame {

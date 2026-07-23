@@ -16,9 +16,15 @@ impl SuperFx {
     }
 
     /// Screen-height mode: 0=128px, 1=160px, 2=192px, 3=OBJ (256px).
-    /// POR bit4 (OBJ) or bit3 (freeze-high) force OBJ mapping.
+    /// Only POR bit4 (OBJ) forces OBJ mapping, ignoring SCMR HT0/HT1; bit3
+    /// (freeze-high) does NOT affect tile addressing (cross-checked against
+    /// bsnes `SuperFX::rpix`/`pixelcache_flush`: `por.obj ? 3 : scmr.ht`, and
+    /// snes9x `fxemu.cpp` which only tests `vPlotOptionReg & 0x10`). Forcing
+    /// OBJ mode from freeze-high alone made every plotted tile address wrong
+    /// whenever a game used freeze-high without OBJ mode, scrambling the
+    /// bitmap into the vertical-stripe corruption seen on Yoshi's Island.
     fn height_mode(&self) -> u8 {
-        if self.por & 0x10 != 0 || self.por & 0x08 != 0 {
+        if self.por & 0x10 != 0 {
             return 3;
         }
         let ht0 = (self.scmr >> 2) & 1;
@@ -54,18 +60,24 @@ impl SuperFx {
         tileno * sz + (self.scbr as usize) * 0x400 + ((y as usize) & 7) * 2
     }
 
-    /// Apply POR high-nibble / freeze-high logic to a color source byte.
+    /// Apply POR high-nibble / freeze-high logic to a color source byte, used
+    /// by COLOR/GETC. The two modes are mutually exclusive (high-nibble takes
+    /// priority when both POR bits are set) and both *keep the previous COLR
+    /// high nibble*, not the incoming byte's high nibble (bsnes gsu.cpp
+    /// `SuperFX::color()`: `highnibble -> (colr&0xf0)|(source>>4)`,
+    /// `freezehigh -> (colr&0xf0)|(source&0x0f)`, else passthrough). The prior
+    /// code used the incoming byte's own high nibble for high-nibble mode,
+    /// which is only externally visible once code reads COLR's high nibble
+    /// back out (e.g. via a further GETC/HIB), but is fixed here to match
+    /// hardware exactly.
     pub(crate) fn apply_color(&self, source: u8) -> u8 {
-        let mut c = source;
         if self.por & 0x04 != 0 {
-            // High-nibble: replace incoming LSB nibble by incoming MSB nibble.
-            c = (c & 0xF0) | (c >> 4);
+            (self.colr & 0xF0) | (source >> 4)
+        } else if self.por & 0x08 != 0 {
+            (self.colr & 0xF0) | (source & 0x0F)
+        } else {
+            source
         }
-        if self.por & 0x08 != 0 {
-            // Freeze-high: write only the low nibble, keep COLR's high nibble.
-            c = (c & 0x0F) | (self.colr & 0xF0);
-        }
-        c
     }
 
     /// PLOT: plot (R1,R2) = COLR into the pixel cache (POR transparency/dither
@@ -76,26 +88,41 @@ impl SuperFx {
         let depth = self.color_depth();
 
         let mut color = self.colr;
-        // Dither (4/16-color only): swap to high nibble on the checkerboard.
-        if self.por & 0x02 != 0 && depth != 8 && ((x ^ y) & 1) != 0 {
-            color >>= 4;
+        // Dither (4/16-color only, ignored in 256-color): on the (X XOR Y)
+        // checkerboard use COLR's high nibble instead of its low nibble, then
+        // restrict to a nibble (bsnes gsu.cpp plot(): the `&0x0f` applies
+        // whether or not the byte was shifted, not just after a shift).
+        if self.por & 0x02 != 0 && depth != 8 {
+            if (x ^ y) & 1 != 0 {
+                color >>= 4;
+            }
+            color &= 0x0F;
         }
-        let mask: u8 = ((1u16 << depth) - 1) as u8;
-        color &= mask;
 
-        // Color-0 transparency: check low 2/4/8 bits (freeze-high caps at 4).
-        let check_bits = if self.por & 0x08 != 0 {
-            depth.min(4)
-        } else {
-            depth
-        };
-        let cmask: u8 = ((1u16 << check_bits) - 1) as u8;
-        let transparent = (color & cmask) == 0;
-
-        if self.por & 0x01 == 0 && transparent {
-            // Color 0 not plotted, but R1 still advances.
-            self.r[1] = self.r[1].wrapping_add(1);
-            return;
+        // Color-0 transparency (POR bit0=0 => do not plot color 0; PLOT still
+        // advances R1). 4/16-color modes always test the low nibble
+        // regardless of freeze-high; 256-color tests the full byte unless
+        // freeze-high is set, in which case it also tests only the low
+        // nibble (bsnes gsu.cpp plot(); matches snes9x fxemu.cpp). Color is
+        // intentionally NOT pre-masked to `depth` bits here: the pixel-cache
+        // flush only ever reads the low `depth` bits (see below), so any
+        // higher bits are inert for the stored pixel value and only affect
+        // this transparency test, which must see the raw byte to match
+        // hardware.
+        if self.por & 0x01 == 0 {
+            let transparent = if depth == 8 {
+                if self.por & 0x08 != 0 {
+                    color & 0x0F == 0
+                } else {
+                    color == 0
+                }
+            } else {
+                color & 0x0F == 0
+            };
+            if transparent {
+                self.r[1] = self.r[1].wrapping_add(1);
+                return;
+            }
         }
 
         self.plot_pixel(x, y, color);
@@ -199,6 +226,49 @@ mod tests {
         fx.r[1] = 5;
         let v = fx.rpix();
         assert_eq!(v, 2);
+    }
+
+    #[test]
+    fn freeze_high_alone_does_not_force_obj_mode() {
+        // Regression test: POR bit3 (freeze-high) must NOT force OBJ tile
+        // addressing on its own (only POR bit4 does); a prior bug ORed bit3
+        // into the OBJ check, scrambling every tile address whenever a game
+        // used freeze-high without also setting OBJ mode.
+        let mut fx = SuperFx::new(0x8000, VCR_GSU2);
+        fx.scmr = 0x18; // 4-color, height 128 (HT1:HT0 = 00)
+        fx.por = 0x08; // freeze-high only, no OBJ bit, plot color 0 disabled
+        fx.colr = 3;
+        fx.r[1] = 8; // x: tile column 1 (xt=1)
+        fx.r[2] = 0; // y
+        fx.plot();
+        fx.flush_pixel_cache();
+        // Height-128 tile addressing: tile 1 at TileNo*sz = 0x10*0x10 = 0x100.
+        // OBJ-mode addressing (the bug) would instead land at tile 1*0x10=0x10.
+        assert_eq!(fx.ram()[0x100], 0x80);
+        assert_eq!(fx.ram()[0x101], 0x80);
+        assert_eq!(fx.ram()[0x10], 0x00);
+        assert_eq!(fx.ram()[0x11], 0x00);
+    }
+
+    #[test]
+    fn apply_color_high_nibble_keeps_previous_colr_high_nibble() {
+        // bsnes gsu.cpp SuperFX::color(): highnibble -> (colr&0xf0)|(source>>4).
+        // A prior bug used the incoming byte's own high nibble instead of the
+        // previous COLR's high nibble.
+        let mut fx = SuperFx::new(0x8000, VCR_GSU2);
+        fx.colr = 0xA0;
+        fx.por = 0x04; // high-nibble
+        let c = fx.apply_color(0x5F);
+        assert_eq!(c, 0xA5);
+    }
+
+    #[test]
+    fn apply_color_freeze_high_keeps_previous_colr_high_nibble() {
+        let mut fx = SuperFx::new(0x8000, VCR_GSU2);
+        fx.colr = 0xB0;
+        fx.por = 0x08; // freeze-high
+        let c = fx.apply_color(0x3D);
+        assert_eq!(c, 0xBD);
     }
 
     #[test]

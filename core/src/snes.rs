@@ -80,6 +80,27 @@ impl Snes {
         self.bus.apu.clear_spc_trace()
     }
 
+    /// True if the loaded cartridge has a SuperFX/GSU coprocessor.
+    pub fn has_superfx(&self) -> bool {
+        self.bus.cart.superfx.is_some()
+    }
+
+    /// Install a `--trace-gsu` sink that fires once per GSU instruction
+    /// (including prefix-only bytes), immediately before it executes. The GSU
+    /// runs lazily inside `Bus::gsu_catch_up` (driven by CPU/PPU ticks), so
+    /// the sink stays installed until `clear_gsu_trace`. No-op if the cart has
+    /// no SuperFX chip (`has_superfx() == false`).
+    pub fn set_gsu_trace(&mut self, sink: Box<dyn FnMut(&str)>) {
+        if let Some(fx) = self.bus.cart.superfx.as_mut() {
+            fx.set_gsu_trace(sink);
+        }
+    }
+
+    /// Remove the GSU trace sink; drop the returned box to flush its writer.
+    pub fn clear_gsu_trace(&mut self) -> Option<Box<dyn FnMut(&str)>> {
+        self.bus.cart.superfx.as_mut().and_then(|fx| fx.clear_gsu_trace())
+    }
+
     /// Copy the PPU's freshly-rendered frame into `self.framebuffer`, the
     /// mirror the frontend reads by field access (`snes.framebuffer`).
     fn mirror_framebuffer(&mut self) {

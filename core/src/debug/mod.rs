@@ -1,6 +1,9 @@
-//! Debug infrastructure: 65816 disassembler and Mesen2-format trace logger.
+//! Debug infrastructure: 65816/SPC700/GSU disassemblers and trace-line
+//! formatters.
 
 pub mod disasm;
+pub mod gsu_disasm;
+pub mod gsu_trace;
 pub mod spc_disasm;
 pub mod trace;
 

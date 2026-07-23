@@ -27,6 +27,7 @@ description: Build, test, lint and run the SNES emulator (Rust workspace) — ru
 | `--dump-frame-every N --dump-dir DIR` | Write DIR/frame_XXXXX.png every N frames |
 | `--trace PATH --trace-start-frame A --trace-end-frame B` | Mesen2-format 65C816 trace for frames A..B (unbounded traces are gigabytes — always bound) |
 | `--trace-spc PATH` | SPC700 trace, same frame bounds |
+| `--trace-gsu PATH` | GSU/SuperFX trace, same frame bounds; needs a SuperFX cart (prints a note and skips otherwise) |
 | `--log-mmio` | Log named MMIO writes ($21xx/$42xx/$43xx) to stderr |
 | `--watch BB:AAAA` | Log every read/write at a bus address |
 | `--script PATH` | Headless input script; each line: `<frame> <button> <frames_held>` with buttons `A B X Y L R Start Select Up Down Left Right` |
