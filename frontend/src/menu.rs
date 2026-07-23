@@ -14,7 +14,7 @@
 #![cfg(target_os = "macos")]
 
 use muda::accelerator::{Accelerator, Code, CMD_OR_CTRL};
-use muda::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+use muda::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
 /// Stable ids for the items `video.rs` dispatches on after a
 /// `MenuEvent::receiver().try_recv()`. Predefined items (About, Quit,
@@ -26,6 +26,7 @@ pub const PAUSE_RESUME_ID: &str = "snes-frontend.pause-resume";
 pub const RESET_ID: &str = "snes-frontend.reset";
 pub const SAVE_STATE_ID: &str = "snes-frontend.save-state";
 pub const LOAD_STATE_ID: &str = "snes-frontend.load-state";
+pub const SHOW_FPS_ID: &str = "snes-frontend.show-fps";
 pub const QUIT_ID: &str = "snes-frontend.quit";
 
 /// Live handles for the menu items `video.rs` needs after construction.
@@ -36,6 +37,13 @@ pub struct AppMenu {
     pub reset: MenuItem,
     pub save_state: MenuItem,
     pub load_state: MenuItem,
+    /// `View > Show FPS` (Cmd+F). AppKit toggles a `CheckMenuItem`'s own
+    /// checked state itself before the click reaches our `MenuEvent`
+    /// channel (see `poll_menu_events`), so `video.rs` reads
+    /// `is_checked()` after the event rather than flipping a bool — the
+    /// same item is also toggled programmatically from the `F` hotkey via
+    /// `set_checked` to keep the two in sync.
+    pub show_fps: CheckMenuItem,
     /// App-menu (leftmost) Quit, Cmd+Q. A custom item rather than
     /// `PredefinedMenuItem::quit` so its click routes through our
     /// `MenuEvent` channel and we exit the winit loop cleanly (which flushes
@@ -124,7 +132,21 @@ pub fn install() -> AppMenu {
     ]);
     let _ = menu_bar.append(&emulation_menu);
 
+    let view_menu = Submenu::new("View", true);
+    // Unchecked by default (see video.rs App::show_fps): the overlay is an
+    // opt-in debug aid, not something that should appear over a game by
+    // default.
+    let show_fps = CheckMenuItem::with_id(
+        SHOW_FPS_ID,
+        "Show FPS",
+        true,
+        false,
+        Some(Accelerator::new(Some(CMD_OR_CTRL), Code::KeyF)),
+    );
+    let _ = view_menu.append_items(&[&show_fps]);
+    let _ = menu_bar.append(&view_menu);
+
     menu_bar.init_for_nsapp();
 
-    AppMenu { open_rom, pause_resume, reset, save_state, load_state, quit, quit_file }
+    AppMenu { open_rom, pause_resume, reset, save_state, load_state, show_fps, quit, quit_file }
 }

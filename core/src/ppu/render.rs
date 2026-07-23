@@ -3,9 +3,13 @@
 //! then applies color math (ppu.md §11), master brightness and forced blank
 //! (ppu.md §15), writing BGR555 into `ppu.framebuffer`.
 //!
-//! True hires (modes 5/6) BG layers are rendered at 512 dots and decimated 2:1
-//! to the 256-wide main-screen composite (keeping the even half-dots); see
-//! `background.rs`. Pseudo-hires subscreen blending is not separately modeled.
+//! Hires output (true hires modes 5/6, or pseudo-hires $2133 bit3 in a low-res
+//! mode) produces 512 half-dots: the subscreen occupies the left/even half-dots
+//! and the main screen the right/odd half-dots (fullsnes "shift subscreen half
+//! dot to the left"; ppu.md §11). The two half-dots per screen column are
+//! averaged into the 256-wide framebuffer. In true hires the two BG passes
+//! sample different half-dots of the 512-dot field; in pseudo-hires both passes
+//! sample the same low-res BG and only the main/sub split differs.
 
 use crate::ppu::background::render_bg_line;
 use crate::ppu::mode7::render_mode7_line;
@@ -197,6 +201,79 @@ fn apply_brightness(color: u16, brightness: u8) -> u16 {
     r | (g << 5) | (b << 10)
 }
 
+/// Per-channel average of two BGR555 colors (the two hires half-dots blur into
+/// one 256-wide framebuffer pixel).
+fn average(a: u16, b: u16) -> u16 {
+    let r = ((a & 0x1F) + (b & 0x1F)) >> 1;
+    let g = (((a >> 5) & 0x1F) + ((b >> 5) & 0x1F)) >> 1;
+    let bl = (((a >> 10) & 0x1F) + ((b >> 10) & 0x1F)) >> 1;
+    r | (g << 5) | (bl << 10)
+}
+
+/// Resolve the main-screen pixel at column `x` (topmost of `main_bgs`) and apply
+/// color math (ppu.md §11), returning the pre-brightness BGR555 color. The color
+/// math addend, when CGWSEL bit1 selects the subscreen, is the topmost pixel of
+/// `sub_bgs`. Outside hires `main_bgs` and `sub_bgs` are the same array.
+fn composite_main(
+    ppu: &Ppu,
+    order: &[Src],
+    main_bgs: &[[LayerPixel; 256]; 4],
+    sub_bgs: &[[LayerPixel; 256]; 4],
+    obj: &[ObjPixel; 256],
+    x: usize,
+) -> u16 {
+    let main = resolve_screen(ppu, order, main_bgs, obj, ppu.main_screen, ppu.main_window, x);
+    let (mut main_color, main_bit, is_obj, obj_pal) = match &main {
+        Some(r) => (resolve_color(ppu, r), r.math_bit, r.math_bit == 4, r.obj_pal),
+        // No main layer -> backdrop (CGRAM color 0), CGADSUB bit5.
+        None => (ppu.cgram[0], 5, false, 0),
+    };
+
+    // CGWSEL 7-6: force the main-screen pixel to black (math may still add).
+    let fb = window::force_black_region(ppu, x);
+    if fb {
+        main_color = 0;
+    }
+
+    let prevent = window::prevent_math_region(ppu, x);
+    let layer_math = ppu.cgadsub & (1 << main_bit) != 0;
+    let obj_ok = !is_obj || obj_pal >= 4;
+
+    if !prevent && layer_math && obj_ok {
+        let use_sub = ppu.cgwsel & 0x02 != 0;
+        let (addend, sub_transparent) = if use_sub {
+            match resolve_screen(ppu, order, sub_bgs, obj, ppu.sub_screen, ppu.sub_window, x) {
+                Some(r) => (resolve_color(ppu, &r), false),
+                // Transparent subscreen -> fixed color, half suppressed.
+                None => (fixed_color(ppu), true),
+            }
+        } else {
+            (fixed_color(ppu), false)
+        };
+        let subtract = ppu.cgadsub & 0x80 != 0;
+        let half = ppu.cgadsub & 0x40 != 0 && !fb && !(use_sub && sub_transparent);
+        color_math(main_color, addend, subtract, half)
+    } else {
+        main_color
+    }
+}
+
+/// Subscreen pixel shown on the hires left/even half-dot: topmost subscreen
+/// layer, or the subscreen backdrop (COLDATA fixed color) when transparent
+/// (ppu.md §11). No color math is applied to the subscreen half-dot.
+fn subscreen_display(
+    ppu: &Ppu,
+    order: &[Src],
+    sub_bgs: &[[LayerPixel; 256]; 4],
+    obj: &[ObjPixel; 256],
+    x: usize,
+) -> u16 {
+    match resolve_screen(ppu, order, sub_bgs, obj, ppu.sub_screen, ppu.sub_window, x) {
+        Some(r) => resolve_color(ppu, &r),
+        None => fixed_color(ppu),
+    }
+}
+
 /// Composite one visible scanline (`line` = row 0..=223) into `ppu.framebuffer`.
 pub fn render_scanline(ppu: &mut Ppu, line: u16) {
     let row = line as usize;
@@ -215,13 +292,20 @@ pub fn render_scanline(ppu: &mut Ppu, line: u16) {
     let mut obj = [ObjPixel::default(); 256];
     crate::ppu::sprites::render_obj_line(ppu, line, &mut obj);
 
-    let mut bgs = [[LayerPixel::default(); 256]; 4];
+    // True hires (5/6) samples different half-dots per pass; pseudo-hires blends
+    // the main/sub screens on alternating half-dots in a low-res mode. Mode 7 is
+    // never hires and keeps the single-pass path.
+    let hires_output =
+        (matches!(ppu.bg_mode, 5 | 6) || ppu.pseudo_hires) && ppu.bg_mode != 7;
+
+    let mut bgs_main = [[LayerPixel::default(); 256]; 4];
+    let mut bgs_sub = [[LayerPixel::default(); 256]; 4];
     if ppu.bg_mode == 7 {
         let mut m7 = [0u8; 256];
         render_mode7_line(ppu, line, &mut m7);
         for x in 0..SCREEN_WIDTH {
             let v = m7[x];
-            bgs[0][x] = LayerPixel {
+            bgs_main[0][x] = LayerPixel {
                 color: v,
                 priority: 0,
                 opaque: v != 0,
@@ -229,7 +313,7 @@ pub fn render_scanline(ppu: &mut Ppu, line: u16) {
             if ppu.extbg {
                 // EXTBG BG2: bit7 = priority, low 7 bits = color index.
                 let c = v & 0x7F;
-                bgs[1][x] = LayerPixel {
+                bgs_main[1][x] = LayerPixel {
                     color: c,
                     priority: (v >> 7) & 1,
                     opaque: c != 0,
@@ -237,52 +321,31 @@ pub fn render_scanline(ppu: &mut Ppu, line: u16) {
             }
         }
     } else {
-        for (i, bg) in bgs.iter_mut().enumerate() {
-            render_bg_line(ppu, i, line, bg);
+        for i in 0..4 {
+            // Main screen = odd (right) half-dot; subscreen = even (left).
+            render_bg_line(ppu, i, line, 1, &mut bgs_main[i]);
+            if hires_output {
+                render_bg_line(ppu, i, line, 0, &mut bgs_sub[i]);
+            }
         }
     }
 
     let order = priority_order(ppu.bg_mode, ppu.bg3_priority, ppu.extbg);
 
-    for x in 0..SCREEN_WIDTH {
-        let main =
-            resolve_screen(ppu, order, &bgs, &obj, ppu.main_screen, ppu.main_window, x);
-        let (mut main_color, main_bit, is_obj, obj_pal) = match &main {
-            Some(r) => (resolve_color(ppu, r), r.math_bit, r.math_bit == 4, r.obj_pal),
-            // No main layer -> backdrop (CGRAM color 0), CGADSUB bit5.
-            None => (ppu.cgram[0], 5, false, 0),
-        };
-
-        // CGWSEL 7-6: force the main-screen pixel to black (math may still add).
-        let fb = window::force_black_region(ppu, x);
-        if fb {
-            main_color = 0;
+    if hires_output {
+        for x in 0..SCREEN_WIDTH {
+            let main_c = composite_main(ppu, order, &bgs_main, &bgs_sub, &obj, x);
+            let sub_c = subscreen_display(ppu, order, &bgs_sub, &obj, x);
+            ppu.framebuffer.0[base + x] = average(
+                apply_brightness(main_c, brightness),
+                apply_brightness(sub_c, brightness),
+            );
         }
-
-        let prevent = window::prevent_math_region(ppu, x);
-        let layer_math = ppu.cgadsub & (1 << main_bit) != 0;
-        let obj_ok = !is_obj || obj_pal >= 4;
-
-        let out = if !prevent && layer_math && obj_ok {
-            let use_sub = ppu.cgwsel & 0x02 != 0;
-            let (addend, sub_transparent) = if use_sub {
-                match resolve_screen(ppu, order, &bgs, &obj, ppu.sub_screen, ppu.sub_window, x)
-                {
-                    Some(r) => (resolve_color(ppu, &r), false),
-                    // Transparent subscreen -> fixed color, half suppressed.
-                    None => (fixed_color(ppu), true),
-                }
-            } else {
-                (fixed_color(ppu), false)
-            };
-            let subtract = ppu.cgadsub & 0x80 != 0;
-            let half = ppu.cgadsub & 0x40 != 0 && !fb && !(use_sub && sub_transparent);
-            color_math(main_color, addend, subtract, half)
-        } else {
-            main_color
-        };
-
-        ppu.framebuffer.0[base + x] = apply_brightness(out, brightness);
+    } else {
+        for x in 0..SCREEN_WIDTH {
+            let out = composite_main(ppu, order, &bgs_main, &bgs_main, &obj, x);
+            ppu.framebuffer.0[base + x] = apply_brightness(out, brightness);
+        }
     }
 }
 
@@ -487,6 +550,52 @@ mod tests {
         // Main BG2 (0x0004) + Sub BG1 (0x0210) added per channel.
         let expected = color_math(0x0004, 0x0210, false, false);
         assert_eq!(ppu.framebuffer.0[0], expected);
+    }
+
+    #[test]
+    fn pseudo_hires_averages_main_and_sub_half_dots() {
+        let mut ppu = Ppu::new();
+        ppu.bg_mode = 1;
+        ppu.brightness = 15;
+        ppu.pseudo_hires = true; // $2133 bit3
+        ppu.main_screen = 0x01; // BG1 on main
+        ppu.sub_screen = 0x02; // BG2 on sub
+        ppu.cgwsel = 0;
+        ppu.cgadsub = 0; // no color math
+        ppu.cgram[0] = 0;
+        // BG1 (main) tile 1 -> palette 0 idx 1 -> cgram[1] = red 31.
+        ppu.bg_char_base[0] = 0x0000;
+        ppu.vram[16] = 0x0080; // 4bpp tile1 row0 col0 value 1
+        ppu.vram[0] = 1;
+        ppu.cgram[1] = 0x001F;
+        // BG2 (sub) tile 1 palette 1 -> cgram[17] = blue 31.
+        ppu.bg_char_base[1] = 0x0000;
+        ppu.bg_map_base[1] = 0x0400;
+        ppu.vram[0x0400] = 1 | (1 << 10);
+        ppu.cgram[17] = 0x7C00;
+
+        ppu.render_scanline(0);
+
+        // Left half-dot = subscreen (BG2), right half-dot = main (BG1), averaged.
+        let expected = average(apply_brightness(0x001F, 15), apply_brightness(0x7C00, 15));
+        assert_eq!(ppu.framebuffer.0[0], expected);
+    }
+
+    #[test]
+    fn non_hires_output_unchanged_by_hires_path() {
+        // With pseudo-hires off the compositor must take the single-pass path.
+        let mut ppu = Ppu::new();
+        ppu.bg_mode = 1;
+        ppu.brightness = 15;
+        ppu.main_screen = 0x01;
+        ppu.cgram[0] = 0x1234;
+        ppu.bg_char_base[0] = 0x0000;
+        ppu.vram[16] = 0x0080;
+        ppu.vram[0] = 1;
+        ppu.cgram[1] = 0x7FFF;
+        ppu.render_scanline(0);
+        assert_eq!(ppu.framebuffer.0[0], 0x7FFF);
+        assert_eq!(ppu.framebuffer.0[1], 0x1234);
     }
 
     #[test]

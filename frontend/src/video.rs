@@ -89,6 +89,8 @@ pub fn run(
         frame_advance: false,
         audio,
         audio_scratch: Vec::new(),
+        fps_counter: FpsCounter::new(),
+        show_fps: false,
         #[cfg(target_os = "macos")]
         menu: None,
     };
@@ -124,10 +126,65 @@ struct App {
     audio: Option<AudioOutput>,
     /// Reused per-frame drain buffer to avoid re-allocating each frame.
     audio_scratch: Vec<(i16, i16)>,
+    /// Rolling wall-clock rate of frames actually drawn (see `FpsCounter`).
+    fps_counter: FpsCounter,
+    /// `View > Show FPS` (macOS) / `F` hotkey: overlays the measured
+    /// display FPS on the presented frame. Default off — see `App::resumed`
+    /// and the menu's default unchecked `CheckMenuItem`.
+    show_fps: bool,
     /// Menu bar handles, installed once in `resumed` (needs `NSApp` to
     /// exist first); `None` until then.
     #[cfg(target_os = "macos")]
     menu: Option<AppMenu>,
+}
+
+/// Wall-clock window over which `FpsCounter` averages; short enough to react
+/// to a slowdown within about half a second, long enough that the on-screen
+/// digits don't flicker frame to frame.
+const FPS_WINDOW: Duration = Duration::from_millis(500);
+
+/// Rolling display-FPS counter: records the `Instant` each frame is drawn
+/// (i.e. each time the framebuffer is converted to RGBA for `pixels`, in
+/// `about_to_wait`) and reports the average rate over the trailing
+/// `FPS_WINDOW`. This measures real presented frames per wall-second, not
+/// the emulator's internal frame count, so a stall (GC pause, slow host,
+/// window occlusion) is visible even though `Snes::run_frame` always
+/// advances exactly one emulated frame per call.
+struct FpsCounter {
+    samples: std::collections::VecDeque<Instant>,
+}
+
+impl FpsCounter {
+    fn new() -> Self {
+        Self { samples: std::collections::VecDeque::new() }
+    }
+
+    /// Record a frame drawn "now"; drop samples older than `FPS_WINDOW`.
+    fn tick(&mut self) {
+        let now = Instant::now();
+        self.samples.push_back(now);
+        while let Some(&front) = self.samples.front() {
+            if now.duration_since(front) > FPS_WINDOW {
+                self.samples.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Average frames/second over the trailing window; `0.0` until at least
+    /// two samples have been recorded (first tick after start/resume).
+    fn fps(&self) -> f64 {
+        if self.samples.len() < 2 {
+            return 0.0;
+        }
+        let span =
+            self.samples.back().unwrap().duration_since(*self.samples.front().unwrap());
+        if span.as_secs_f64() <= 0.0 {
+            return 0.0;
+        }
+        (self.samples.len() - 1) as f64 / span.as_secs_f64()
+    }
 }
 
 impl ApplicationHandler for App {
@@ -215,7 +272,27 @@ impl ApplicationHandler for App {
             self.snes.run_frame([self.pad, JoypadState::default()]);
             self.frame_advance = false;
             if let Some(pixels) = &mut self.pixels {
-                self.snes.framebuffer.to_rgba(pixels.frame_mut());
+                let frame = pixels.frame_mut();
+                self.snes.framebuffer.to_rgba(frame);
+                self.fps_counter.tick();
+                // Overlay drawn only on the windowed present path, after the
+                // core's own (pure) RGBA conversion — never touches
+                // `snes.framebuffer` itself, so headless `--dump-frame`
+                // output is unaffected.
+                if self.show_fps {
+                    let measured = self.fps_counter.fps();
+                    let target = 1.0 / self.frame_duration.as_secs_f64();
+                    // Green once the measured rate is within 5% of the
+                    // cartridge region's native field rate (50/60 Hz); red
+                    // if the emulator is falling behind it.
+                    let color = if measured <= 0.0 || measured >= target * 0.95 {
+                        [80, 255, 80, 255]
+                    } else {
+                        [255, 70, 70, 255]
+                    };
+                    let text = format!("FPS{:.0}/{:.0}", measured, target);
+                    draw_overlay_text(frame, &text, color);
+                }
             }
             // Feed this frame's audio into the ring; the callback's rate control
             // absorbs the emulator/host clock drift.
@@ -264,6 +341,10 @@ impl App {
                 }
                 KeyCode::F9 => {
                     self.load_state();
+                    return;
+                }
+                KeyCode::KeyF => {
+                    self.toggle_show_fps();
                     return;
                 }
                 _ => {}
@@ -317,6 +398,19 @@ impl App {
         match self.snes.load_state(&bytes) {
             Ok(()) => eprintln!("state: loaded {}", path.display()),
             Err(e) => eprintln!("state: load failed ({}): {e}", path.display()),
+        }
+    }
+
+    /// `F` hotkey / `View > Show FPS` (Cmd+F): toggles the on-screen FPS
+    /// overlay (see `draw_overlay_text`). Also keeps the macOS menu's
+    /// checkbox in sync when triggered from the keyboard, since AppKit only
+    /// updates the checkmark itself when the *menu* item is clicked (see
+    /// `poll_menu_events`, which does the reverse sync).
+    fn toggle_show_fps(&mut self) {
+        self.show_fps = !self.show_fps;
+        #[cfg(target_os = "macos")]
+        if let Some(menu) = &self.menu {
+            menu.show_fps.set_checked(self.show_fps);
         }
     }
 
@@ -395,6 +489,11 @@ impl App {
                 self.save_state();
             } else if event.id == menu.load_state.id() {
                 self.load_state();
+            } else if event.id == menu.show_fps.id() {
+                // AppKit already flipped the CheckMenuItem's own checked
+                // state before sending this click event (muda macOS impl);
+                // mirror it rather than toggling again.
+                self.show_fps = menu.show_fps.is_checked();
             }
         }
     }
@@ -419,5 +518,192 @@ fn pace(deadline: &mut Instant, frame_duration: Duration) {
     *deadline += frame_duration;
     if Instant::now() > *deadline + frame_duration * 4 {
         *deadline = Instant::now() + frame_duration;
+    }
+}
+
+// --- FPS overlay: tiny built-in bitmap font, windowed-present-only ---------
+//
+// Deliberately not a font asset: the overlay only ever needs digits, F/P/S
+// and '/', so a hand-encoded 3x5 glyph table avoids pulling in a font
+// dependency for six on-screen characters. Drawn directly into the `pixels`
+// RGBA8 frame buffer from `about_to_wait`, after `FrameBuffer::to_rgba` —
+// `snes.framebuffer` (the core's own pixel data) is never touched, so this
+// has no effect on headless `--dump-frame`/`--dump-frame-every` output,
+// which reads straight from the core.
+
+/// Glyph cell size before scaling: 3 columns x 5 rows.
+const GLYPH_W: usize = 3;
+const GLYPH_H: usize = 5;
+/// Each on-screen glyph pixel is drawn as a `FONT_SCALE`x`FONT_SCALE` block;
+/// at 1x a 3px-wide digit would be nearly unreadable on the native 256x224
+/// buffer.
+const FONT_SCALE: usize = 2;
+/// Horizontal distance (in output pixels) from one glyph's left edge to the
+/// next: glyph width + 1 column of inter-glyph spacing, both scaled.
+const CHAR_ADVANCE: usize = (GLYPH_W + 1) * FONT_SCALE;
+/// Gap between the framebuffer edge and the overlay's background box.
+const OVERLAY_MARGIN: usize = 3;
+/// Gap between the background box edge and the glyphs it contains.
+const OVERLAY_PAD: usize = 2;
+
+/// 3x5 bitmap glyph for one overlay character. Each row is a `u8` using its
+/// low 3 bits as the left/middle/right pixel columns (bit 2 = leftmost, bit
+/// 0 = rightmost; set = lit). Only the characters the overlay ever prints
+/// ("FPS<n>/<n>") are defined; anything else renders as a blank cell (still
+/// advances the cursor, like a space).
+fn glyph(c: char) -> [u8; GLYPH_H] {
+    match c {
+        '0' => [0b111, 0b101, 0b101, 0b101, 0b111],
+        '1' => [0b010, 0b110, 0b010, 0b010, 0b111],
+        '2' => [0b111, 0b001, 0b111, 0b100, 0b111],
+        '3' => [0b111, 0b001, 0b111, 0b001, 0b111],
+        '4' => [0b101, 0b101, 0b111, 0b001, 0b001],
+        '5' => [0b111, 0b100, 0b111, 0b001, 0b111],
+        '6' => [0b111, 0b100, 0b111, 0b101, 0b111],
+        '7' => [0b111, 0b001, 0b001, 0b001, 0b001],
+        '8' => [0b111, 0b101, 0b111, 0b101, 0b111],
+        '9' => [0b111, 0b101, 0b111, 0b001, 0b111],
+        'F' => [0b111, 0b100, 0b111, 0b100, 0b100],
+        'P' => [0b111, 0b101, 0b111, 0b100, 0b100],
+        'S' => [0b111, 0b100, 0b111, 0b001, 0b111],
+        '/' => [0b001, 0b001, 0b010, 0b100, 0b100],
+        _ => [0; GLYPH_H],
+    }
+}
+
+/// Blits a solid `w`x`h` RGBA rectangle at `(x,y)` into an RGBA8
+/// `SCREEN_WIDTH`x`SCREEN_HEIGHT` frame buffer, clipped to its bounds.
+fn fill_rect(frame: &mut [u8], x: usize, y: usize, w: usize, h: usize, color: [u8; 4]) {
+    for row in y..(y + h).min(SCREEN_HEIGHT) {
+        let row_base = row * SCREEN_WIDTH * 4;
+        for col in x..(x + w).min(SCREEN_WIDTH) {
+            let i = row_base + col * 4;
+            frame[i..i + 4].copy_from_slice(&color);
+        }
+    }
+}
+
+/// Paints `text` into the top-right corner of an RGBA8
+/// `SCREEN_WIDTH`x`SCREEN_HEIGHT` frame buffer over a solid black background
+/// box, so the overlay stays legible against any game content behind it.
+fn draw_overlay_text(frame: &mut [u8], text: &str, color: [u8; 4]) {
+    let text_w = text.chars().count() * CHAR_ADVANCE;
+    let box_w = text_w + OVERLAY_PAD * 2;
+    let box_h = GLYPH_H * FONT_SCALE + OVERLAY_PAD * 2;
+    if box_w > SCREEN_WIDTH || box_h > SCREEN_HEIGHT {
+        return; // pathological (shouldn't happen for the overlay's own text): skip rather than panic on OOB math
+    }
+    let x0 = SCREEN_WIDTH - OVERLAY_MARGIN - box_w;
+    let y0 = OVERLAY_MARGIN;
+
+    fill_rect(frame, x0, y0, box_w, box_h, [0, 0, 0, 255]);
+
+    let mut cx = x0 + OVERLAY_PAD;
+    let cy = y0 + OVERLAY_PAD;
+    for ch in text.chars() {
+        let rows = glyph(ch);
+        for (row, bits) in rows.iter().enumerate() {
+            for col in 0..GLYPH_W {
+                if bits & (1 << (GLYPH_W - 1 - col)) != 0 {
+                    let px = cx + col * FONT_SCALE;
+                    let py = cy + row * FONT_SCALE;
+                    fill_rect(frame, px, py, FONT_SCALE, FONT_SCALE, color);
+                }
+            }
+        }
+        cx += CHAR_ADVANCE;
+    }
+}
+
+#[cfg(test)]
+mod overlay_tests {
+    use super::*;
+
+    #[test]
+    fn glyph_digits_and_symbols_match_hand_encoded_bitmap() {
+        assert_eq!(glyph('0'), [0b111, 0b101, 0b101, 0b101, 0b111]);
+        assert_eq!(glyph('1'), [0b010, 0b110, 0b010, 0b010, 0b111]);
+        assert_eq!(glyph('8'), [0b111, 0b101, 0b111, 0b101, 0b111]);
+        assert_eq!(glyph('F'), [0b111, 0b100, 0b111, 0b100, 0b100]);
+        assert_eq!(glyph('/'), [0b001, 0b001, 0b010, 0b100, 0b100]);
+        // Unknown/space characters render as a blank cell (still advances
+        // the cursor in draw_overlay_text) rather than panicking.
+        assert_eq!(glyph(' '), [0; GLYPH_H]);
+    }
+
+    #[test]
+    fn fill_rect_paints_only_the_target_region() {
+        let mut frame = vec![9u8; SCREEN_WIDTH * SCREEN_HEIGHT * 4];
+        fill_rect(&mut frame, 2, 3, 4, 2, [255, 0, 0, 255]);
+        let idx = |x: usize, y: usize| (y * SCREEN_WIDTH + x) * 4;
+        // Inside the 4x2 rect at (2,3): painted red.
+        assert_eq!(&frame[idx(2, 3)..idx(2, 3) + 4], &[255, 0, 0, 255]);
+        assert_eq!(&frame[idx(5, 4)..idx(5, 4) + 4], &[255, 0, 0, 255]);
+        // One row above / one column right of the rect: untouched sentinel.
+        assert_eq!(&frame[idx(2, 2)..idx(2, 2) + 4], &[9, 9, 9, 9]);
+        assert_eq!(&frame[idx(6, 3)..idx(6, 3) + 4], &[9, 9, 9, 9]);
+    }
+
+    #[test]
+    fn fill_rect_clips_to_frame_bounds_without_panicking() {
+        // A rect straddling the bottom-right edge must clip, not index OOB.
+        let mut frame = vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT * 4];
+        fill_rect(&mut frame, SCREEN_WIDTH - 2, SCREEN_HEIGHT - 2, 10, 10, [1, 2, 3, 4]);
+        let last = ((SCREEN_HEIGHT - 1) * SCREEN_WIDTH + (SCREEN_WIDTH - 1)) * 4;
+        assert_eq!(&frame[last..last + 4], &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn draw_overlay_text_paints_top_right_box_and_leaves_rest_untouched() {
+        let mut frame = vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT * 4];
+        let text_color = [80, 255, 80, 255];
+        draw_overlay_text(&mut frame, "FPS60/50", text_color);
+        // Background box corner near the top-right edge is the black box fill.
+        let idx = (OVERLAY_MARGIN * SCREEN_WIDTH + (SCREEN_WIDTH - OVERLAY_MARGIN - 1)) * 4;
+        assert_eq!(&frame[idx..idx + 4], &[0, 0, 0, 255]);
+        // Top-left corner of the buffer is untouched by a top-right overlay.
+        assert_eq!(&frame[0..4], &[0, 0, 0, 0]);
+        // At least one glyph pixel was actually lit in the requested color.
+        assert!(
+            frame.chunks_exact(4).any(|p| p == text_color),
+            "expected at least one lit glyph pixel in the overlay text color"
+        );
+    }
+}
+
+#[cfg(test)]
+mod fps_counter_tests {
+    use super::*;
+
+    #[test]
+    fn reports_zero_before_two_samples() {
+        let mut c = FpsCounter::new();
+        assert_eq!(c.fps(), 0.0);
+        c.tick();
+        assert_eq!(c.fps(), 0.0);
+    }
+
+    #[test]
+    fn averages_synthetic_60fps_samples() {
+        let mut c = FpsCounter::new();
+        // Synthesize 10 samples 16.667ms apart (60 Hz) without any real
+        // sleeping, so the test is deterministic and instant.
+        let base = Instant::now();
+        for i in 0..10u32 {
+            c.samples.push_back(base + Duration::from_micros(16_667) * i);
+        }
+        let fps = c.fps();
+        assert!((fps - 60.0).abs() < 1.0, "expected ~60 fps, got {fps}");
+    }
+
+    #[test]
+    fn drops_samples_older_than_the_window() {
+        let mut c = FpsCounter::new();
+        let now = Instant::now();
+        // A stale sample from well before FPS_WINDOW must be evicted by the
+        // next tick(), which stamps "now" internally.
+        c.samples.push_back(now - FPS_WINDOW * 4);
+        c.tick();
+        assert_eq!(c.samples.len(), 1, "stale sample should have been evicted");
     }
 }

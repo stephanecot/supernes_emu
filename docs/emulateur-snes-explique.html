@@ -13,7 +13,7 @@
   @page :first { @bottom-center { content: ""; } @bottom-right { content: ""; } }
 
   * { box-sizing: border-box; }
-  html { font-size: 10.7pt; }
+  html { font-size: 10.5pt; }
   body {
     font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
     color: #23232b; line-height: 1.5; margin: 0;
@@ -34,18 +34,25 @@
   .cover .meta { font-size: 10pt; color: #8a8a99; border-top: 2px solid #ececf2; padding-top: 14px; }
   .cover .meta strong { color: #4a4a5c; }
 
+  /* --- TOC --- */
+  .toc { page-break-after: always; }
+  .toc h2 { border: none; }
+  .toc ol { font-size: 11pt; line-height: 1.9; padding-left: 22px; }
+  .toc ol ol { font-size: 10pt; line-height: 1.6; color: #55556a; }
+  .toc a { color: #2b2b3a; text-decoration: none; }
+
   h2 {
     font-size: 16.5pt; color: #1b1b22; margin: 26px 0 6px; padding-bottom: 5px;
     border-bottom: 3px solid #4c86e0; page-break-after: avoid;
   }
   h2 .n { color: #4c86e0; font-weight: 800; margin-right: 8px; }
-  h3 { font-size: 12pt; color: #2b2b3a; margin: 16px 0 4px; page-break-after: avoid; }
+  h3 { font-size: 12.5pt; color: #2b2b3a; margin: 18px 0 4px; page-break-after: avoid; }
+  h4 { font-size: 10.8pt; color: #3a3a4a; margin: 12px 0 2px; page-break-after: avoid; }
   p { margin: 6px 0; text-align: justify; }
-  ul, ol { margin: 6px 0 6px 0; padding-left: 20px; }
+  ul, ol { margin: 6px 0; padding-left: 20px; }
   li { margin: 3px 0; }
   strong { color: #14141a; }
   em.term { font-style: normal; font-weight: 700; color: #3a63b0; }
-
   .lead { font-size: 11.5pt; color: #44445a; }
 
   .card {
@@ -56,39 +63,45 @@
   .card.analogy::before { content: "💡  Analogie"; display:block; font-weight: 700; color: #a9853a; font-size: 9.5pt; margin-bottom: 3px; }
   .card.key { background: #eef4fb; border-color: #cfe0f4; }
   .card.key::before { content: "🔑  À retenir"; display:block; font-weight: 700; color: #3a63b0; font-size: 9.5pt; margin-bottom: 3px; }
+  .card.deep { background: #f3f0fa; border-color: #ddd4f0; }
+  .card.deep::before { content: "🔬  Pour aller plus loin"; display:block; font-weight: 700; color: #6b4fa0; font-size: 9.5pt; margin-bottom: 3px; }
+  .card.story { background: #eef7f0; border-color: #cfe8d6; }
+  .card.story::before { content: "🐛  Histoire d'un bug"; display:block; font-weight: 700; color: #3a8a58; font-size: 9.5pt; margin-bottom: 3px; }
 
   code, .mono { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 9pt; }
   code { background: #ececf3; padding: 1px 4px; border-radius: 3px; color: #34344a; }
   pre {
     background: #1e1e28; color: #e6e6ef; border-radius: 8px; padding: 12px 14px;
-    font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 8.6pt; line-height: 1.45;
-    overflow-x: auto; page-break-inside: avoid; margin: 10px 0;
+    font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 8.4pt; line-height: 1.45;
+    overflow-x: auto; page-break-inside: avoid; margin: 10px 0; white-space: pre-wrap;
   }
-  pre .c { color: #7f8aa5; } pre .k { color: #c99bf0; } pre .s { color: #9ece6a; } pre .r { color: #f7a072; }
+  pre .c { color: #7f8aa5; } pre .k { color: #c99bf0; } pre .s { color: #9ece6a; } pre .r { color: #f7a072; } pre .b { color: #6db3f2; }
 
-  table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 9.3pt; page-break-inside: avoid; }
+  table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 9pt; page-break-inside: avoid; }
   th, td { border: 1px solid #e0e0ea; padding: 5px 8px; text-align: left; vertical-align: top; }
   th { background: #2b2b3a; color: #fff; font-weight: 600; }
   tr:nth-child(even) td { background: #f7f7fb; }
+  td.mono, th.mono { font-family: Menlo, monospace; font-size: 8.4pt; }
 
-  /* memory-map diagram */
   .memmap { page-break-inside: avoid; margin: 12px 0; }
   .memrow { display: flex; align-items: stretch; margin: 3px 0; }
-  .memrow .addr { width: 34mm; font-family: "SF Mono", Menlo, monospace; font-size: 8.4pt; color: #6b6b80; padding-top: 6px; }
+  .memrow .addr { width: 34mm; font-family: "SF Mono", Menlo, monospace; font-size: 8.2pt; color: #6b6b80; padding-top: 6px; }
   .memrow .bar { flex: 1; border-radius: 5px; padding: 6px 10px; color: #fff; font-size: 9pt; font-weight: 600; }
   .b-wram { background: #5b7cc2; } .b-mmio { background: #c26a6a; } .b-rom { background: #6a9e6a; }
   .b-sram { background: #b98a4a; } .b-open { background: #9a9aa8; }
 
   .flow { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 10px 0; page-break-inside: avoid; }
-  .flow .step { background: #eef1f8; border: 1px solid #d5ddec; border-radius: 6px; padding: 6px 10px; font-size: 9pt; font-weight: 600; color: #33415e; }
+  .flow .step { background: #eef1f8; border: 1px solid #d5ddec; border-radius: 6px; padding: 6px 10px; font-size: 8.8pt; font-weight: 600; color: #33415e; }
   .flow .arrow { color: #9aa3b8; font-weight: 700; }
 
-  .two { display: flex; gap: 14px; page-break-inside: avoid; }
-  .two > div { flex: 1; }
+  .bits { display: flex; gap: 2px; margin: 8px 0; page-break-inside: avoid; flex-wrap: wrap; }
+  .bits .bit { width: 30px; height: 30px; border: 1px solid #cfd3e0; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-family: Menlo, monospace; font-size: 9pt; font-weight: 700; }
+  .bits .bit.on { background: #4c86e0; color: #fff; border-color: #4c86e0; }
+  .bits .bit.off { background: #f2f3f7; color: #a9adba; }
+  .bits .lbl { font-size: 7pt; color: #8a8a99; text-align: center; }
 
-  .chip-title { display: flex; align-items: center; gap: 8px; }
-  .chip-title .badge { font-size: 8.5pt; font-weight: 700; color: #fff; padding: 2px 8px; border-radius: 10px; }
   footer.end { margin-top: 24px; border-top: 2px solid #ececf2; padding-top: 12px; color: #8a8a99; font-size: 9pt; }
+  .small { font-size: 9pt; color: #66667a; }
 </style>
 </head>
 <body>
@@ -97,336 +110,636 @@
 <section class="cover">
   <div class="dots"><span class="d-blue"></span><span class="d-red"></span><span class="d-yellow"></span><span class="d-green"></span></div>
   <h1>Comment fonctionne<br>un émulateur Super&nbsp;Nintendo</h1>
-  <p class="sub">Une explication pédagogique, du processeur au pixel et au son</p>
+  <p class="sub">Guide pédagogique complet — du transistor au pixel, du processeur au son</p>
   <div class="meta">
     Émulateur écrit <strong>from scratch en Rust</strong> — CPU 65C816, PPU graphique,
-    APU sonore (SPC700 + S‑DSP), DMA/HDMA, cartouches LoROM/HiROM.<br>
-    Document technique et pédagogique · Version 1.0
+    APU sonore (SPC700 + S‑DSP), DMA/HDMA, cartouches LoROM/HiROM et coprocesseur SuperFX.<br>
+    Document technique et pédagogique · Version 2.0 — édition détaillée
   </div>
 </section>
 
-<!-- ================= INTRO ================= -->
+<!-- ================= TABLE OF CONTENTS ================= -->
+<section class="toc">
+<h2>Table des matières</h2>
+<ol>
+  <li>Qu'est‑ce qu'émuler une console&nbsp;?</li>
+  <li>Petit rappel : bits, octets et hexadécimal</li>
+  <li>Vue d'ensemble : qui parle à qui</li>
+  <li>La cartouche et la carte mémoire</li>
+  <li>Le cœur : le processeur 65C816</li>
+  <li>Le chef d'orchestre : le timing et l'ordonnanceur</li>
+  <li>La puce graphique : le PPU</li>
+  <li>Le déménageur : DMA et HDMA</li>
+  <li>Le son : l'APU (SPC700 + S‑DSP)</li>
+  <li>Les puces de cartouche : le coprocesseur SuperFX</li>
+  <li>La boucle d'émulation : tout synchroniser</li>
+  <li>Au‑delà de la console : sauvegardes et save states</li>
+  <li>Comment cet émulateur a été construit et vérifié</li>
+  <li>Glossaire</li>
+</ol>
+</section>
+
+<!-- ================= 1. INTRO ================= -->
 <h2><span class="n">1.</span>Qu'est‑ce qu'émuler une console&nbsp;?</h2>
 <p class="lead">
-  Une console de jeu comme la Super Nintendo (SNES / Super Famicom, 1990) est un ensemble de
-  <strong>puces électroniques</strong> qui coopèrent : un processeur, une puce vidéo, une puce
-  audio, de la mémoire. <em class="term">Émuler</em> la console, c'est écrire un programme qui
-  <strong>imite le comportement de chacune de ces puces</strong>, cycle par cycle, de façon
-  assez fidèle pour que le code d'origine d'un jeu — les mêmes octets que sur la cartouche —
-  s'exécute et produise exactement la même image et le même son.
+  Une console de jeu comme la Super Nintendo (SNES / Super Famicom, sortie en 1990) est un
+  ensemble de <strong>puces électroniques</strong> qui coopèrent : un processeur, une puce
+  vidéo, une puce audio, de la mémoire. <em class="term">Émuler</em> la console, c'est écrire
+  un programme qui <strong>imite le comportement de chacune de ces puces</strong>, assez
+  fidèlement pour que le code d'origine d'un jeu — les mêmes octets que sur la cartouche —
+  s'exécute et produise exactement la même image et le même son que sur la vraie machine.
 </p>
 <div class="card analogy">
   Émuler, ce n'est pas « refaire le jeu ». C'est construire une <strong>fausse console</strong>
   si convaincante que la vraie cartouche ne voit pas la différence. Le jeu croit parler à une
-  vraie puce vidéo ; en réalité il parle à quelques milliers de lignes de Rust.
+  vraie puce vidéo&nbsp;; en réalité il parle à quelques milliers de lignes de Rust qui
+  répondent exactement comme le silicium d'origine l'aurait fait.
 </div>
+<h3>Pourquoi la fidélité est difficile</h3>
 <p>
-  La SNES est une machine <strong>16 bits</strong>. Ses composants principaux sont :
+  Le défi n'est pas d'imiter une puce isolée&nbsp;: c'est de faire <strong>cohabiter toutes les
+  puces au rythme exact</strong>. Les programmeurs de jeux des années 90 exploitaient le moindre
+  détail de synchronisation — par exemple changer une couleur pile au moment où le canon à
+  électrons du téléviseur passe à la ligne suivante, pour obtenir un dégradé. Si l'émulateur se
+  trompe de quelques cycles, l'effet casse. Un bon émulateur doit donc reproduire non seulement
+  <em>ce que</em> font les puces, mais <em>quand</em> elles le font.
 </p>
+<p>La SNES est une machine <strong>16 bits</strong>. Ses composants principaux&nbsp;:</p>
 <ul>
-  <li><strong>Le CPU 65C816</strong> — le cerveau : il exécute la logique du jeu.</li>
-  <li><strong>Le PPU</strong> (<em>Picture Processing Unit</em>) — la puce graphique : elle dessine l'écran.</li>
-  <li><strong>L'APU</strong> (<em>Audio Processing Unit</em>) — un mini‑ordinateur sonore autonome.</li>
-  <li><strong>La mémoire</strong> — WRAM (128 Ko de travail), VRAM (vidéo), et la cartouche (ROM + sauvegarde).</li>
-  <li><strong>Le DMA</strong> — un déménageur d'octets ultra‑rapide entre ces mémoires.</li>
+  <li><strong>Le CPU 65C816</strong> — le cerveau&nbsp;: il exécute la logique du jeu (physique, IA, score…).</li>
+  <li><strong>Le PPU</strong> (<em>Picture Processing Unit</em>) — la puce graphique&nbsp;: elle compose l'image, ligne par ligne.</li>
+  <li><strong>L'APU</strong> (<em>Audio Processing Unit</em>) — un mini‑ordinateur sonore complet et autonome.</li>
+  <li><strong>La mémoire</strong> — 128 Ko de travail (WRAM), 64 Ko de vidéo (VRAM), et la cartouche (ROM + sauvegarde).</li>
+  <li><strong>Le DMA</strong> — un « déménageur » d'octets ultra‑rapide entre ces mémoires.</li>
+  <li><strong>Parfois, une puce dans la cartouche</strong> — comme le SuperFX, un second processeur qui dessine de la 3D.</li>
 </ul>
 
-<!-- ================= OVERVIEW ================= -->
-<h2><span class="n">2.</span>Vue d'ensemble : qui parle à qui</h2>
+<!-- ================= 2. BITS ================= -->
+<h2><span class="n">2.</span>Petit rappel : bits, octets et hexadécimal</h2>
 <p>
-  Tout est relié par un <em class="term">bus</em> : une autoroute d'adresses par laquelle le
-  CPU lit et écrit. Quand le CPU écrit à une certaine adresse, ce n'est pas toujours de la
-  mémoire — cela peut être un <strong>registre</strong> qui commande le PPU, l'audio ou un
-  transfert. C'est le rôle du bus de <strong>router</strong> chaque accès au bon endroit.
+  Pour comprendre la suite, trois notions suffisent. Tout, dans une console, se ramène à des
+  <em class="term">bits</em> — des interrupteurs qui valent 0 ou 1.
+</p>
+<ul>
+  <li>Un <strong>octet</strong> (<em>byte</em>) = 8 bits. Il représente un nombre de 0 à 255.</li>
+  <li>Un <strong>mot</strong> (<em>word</em>) 16 bits = 2 octets, de 0 à 65 535.</li>
+  <li>On note souvent les nombres en <strong>hexadécimal</strong> (base 16), préfixés par <code>$</code>. Chaque chiffre hexa vaut 4 bits. Ainsi <code>$FF</code> = 255, <code>$8000</code> = 32768.</li>
+</ul>
+<p>Un octet valant <code>$A9</code> (169), c'est ces huit interrupteurs&nbsp;:</p>
+<div class="bits">
+  <div><div class="bit on">1</div><div class="lbl">128</div></div>
+  <div><div class="bit off">0</div><div class="lbl">64</div></div>
+  <div><div class="bit on">1</div><div class="lbl">32</div></div>
+  <div><div class="bit off">0</div><div class="lbl">16</div></div>
+  <div><div class="bit on">1</div><div class="lbl">8</div></div>
+  <div><div class="bit off">0</div><div class="lbl">4</div></div>
+  <div><div class="bit off">0</div><div class="lbl">2</div></div>
+  <div><div class="bit on">1</div><div class="lbl">1</div></div>
+</div>
+<p class="small">128 + 32 + 8 + 1 = 169 = <code>$A9</code>. (C'est aussi, par coïncidence, l'opcode de l'instruction « charge l'accumulateur » du 65C816 — on le reverra.)</p>
+<div class="card key">
+  Un <em class="term">registre</em> est une petite case mémoire à l'intérieur d'une puce.
+  Écrire une valeur dans un registre revient à <strong>appuyer sur des boutons de commande</strong>
+  de la puce. La quasi‑totalité du dialogue entre le CPU et les autres puces se fait ainsi&nbsp;:
+  en écrivant des octets à des adresses spéciales appelées <em class="term">registres MMIO</em>.
+</div>
+
+<!-- ================= 3. OVERVIEW ================= -->
+<h2><span class="n">3.</span>Vue d'ensemble : qui parle à qui</h2>
+<p>
+  Tous les composants sont reliés par un <em class="term">bus</em>&nbsp;: une autoroute
+  d'adresses par laquelle le CPU lit et écrit. Quand le CPU accède à une adresse, ce n'est pas
+  toujours de la mémoire — cela peut être un registre qui commande le PPU, l'audio, ou un
+  transfert. Le rôle du bus est de <strong>router</strong> chaque accès vers le bon
+  destinataire, et d'avancer l'horloge du bon nombre de cycles.
 </p>
 <div class="flow">
-  <span class="step">CPU 65C816</span><span class="arrow">→</span>
-  <span class="step">BUS (routage + horloge)</span><span class="arrow">→</span>
-  <span class="step">WRAM</span>
-  <span class="step">PPU (vidéo)</span>
-  <span class="step">APU (son)</span>
+  <span class="step">CPU 65C816</span><span class="arrow">↔</span>
+  <span class="step">BUS + horloge</span><span class="arrow">↔</span>
+  <span class="step">WRAM 128 Ko</span>
+  <span class="step">PPU → écran</span>
+  <span class="step">APU → son</span>
   <span class="step">DMA</span>
   <span class="step">Cartouche</span>
 </div>
 <div class="card key">
-  Dans notre code, cette structure se retrouve telle quelle : un module <code>cpu</code>,
-  un module <code>ppu</code>, un module <code>apu</code>, un <code>bus</code> qui les relie, et
-  un <code>scheduler</code> (l'horloge) qui garde tout le monde synchronisé. Le cœur
-  d'émulation (crate <code>core</code>) n'a <strong>aucune dépendance d'entrée/sortie</strong> :
-  il est testable tout seul. L'affichage et le clavier vivent dans un binaire séparé.
+  Dans le code de l'émulateur, cette structure se retrouve telle quelle&nbsp;: un module
+  <code>cpu</code>, un module <code>ppu</code>, un module <code>apu</code>, un <code>bus</code>
+  qui les relie, et un <code>scheduler</code> (l'ordonnanceur/horloge) qui garde tout le monde
+  synchronisé. Le cœur d'émulation est une bibliothèque <strong>sans aucune entrée/sortie</strong>&nbsp;:
+  elle se teste toute seule, sans écran ni son. Un programme séparé (le « frontend ») ouvre la
+  fenêtre, joue le son et lit le clavier.
 </div>
-
-<!-- ================= MEMORY ================= -->
-<h2><span class="n">3.</span>La cartouche et la carte mémoire</h2>
+<h3>La séparation cœur / frontend</h3>
 <p>
-  Le 65C816 adresse la mémoire sur <strong>24 bits</strong> : 16 Mo d'espace, découpé en 256
-  « banques » (<em>banks</em>) de 64 Ko. Mais toutes les adresses ne mènent pas à de la RAM.
-  Selon la zone, un même accès touche la mémoire de travail, une puce, ou la cartouche :
+  Cette séparation est un principe d'ingénierie important. Le <strong>cœur</strong> ne connaît
+  ni le clavier, ni la carte son, ni le système d'exploitation&nbsp;: il transforme simplement
+  « appuis de manette + temps qui passe » en « image + échantillons audio ». Le
+  <strong>frontend</strong> traduit cela vers le monde réel. Résultat&nbsp;: on peut faire tourner
+  le cœur en mode « sans tête » (headless) pour le tester automatiquement — c'est exactement
+  comme cela que cet émulateur a été vérifié (voir §13).
+</p>
+
+<!-- ================= 4. MEMORY ================= -->
+<h2><span class="n">4.</span>La cartouche et la carte mémoire</h2>
+<p>
+  Le 65C816 adresse la mémoire sur <strong>24 bits</strong>&nbsp;: 16 Mo d'espace, découpé en
+  256 « banques » (<em>banks</em>) de 64 Ko. Une adresse s'écrit <code>banque:offset</code>,
+  par exemple <code>$7E:0100</code>. Mais toutes les adresses ne mènent pas à de la RAM&nbsp;:
+  selon la zone, un même accès touche la mémoire de travail, une puce, ou la cartouche.
 </p>
 <div class="memmap">
   <div class="memrow"><div class="addr">$00–$3F : $0000</div><div class="bar b-wram">Miroir des 8 premiers Ko de la WRAM</div></div>
-  <div class="memrow"><div class="addr">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;$2100–$21FF</div><div class="bar b-mmio">Registres du PPU (vidéo)</div></div>
+  <div class="memrow"><div class="addr">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;$2100–$213F</div><div class="bar b-mmio">Registres du PPU (vidéo)</div></div>
   <div class="memrow"><div class="addr">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;$2140–$2143</div><div class="bar b-mmio">Ports de l'APU (son)</div></div>
-  <div class="memrow"><div class="addr">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;$4200–$437F</div><div class="bar b-mmio">Registres CPU internes + DMA</div></div>
+  <div class="memrow"><div class="addr">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;$4200–$421F</div><div class="bar b-mmio">Registres CPU internes (NMI, IRQ, manettes)</div></div>
+  <div class="memrow"><div class="addr">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;$4300–$437F</div><div class="bar b-mmio">Registres des 8 canaux DMA</div></div>
   <div class="memrow"><div class="addr">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;$8000–$FFFF</div><div class="bar b-rom">ROM de la cartouche</div></div>
   <div class="memrow"><div class="addr">$70–$7D : $0000</div><div class="bar b-sram">Sauvegarde SRAM (pile de la cartouche)</div></div>
   <div class="memrow"><div class="addr">$7E–$7F : entier</div><div class="bar b-wram">128 Ko de WRAM (mémoire de travail)</div></div>
 </div>
-<h3>LoROM et HiROM</h3>
+<h3>LoROM et HiROM : deux câblages</h3>
 <p>
-  Les cartouches câblent leur ROM de deux façons principales : <em class="term">LoROM</em>
-  (blocs de 32 Ko en haut de chaque banque) et <em class="term">HiROM</em> (banques pleines de
-  64 Ko). L'émulateur lit l'en‑tête interne de la ROM pour deviner le bon schéma — il attribue
-  un <strong>score</strong> à chaque hypothèse (le couple somme de contrôle / complément
-  doit valoir $FFFF, le titre doit être lisible…) et garde le meilleur. Il en déduit aussi la
-  <strong>région</strong> (PAL/NTSC) et la taille de la sauvegarde.
+  Les cartouches câblent leur ROM de deux façons principales. En <em class="term">LoROM</em>,
+  la ROM est exposée par blocs de 32 Ko dans la moitié haute (<code>$8000–$FFFF</code>) de chaque
+  banque. En <em class="term">HiROM</em>, elle occupe des banques pleines de 64 Ko. L'émulateur
+  ne le sait pas d'avance&nbsp;: il lit l'<strong>en‑tête</strong> interne de la ROM (un petit
+  bloc de métadonnées à une position fixe) et attribue un <strong>score</strong> à chaque
+  hypothèse — le couple somme de contrôle / complément doit valoir <code>$FFFF</code>, le titre
+  doit être lisible, l'octet de mapping doit être plausible — puis retient la meilleure. Il en
+  déduit aussi la <strong>région</strong> (PAL 50&nbsp;Hz ou NTSC 60&nbsp;Hz) et la taille de la
+  sauvegarde.
 </p>
-<div class="card analogy">
-  L'<em>open bus</em> est un détail subtil mais crucial. Sur le vrai matériel, lire une adresse
-  « qui ne mène nulle part » ne renvoie pas 0, mais <strong>la dernière valeur qui a circulé sur
-  le bus</strong> (une sorte d'écho électrique). Certains jeux en dépendent : il faut donc
-  mémoriser cette dernière valeur (le registre <code>MDR</code>) et la renvoyer pour les
-  adresses non mappées.
+<div class="card deep">
+  <strong>L'open bus, un détail subtil mais crucial.</strong> Sur le vrai matériel, lire une
+  adresse « qui ne mène nulle part » ne renvoie pas 0, mais <strong>la dernière valeur qui a
+  circulé sur le bus</strong> — une sorte d'écho électrique du dernier octet transporté.
+  Certains jeux en dépendent (volontairement ou par accident). L'émulateur mémorise donc cette
+  dernière valeur dans un registre appelé <code>MDR</code> (<em>Memory Data Register</em>) et la
+  renvoie pour toute adresse non mappée. Oublier ce détail provoque des bugs bizarres et
+  lointains, très difficiles à diagnostiquer.
 </div>
 
-<!-- ================= CPU ================= -->
-<h2><span class="n">4.</span>Le cœur : le processeur 65C816</h2>
+<!-- ================= 5. CPU ================= -->
+<h2><span class="n">5.</span>Le cœur : le processeur 65C816</h2>
 <p class="lead">
-  Le CPU exécute la logique du jeu : « si le joueur appuie à droite, avancer Mario ». Il ne
-  fait rien de magique — il répète sans cesse un cycle de trois temps :
+  Le CPU exécute la logique du jeu&nbsp;: « si le joueur appuie à droite, avancer Mario ». Il ne
+  fait rien de magique — il répète sans cesse un cycle de trois temps, des millions de fois par
+  seconde.
 </p>
 <div class="flow">
   <span class="step">1· Lire l'instruction (fetch)</span><span class="arrow">→</span>
   <span class="step">2· La décoder</span><span class="arrow">→</span>
   <span class="step">3· L'exécuter</span><span class="arrow">↺</span>
 </div>
-<h3>Les registres</h3>
+<h3>Les registres du 65C816</h3>
 <p>
-  Le 65C816 possède une poignée de <em class="term">registres</em> — de minuscules cases de
-  mémoire internes, ultra‑rapides : l'accumulateur <code>A</code> (pour les calculs), deux
-  index <code>X</code> et <code>Y</code>, un pointeur de pile <code>S</code>, le compteur de
-  programme <code>PC</code> (l'adresse de la prochaine instruction), et un registre d'état
-  <code>P</code> qui contient des <strong>drapeaux</strong> (résultat nul&nbsp;? négatif&nbsp;?
-  retenue&nbsp;?).
+  Un registre est une case ultra‑rapide interne au processeur. Le 65C816 en possède une poignée&nbsp;:
 </p>
+<table>
+  <tr><th>Registre</th><th>Rôle</th></tr>
+  <tr><td class="mono">A</td><td>Accumulateur — où se font les calculs (additions, comparaisons…).</td></tr>
+  <tr><td class="mono">X, Y</td><td>Index — servent à parcourir des tableaux, compter des boucles.</td></tr>
+  <tr><td class="mono">S</td><td>Pointeur de pile — mémorise où revenir après un sous‑programme.</td></tr>
+  <tr><td class="mono">PC</td><td>Compteur de programme — l'adresse de la prochaine instruction.</td></tr>
+  <tr><td class="mono">P</td><td>Registre d'état — un octet de <em>drapeaux</em> (résultat nul&nbsp;? négatif&nbsp;? retenue&nbsp;?).</td></tr>
+  <tr><td class="mono">DBR, PBR</td><td>Banques de données et de programme — les 8 bits hauts des adresses 24 bits.</td></tr>
+  <tr><td class="mono">D</td><td>Registre de page directe — une base pour un mode d'adressage rapide.</td></tr>
+</table>
 <h3>La particularité 8/16 bits</h3>
 <p>
-  Le 65C816 est un descendant du 6502 (8 bits) de la NES. Il démarre en <em class="term">mode
-  émulation</em> (il se fait passer pour un 6502) puis bascule en <em class="term">mode natif</em>
-  16 bits. Encore mieux : deux drapeaux (<code>M</code> et <code>X</code>) permettent au jeu de
-  choisir <strong>à la volée</strong> si l'accumulateur et les index travaillent sur 8 ou 16
-  bits. Une même instruction peut donc se comporter différemment selon le contexte — l'émulateur
-  teste ces drapeaux à chaque opération.
+  Le 65C816 descend du 6502 (8 bits) qui équipait la NES. Il démarre en <em class="term">mode
+  émulation</em>, où il se fait passer pour un 6502, puis un jeu le bascule en
+  <em class="term">mode natif</em> 16 bits dès les premières instructions. Mieux&nbsp;: deux
+  drapeaux du registre <code>P</code> (nommés <code>M</code> et <code>X</code>) permettent au
+  jeu de choisir <strong>à la volée</strong> si l'accumulateur et les index travaillent sur 8 ou
+  16 bits. Une même instruction change donc de comportement selon le contexte — l'émulateur
+  teste ces drapeaux à chaque opération concernée.
 </p>
+<h3>Les modes d'adressage</h3>
+<p>
+  Une instruction comme « charger l'accumulateur » a besoin de savoir <em>d'où</em> lire la
+  valeur. Le 65C816 offre 24 <em class="term">modes d'adressage</em> pour calculer cette adresse&nbsp;:
+</p>
+<table>
+  <tr><th>Exemple</th><th>Mode</th><th>Adresse calculée</th></tr>
+  <tr><td class="mono">LDA #$1234</td><td>Immédiat</td><td>La valeur est dans l'instruction elle‑même.</td></tr>
+  <tr><td class="mono">LDA $2000</td><td>Absolu</td><td>Banque de données + <code>$2000</code>.</td></tr>
+  <tr><td class="mono">LDA $2000,X</td><td>Absolu indexé</td><td><code>$2000</code> + contenu de X.</td></tr>
+  <tr><td class="mono">LDA ($10)</td><td>Indirect</td><td>Lit un pointeur en page directe, puis va à l'adresse pointée.</td></tr>
+  <tr><td class="mono">LDA [$10],Y</td><td>Indirect long indexé</td><td>Pointeur 24 bits + Y — pour parcourir de gros tableaux.</td></tr>
+</table>
+<h3>Le cycle d'exécution, en code</h3>
 <pre><span class="c">// Le squelette d'un pas de CPU (simplifié)</span>
 <span class="k">fn</span> step(cpu, bus) {
     <span class="k">if</span> une_interruption_est_en_attente() {
-        servir_l_interruption();   <span class="c">// NMI (vsync) ou IRQ (timer)</span>
+        servir_l_interruption();      <span class="c">// NMI (vsync) ou IRQ (timer)</span>
         <span class="k">return</span>;
     }
-    <span class="k">let</span> opcode = bus.read(cpu.pc);   <span class="c">// 1· fetch</span>
+    <span class="k">let</span> opcode = bus.read(cpu.pbr, cpu.pc);   <span class="c">// 1· fetch</span>
     cpu.pc += 1;
-    <span class="k">match</span> opcode {                    <span class="c">// 2· décode (256 cas)</span>
-        <span class="r">0xA9</span> =&gt; lda_immediat(cpu, bus), <span class="c">// 3· exécute : charger A</span>
-        <span class="r">0x8D</span> =&gt; sta_absolu(cpu, bus),   <span class="c">//    ranger A en mémoire</span>
-        <span class="c">// … les 254 autres opcodes …</span>
+    <span class="k">match</span> opcode {                           <span class="c">// 2· décode (256 cas)</span>
+        <span class="r">0xA9</span> =&gt; { <span class="k">let</span> v = lire_immediat(cpu, bus); cpu.a = v; maj_drapeaux(cpu, v); }  <span class="c">// LDA #</span>
+        <span class="r">0x8D</span> =&gt; { <span class="k">let</span> adr = lire_absolu(cpu, bus); bus.write(adr, cpu.a); }         <span class="c">// STA abs</span>
+        <span class="r">0x4C</span> =&gt; { cpu.pc = lire_mot(cpu, bus); }                                    <span class="c">// JMP</span>
+        <span class="c">// … les 253 autres opcodes …</span>
     }
 }</pre>
 <p>
-  Notre implémentation couvre les <strong>256 instructions</strong>, tous les modes
-  d'adressage (comment calculer l'adresse d'un opérande), l'arithmétique décimale (BCD, pour
-  les scores), et les instructions spéciales (<code>WAI</code> qui met le CPU en veille jusqu'à
-  la prochaine interruption, les déplacements de blocs mémoire…).
+  Notre implémentation couvre les <strong>256 instructions</strong>, tous les modes d'adressage,
+  l'arithmétique décimale (BCD, utilisée pour afficher scores et chronos), les instructions de
+  pile et de saut, les déplacements de blocs mémoire, et les instructions spéciales comme
+  <code>WAI</code> (met le CPU en veille jusqu'à la prochaine interruption) ou <code>STP</code>
+  (arrêt total).
+</p>
+<h3>Les interruptions</h3>
+<p>
+  Une <em class="term">interruption</em> est un signal qui force le CPU à suspendre ce qu'il fait
+  pour exécuter un sous‑programme spécial, puis reprendre. La SNES en a deux principales&nbsp;:
+</p>
+<ul>
+  <li><strong>NMI</strong> (<em>Non‑Maskable Interrupt</em>)&nbsp;: déclenchée à chaque fin d'affichage d'image (le <em>V‑blank</em>). C'est le <strong>battement de cœur</strong> du jeu — il y met à jour l'écran, lit les manettes, avance la musique. 50 ou 60 fois par seconde.</li>
+  <li><strong>IRQ</strong>&nbsp;: déclenchée à une ligne/position d'écran choisie par le jeu, pour des effets « à mi‑écran » (une barre de statut fixe pendant que le décor défile, par exemple).</li>
+</ul>
+<p>
+  Servir une interruption suit une séquence précise&nbsp;: le CPU sauvegarde sur la pile la
+  banque de programme, l'adresse courante et les drapeaux, met le drapeau d'interruption, puis
+  saute à une adresse fixe (le <em class="term">vecteur</em>) où le jeu a placé son gestionnaire.
+  Reproduire cette séquence au cycle près est essentiel&nbsp;: beaucoup de jeux se calent
+  précisément dessus.
 </p>
 <div class="card key">
   <strong>Le temps se compte en cycles.</strong> Chaque lecture ou écriture en mémoire fait
-  avancer l'« horloge maître » d'un nombre précis de cycles, qui dépend de la zone visée
-  (la ROM rapide, la RAM, les manettes… n'ont pas la même vitesse). C'est ainsi que
-  l'émulateur sait <em>combien de temps</em> a passé, et donc quand déclencher les événements
-  vidéo et audio.
+  avancer l'« horloge maître » d'un nombre précis de cycles, qui dépend de la zone visée&nbsp;:
+  la ROM rapide, la RAM, les registres, la zone manettes… n'ont pas la même vitesse d'accès.
+  C'est ainsi que l'émulateur sait <em>combien de temps</em> a passé, et donc quand déclencher
+  les événements vidéo et audio.
 </div>
 
-<!-- ================= TIMING ================= -->
-<h2><span class="n">5.</span>Le chef d'orchestre : le timing</h2>
+<!-- ================= 6. TIMING ================= -->
+<h2><span class="n">6.</span>Le chef d'orchestre : le timing et l'ordonnanceur</h2>
 <p>
-  La SNES bat au rythme d'une horloge maître d'environ <strong>21,5 MHz</strong>. L'image se
-  construit ligne par ligne : <strong>262 lignes</strong> en NTSC (60 Hz), <strong>312 lignes</strong>
-  en PAL (50 Hz — le cas de vos jeux européens). Chaque ligne dure 1364 cycles.
+  La SNES bat au rythme d'une horloge maître d'environ <strong>21,5 MHz</strong> (21,5 millions
+  de cycles par seconde). L'image se construit ligne par ligne, comme un pinceau qui balaie
+  l'écran de gauche à droite et de haut en bas.
 </p>
+<table>
+  <tr><th></th><th>NTSC (Amérique/Japon)</th><th>PAL (Europe)</th></tr>
+  <tr><td>Horloge maître</td><td class="mono">21 477 272 Hz</td><td class="mono">21 281 370 Hz</td></tr>
+  <tr><td>Lignes par image</td><td>262</td><td>312</td></tr>
+  <tr><td>Images par seconde</td><td>≈ 60,1</td><td>≈ 50,0</td></tr>
+  <tr><td>Image visible</td><td colspan="2">256 × 224 pixels (lignes 1 à 224)</td></tr>
+</table>
 <p>
-  À la fin de la zone visible (ligne 225) commence le <em class="term">V‑blank</em> : le canon à
-  électrons « remonte » en haut de l'écran. C'est le seul moment sûr pour modifier la vidéo.
-  La console prévient le CPU par une <em class="term">interruption</em> :
+  Chaque ligne dure 1364 cycles maîtres. Après la dernière ligne visible commence le
+  <em class="term">V‑blank</em>&nbsp;: le « pinceau » remonte en haut de l'écran. C'est le seul
+  moment sûr pour modifier la mémoire vidéo — d'où la NMI qui prévient le CPU à cet instant.
 </p>
-<ul>
-  <li><strong>NMI</strong> (<em>Non‑Maskable Interrupt</em>) : déclenchée à chaque V‑blank. C'est le battement de cœur du jeu — il y met à jour l'affichage, lit les manettes, avance la musique.</li>
-  <li><strong>IRQ</strong> : déclenchée à une ligne/position choisie par le jeu. Elle sert aux effets « à mi‑écran » (barre de statut fixe pendant que le décor défile, par exemple).</li>
-</ul>
-<div class="card key">
-  Le <code>scheduler</code> tient une seule horloge (un compteur 64 bits) et un
-  « prochain événement ». À chaque accès du CPU, il compare l'horloge à cet horizon ; quand il
-  est franchi, il traite la fin de ligne : dessiner la scanline, déclencher NMI/IRQ, rattraper
-  l'audio. Une seule comparaison par accès — c'est ce qui rend l'émulation rapide.
+<h3>L'ordonnanceur (scheduler)</h3>
+<p>
+  Comment savoir, à tout moment, quel événement doit se produire (fin de ligne, NMI, IRQ,
+  transfert automatique) sans tout ralentir&nbsp;? L'émulateur utilise une astuce&nbsp;: il tient
+  un seul compteur d'horloge (un entier 64 bits) et un unique <strong>« prochain événement »</strong>.
+</p>
+<pre><span class="k">struct</span> Scheduler {
+    clock:      u64,   <span class="c">// cycles écoulés depuis l'allumage</span>
+    next_event: u64,   <span class="c">// horodatage du prochain événement</span>
+    v:          u16,   <span class="c">// ligne courante (0..261 ou 0..311)</span>
+}
+</pre>
+<p>
+  À chaque accès mémoire du CPU, on ajoute le coût en cycles, puis on compare l'horloge à
+  <code>next_event</code>. Tant que l'horizon n'est pas franchi, on ne fait rien — une seule
+  comparaison. Quand il l'est, on traite l'événement (dessiner la ligne, déclencher NMI/IRQ,
+  faire avancer l'audio) et on calcule le prochain horizon. Ce mécanisme est ce qui rend
+  l'émulation à la fois <strong>exacte</strong> et <strong>rapide</strong>.
+</p>
+<div class="card deep">
+  La SNES supporte deux régions&nbsp;: PAL (Europe, 50 Hz) et NTSC (60 Hz). Un jeu européen
+  tourne plus lentement mais affiche plus de lignes. L'émulateur détecte la région dans
+  l'en‑tête de la cartouche et adapte l'ordonnanceur <em>et</em> la cadence d'affichage&nbsp;:
+  vos trois jeux sont PAL, donc rendus à 50 images par seconde, exactement comme sur une SNES
+  européenne branchée à une télé de l'époque.
 </div>
 
-<!-- ================= PPU ================= -->
-<h2><span class="n">6.</span>La puce graphique : le PPU</h2>
+<!-- ================= 7. PPU ================= -->
+<h2><span class="n">7.</span>La puce graphique : le PPU</h2>
 <p class="lead">
-  Le PPU est le composant le plus riche — et le plus délicat à émuler fidèlement. Son rôle :
-  transformer des <strong>tuiles</strong> et des <strong>sprites</strong> rangés en mémoire vidéo
-  en une image de 256×224 pixels.
+  Le PPU est le composant le plus riche — et le plus délicat à émuler fidèlement. Son rôle&nbsp;:
+  transformer des <strong>tuiles</strong> et des <strong>sprites</strong> rangés en mémoire
+  vidéo en une image de 256 × 224 pixels, soixante fois par seconde.
 </p>
 <h3>Trois mémoires vidéo</h3>
 <ul>
-  <li><strong>VRAM</strong> (64 Ko) : les <em>tuiles</em> (petits carrés de 8×8 pixels) et les <em>plans de tuiles</em> (quelles tuiles à quel endroit).</li>
-  <li><strong>CGRAM</strong> (256 couleurs) : la palette. Chaque pixel ne stocke pas une couleur mais un <em>numéro</em> de couleur dans cette palette.</li>
-  <li><strong>OAM</strong> : la table des sprites (position, tuile, priorité de chacun des 128 objets mobiles).</li>
+  <li><strong>VRAM</strong> (64 Ko)&nbsp;: les <em>tuiles</em> (petits carrés de 8×8 pixels) et les <em>plans de tuiles</em> (quelle tuile à quel endroit).</li>
+  <li><strong>CGRAM</strong> (256 couleurs)&nbsp;: la palette. Chaque pixel ne stocke pas une couleur, mais un <em>numéro</em> de couleur dans cette palette. Chaque couleur est codée sur 15 bits (5 bits de rouge, 5 de vert, 5 de bleu).</li>
+  <li><strong>OAM</strong> (544 octets)&nbsp;: la table des sprites — position, tuile, priorité de chacun des 128 objets mobiles.</li>
 </ul>
 <div class="card analogy">
-  Pensez à un tableau de feutrine avec des gommettes. Les <strong>tuiles</strong> sont un
-  stock de petits motifs réutilisables ; le <strong>plan de tuiles</strong> dit où coller
-  chaque motif ; la <strong>palette</strong> dit quelles couleurs donner aux motifs. Redessiner
-  l'écran, c'est relire cette recette 60 fois par seconde.
+  Imaginez un tableau de feutrine avec des gommettes. Les <strong>tuiles</strong> sont un stock
+  de petits motifs réutilisables&nbsp;; le <strong>plan de tuiles</strong> dit où coller chaque
+  motif&nbsp;; la <strong>palette</strong> dit quelles couleurs donner aux motifs. Redessiner
+  l'écran, c'est relire cette recette 50 à 60 fois par seconde. Réutiliser les tuiles économise
+  énormément de mémoire — indispensable en 1990.
 </div>
-<h3>Les couches de fond et les modes</h3>
+<h3>Comment une tuile est stockée : les plans de bits</h3>
 <p>
-  Le PPU superpose jusqu'à 4 <em class="term">couches de fond</em> (BG1–BG4). Un registre choisit
-  le <em class="term">mode</em> (0 à 7), qui décide combien de couches existent et avec combien de
-  couleurs. Le fameux <strong>Mode 7</strong> est à part : il ne fait qu'une seule couche, mais
-  qu'il peut <strong>faire pivoter et mettre à l'échelle</strong> par une transformation
-  mathématique — d'où les circuits de F‑Zero ou la carte du monde qui tournent.
+  Une tuile 4 bits (16 couleurs) fait 8×8 pixels, chacun un numéro de 0 à 15. Ce numéro est
+  découpé en 4 <em class="term">plans de bits</em>&nbsp;: le plan 0 contient le bit de poids
+  faible de chaque pixel, le plan 1 le bit suivant, etc. Pour reconstruire un pixel, on
+  rassemble un bit de chaque plan&nbsp;:
 </p>
+<pre><span class="c">// pixel (x=0) d'une ligne, à partir de 4 octets de plans</span>
+val = (plan0 &gt;&gt; 7 &amp; 1)
+    | (plan1 &gt;&gt; 7 &amp; 1) &lt;&lt; 1
+    | (plan2 &gt;&gt; 7 &amp; 1) &lt;&lt; 2
+    | (plan3 &gt;&gt; 7 &amp; 1) &lt;&lt; 3;   <span class="c">// -&gt; numéro de couleur 0..15</span>
+</pre>
+<p class="small">
+  Se tromper dans l'ordre des plans ou des bits produit une image « en rayures » caractéristique —
+  un piège classique. Cet émulateur a justement rencontré ce symptôme en développant le
+  SuperFX (voir §10).
+</p>
+<h3>Les couches de fond et les huit modes</h3>
+<p>
+  Le PPU superpose jusqu'à 4 <em class="term">couches de fond</em> (BG1–BG4). Un registre
+  (<code>$2105</code>) choisit le <em class="term">mode</em> (0 à 7), qui décide combien de
+  couches existent et avec combien de couleurs&nbsp;:
+</p>
+<table>
+  <tr><th>Mode</th><th>Couches et profondeur</th><th>Usage typique</th></tr>
+  <tr><td>0</td><td>4 couches, 4 couleurs chacune</td><td>Menus simples</td></tr>
+  <tr><td>1</td><td>BG1/BG2 16 couleurs, BG3 4 couleurs</td><td>Le plus courant (plateformes, RPG)</td></tr>
+  <tr><td>2</td><td>2 couches 16 couleurs + décalage par colonne</td><td>Effets de profondeur</td></tr>
+  <tr><td>3</td><td>BG1 256 couleurs, BG2 16 couleurs</td><td>Écrans riches (menus, titres)</td></tr>
+  <tr><td>5/6</td><td>Haute résolution (512 points de large)</td><td>Textes fins, écrans de saisie</td></tr>
+  <tr><td>7</td><td>1 couche, rotation + zoom</td><td>Mode 7 : circuits, cartes du monde</td></tr>
+</table>
 <h3>Le rendu ligne par ligne</h3>
 <p>
-  Notre PPU dessine <strong>une scanline à la fois</strong>, à la fin de chaque ligne visible.
-  C'est essentiel : comme le jeu peut changer les registres vidéo <em>entre</em> deux lignes,
+  Notre PPU dessine <strong>une ligne à la fois</strong>, à la fin de chaque ligne visible.
+  C'est essentiel&nbsp;: comme le jeu peut changer les registres vidéo <em>entre</em> deux lignes,
   dessiner ligne par ligne reproduit naturellement presque tous les effets d'écran. Pour chaque
-  ligne, le pipeline est :
+  ligne, le pipeline est&nbsp;:
 </p>
 <div class="flow">
   <span class="step">Fonds (BG)</span><span class="arrow">→</span>
-  <span class="step">Sprites</span><span class="arrow">→</span>
+  <span class="step">Sprites (OBJ)</span><span class="arrow">→</span>
   <span class="step">Priorités</span><span class="arrow">→</span>
   <span class="step">Fenêtres</span><span class="arrow">→</span>
   <span class="step">Color math</span><span class="arrow">→</span>
   <span class="step">Luminosité</span>
 </div>
+<h4>Sprites (OBJ)</h4>
 <p>
-  Les <em class="term">priorités</em> décident qui passe devant qui (Mario devant le décor mais
-  derrière un nuage). Les <em class="term">fenêtres</em> masquent des zones (le rond de lumière
-  d'une torche dans une pièce sombre). La <em class="term">color math</em> additionne ou soustrait
-  deux « écrans » pour les transparences, ombres et fondus — c'est elle qui, par exemple, fait
-  apparaître le menu de sélection de <em>Super Mario All‑Stars</em> (superposition de deux
-  couches).
+  Jusqu'à 128 objets mobiles, de tailles variées. Le PPU a des limites matérielles strictes&nbsp;:
+  au plus <strong>32 sprites et 34 tuiles par ligne</strong>. Au‑delà, les sprites en trop
+  disparaissent — un phénomène de clignotement que les joueurs de l'époque connaissaient bien,
+  et que l'émulateur reproduit fidèlement (drapeaux de dépassement inclus).
 </p>
-
-<!-- ================= DMA ================= -->
-<h2><span class="n">7.</span>Le déménageur : DMA et HDMA</h2>
+<h4>Priorités</h4>
 <p>
-  Copier des milliers d'octets vers la VRAM un par un avec le CPU serait trop lent. Le
-  <em class="term">DMA</em> (<em>Direct Memory Access</em>) le fait à la place, en bloc, à
-  ~1 octet tous les 8 cycles. Le jeu remplit quelques registres (source, destination, taille)
-  puis lance le transfert ; le CPU est mis en pause le temps de la copie.
+  Les <em class="term">priorités</em> décident qui passe devant qui — Mario devant le décor mais
+  derrière un nuage. Chaque mode a sa propre table d'ordre de superposition entre les couches et
+  les 4 niveaux de priorité des sprites. Une erreur ici et les personnages passent derrière le
+  décor.
 </p>
+<h4>Fenêtres et color math</h4>
 <p>
-  Le <em class="term">HDMA</em> est plus malin : il transfère <strong>un petit paquet à chaque
-  ligne d'écran</strong>, automatiquement, juste avant que la ligne soit dessinée. C'est ce qui
-  permet les <strong>dégradés de ciel</strong> (une couleur différente par ligne) ou la
-  perspective du Mode 7 (une échelle différente par ligne) sans effort pour le CPU.
+  Les <em class="term">fenêtres</em> masquent des zones rectangulaires — le rond de lumière
+  d'une torche dans une pièce sombre. La <em class="term">color math</em> additionne ou soustrait
+  deux « écrans » (principal et secondaire) pour créer transparences, ombres et fondus. Par
+  exemple, une eau semi‑transparente&nbsp;: chaque canal de couleur est moyenné entre le décor et
+  l'eau. C'est cette color math qui allume le menu de sélection de <em>Super Mario All‑Stars</em>
+  (superposition de deux couches) — sans elle, l'écran resterait noir.
 </p>
-<div class="card key">
-  Détail qui fait tout : le HDMA d'une ligne doit s'exécuter <strong>avant</strong> le rendu de
-  cette ligne. Se tromper d'une ligne, et le dégradé est décalé. C'est l'une des sources de bugs
-  les plus classiques — d'où l'attention portée à l'ordre des événements dans le scheduler.
+<h4>Le Mode 7 : rotation et zoom</h4>
+<p>
+  Le Mode 7 est à part&nbsp;: une seule couche, mais qu'il transforme par une matrice
+  mathématique appliquée <strong>à chaque pixel</strong>. Pour le pixel écran (x, y), la position
+  dans la texture est&nbsp;:
+</p>
+<pre>tex_x = A·(x + H) + B·(y + V) + X0
+tex_y = C·(x + H) + D·(y + V) + Y0
+</pre>
+<p>
+  où A, B, C, D forment la matrice (en virgule fixe 8.8), et H/V/X0/Y0 les décalages et le centre.
+  En faisant varier la matrice <strong>à chaque ligne</strong> (via le HDMA, §8), on obtient la
+  perspective des circuits de F‑Zero&nbsp;: le sol semble filer vers l'horizon.
+</p>
+<div class="card deep">
+  <strong>Fonctionnalités fines.</strong> Le PPU gère aussi&nbsp;: la <em>mosaïque</em>
+  (pixellisation pour les transitions), le <em>décalage par tuile</em> (offset‑per‑tile, où une
+  couche fournit un décalage de défilement différent pour chaque colonne de 8 pixels), la
+  <em>haute résolution</em> (512 points, pour les textes fins des écrans de saisie de nom),
+  et l'<em>entrelacement</em> (448 lignes). Chacune est un petit monde de règles que l'émulateur
+  reproduit d'après la documentation matérielle.
 </div>
 
-<!-- ================= APU ================= -->
-<h2><span class="n">8.</span>Le son : l'APU (SPC700 + S‑DSP)</h2>
+<!-- ================= 8. DMA ================= -->
+<h2><span class="n">8.</span>Le déménageur : DMA et HDMA</h2>
+<p>
+  Copier des milliers d'octets vers la VRAM un par un avec le CPU serait trop lent. Le
+  <em class="term">DMA</em> (<em>Direct Memory Access</em>) le fait à la place, en bloc, à environ
+  un octet tous les 8 cycles. Le jeu remplit quelques registres (adresse source, registre de
+  destination, taille) puis lance le transfert&nbsp;; le CPU est mis en pause le temps de la copie.
+  La SNES a <strong>8 canaux</strong> DMA indépendants.
+</p>
+<p>
+  Le <em class="term">HDMA</em> (<em>H‑blank DMA</em>) est plus malin&nbsp;: il transfère
+  <strong>un petit paquet à chaque ligne d'écran</strong>, automatiquement, juste avant que la
+  ligne soit dessinée. C'est ce qui permet&nbsp;:
+</p>
+<ul>
+  <li>les <strong>dégradés de ciel</strong> — une couleur de fond différente par ligne&nbsp;;</li>
+  <li>la <strong>perspective du Mode 7</strong> — une matrice différente par ligne&nbsp;;</li>
+  <li>les <strong>écrans ondulants</strong> — un décalage horizontal par ligne (effet de chaleur, de vague).</li>
+</ul>
+<div class="card key">
+  Détail qui fait tout&nbsp;: le HDMA d'une ligne doit s'exécuter <strong>avant</strong> le rendu
+  de cette ligne. Se tromper d'une ligne, et le dégradé est décalé d'un cran. C'est l'une des
+  sources de bugs les plus classiques d'un émulateur — d'où l'attention portée à l'ordre exact
+  des événements dans l'ordonnanceur.
+</div>
+
+<!-- ================= 9. APU ================= -->
+<h2><span class="n">9.</span>Le son : l'APU (SPC700 + S‑DSP)</h2>
 <p class="lead">
-  Surprise : la partie audio de la SNES est <strong>un ordinateur à part entière</strong>, avec
-  son propre processeur (le <em class="term">SPC700</em>), sa propre mémoire (64 Ko) et sa puce
-  de synthèse (le <em class="term">S‑DSP</em>). Il ne partage rien avec le CPU principal, sauf
-  <strong>quatre boîtes aux lettres</strong> (les ports $2140–$2143).
+  Surprise&nbsp;: la partie audio de la SNES est <strong>un ordinateur à part entière</strong>,
+  avec son propre processeur (le <em class="term">SPC700</em>), sa propre mémoire (64 Ko) et sa
+  puce de synthèse (le <em class="term">S‑DSP</em>). Il ne partage rien avec le CPU principal,
+  sauf <strong>quatre boîtes aux lettres</strong> (les ports <code>$2140–$2143</code>).
 </p>
 <div class="card analogy">
-  Le CPU principal et l'APU sont comme deux bureaux qui ne communiquent que par quatre
-  cases postales. Au démarrage, un petit programme gravé dans l'APU (l'<em>IPL ROM</em>, 64
-  octets) répond « je suis prêt » ($AA, $BB) ; le jeu lui envoie alors, case par case, tout son
-  <strong>moteur sonore</strong> et ses instruments. La quasi‑totalité des jeux <em>attendent</em>
-  cette poignée de main avant de continuer — l'émuler est donc indispensable, même sans le son.
+  Le CPU principal et l'APU sont comme deux bureaux qui ne communiquent que par quatre cases
+  postales. Au démarrage, un minuscule programme gravé dans l'APU (l'<em>IPL ROM</em>, 64 octets)
+  répond « je suis prêt » (les octets <code>$AA</code>, <code>$BB</code>)&nbsp;; le jeu lui
+  envoie alors, case par case, tout son <strong>moteur sonore</strong> et ses instruments. La
+  quasi‑totalité des jeux <em>attendent</em> cette poignée de main avant de continuer — l'émuler
+  est donc indispensable, même pour afficher la moindre image.
 </div>
 <h3>Comment naît un son</h3>
 <p>
-  Le S‑DSP mélange <strong>8 voix</strong> en un flux stéréo à 32 kHz. Pour chaque voix :
+  Le S‑DSP mélange <strong>8 voix</strong> en un flux stéréo à 32 kHz. Pour chaque voix&nbsp;:
 </p>
 <ul>
-  <li><strong>BRR</strong> : les instruments sont des échantillons compressés (blocs de 9 octets). On les décompresse à la volée.</li>
-  <li><strong>Hauteur (pitch)</strong> : on lit l'échantillon plus ou moins vite pour jouer une note grave ou aiguë, avec une interpolation gaussienne pour adoucir.</li>
-  <li><strong>Enveloppe ADSR</strong> : le volume évolue dans le temps (attaque, chute, maintien, extinction) — c'est ce qui distingue un piano d'un orgue.</li>
-  <li><strong>Écho</strong> : un tampon circulaire en mémoire recrée la réverbération si caractéristique des musiques de la SNES (les grottes de <em>Secret of Mana</em>).</li>
+  <li><strong>BRR</strong>&nbsp;: les instruments sont des échantillons sonores compressés en blocs de 9 octets (le format <em>Bit Rate Reduction</em>). On les décompresse à la volée, en appliquant un petit filtre qui reconstruit la forme d'onde à partir des deux échantillons précédents.</li>
+  <li><strong>Hauteur (pitch)</strong>&nbsp;: on lit l'échantillon plus ou moins vite pour jouer une note grave ou aiguë, avec une interpolation gaussienne pour adoucir le résultat (une table de 512 coefficients).</li>
+  <li><strong>Enveloppe ADSR</strong>&nbsp;: le volume évolue dans le temps selon quatre phases — <em>Attack</em> (montée), <em>Decay</em> (chute), <em>Sustain</em> (maintien), <em>Release</em> (extinction). C'est ce qui distingue un piano (attaque vive, extinction lente) d'un orgue (volume constant).</li>
+  <li><strong>Bruit</strong>&nbsp;: un générateur pseudo‑aléatoire, pour les explosions et vagues.</li>
+  <li><strong>Écho</strong>&nbsp;: un tampon circulaire en mémoire, relu avec un délai et un filtre à 8 coefficients, recrée la réverbération si caractéristique des musiques de la SNES — pensez aux grottes de <em>Secret of Mana</em>.</li>
 </ul>
-<p>
-  L'émulateur fait tourner le SPC700 « en rattrapage » : le bus le fait avancer juste avant
-  chaque accès aux boîtes aux lettres et une fois par ligne, avec une conversion d'horloge en
-  virgule fixe pour ne jamais dériver. Les échantillons produits sont ensuite ré‑échantillonnés
-  vers la carte son de l'ordinateur, avec un léger ajustement dynamique du débit pour absorber
-  la différence entre l'horloge émulée et celle du PC (une dérive devient un imperceptible
-  vibrato plutôt qu'un craquement).
-</p>
+<div class="card deep">
+  <strong>Synchronisation et son de l'ordinateur.</strong> L'émulateur fait tourner le SPC700
+  « en rattrapage »&nbsp;: le bus le fait avancer juste avant chaque accès aux boîtes aux lettres
+  et une fois par ligne d'écran, avec une conversion d'horloge en virgule fixe (32.32 bits) pour
+  ne jamais dériver. Les échantillons à 32 kHz produits sont ensuite <strong>ré‑échantillonnés</strong>
+  vers la fréquence de la carte son de l'ordinateur (souvent 44,1 ou 48 kHz), avec un léger
+  ajustement dynamique du débit pour absorber la différence entre l'horloge émulée et celle du
+  PC. Résultat&nbsp;: une éventuelle dérive devient un imperceptible vibrato plutôt qu'un
+  craquement. La fidélité audio a d'ailleurs été vérifiée en analysant le signal produit (énergie,
+  présence de l'écho) — pas seulement à l'oreille.
+</div>
 
-<!-- ================= LOOP ================= -->
-<h2><span class="n">9.</span>La boucle : comment tout se synchronise</h2>
-<p>
-  Assembler tout cela tient en une boucle. Pour produire une image :
+<!-- ================= 10. SUPERFX ================= -->
+<h2><span class="n">10.</span>Les puces de cartouche : le coprocesseur SuperFX</h2>
+<p class="lead">
+  Certaines cartouches embarquaient leur propre puce pour dépasser les limites de la console.
+  La plus célèbre est le <em class="term">SuperFX</em> (aussi appelé GSU), un véritable second
+  processeur, qui faisait tourner la 3D de <em>Star Fox</em> et les décors de
+  <em>Yoshi's Island</em>.
 </p>
-<pre><span class="k">fn</span> run_frame(inputs) {
-    <span class="c">// Tant que la trame n'est pas finie (fin de l'écran) :</span>
+<h3>Qu'est‑ce que le GSU</h3>
+<p>
+  Le GSU est un processeur <strong>RISC 16 bits</strong> à ~10 MHz, avec 16 registres et un jeu
+  d'instructions entièrement différent du 65C816. Il vit dans la cartouche, accède à la ROM et à
+  une RAM dédiée (<em>Game Pak RAM</em>), et sait <strong>dessiner des pixels</strong> (instruction
+  <code>PLOT</code>) dans un tampon que le jeu récupère ensuite pour l'afficher. Le CPU principal
+  et le GSU se partagent la ROM/RAM à tour de rôle&nbsp;: pendant que le GSU calcule, le CPU
+  attend.
+</p>
+<p>
+  L'émuler, c'est écrire <strong>un CPU complet de plus</strong> — le vrai défi de ce projet.
+  Le GSU de cet émulateur exécute réellement les programmes de <em>Yoshi's Island</em>, décompresse
+  ses graphismes et affiche l'écran de sélection de la langue.
+</p>
+<div class="card story">
+  <strong>Un octet qui changeait tout.</strong> Pendant des jours, <em>Yoshi's Island</em>
+  restait obstinément noir&nbsp;: le GSU tournait, mais son décompresseur bouclait sans fin.
+  Après avoir construit un outil de trace dédié et éliminé une à une plusieurs pistes (format
+  des pixels, décodage des banques mémoire, tampon de lecture), la cause s'est révélée être un
+  <strong>décalage d'un seul octet sur le compteur de programme R15</strong>&nbsp;: notre code
+  avançait R15 dès la lecture de l'instruction, alors que le vrai GSU ne l'avance qu'à la lecture
+  des opérandes. Toutes les valeurs calculées à partir de R15 (cibles de saut, adresses) étaient
+  donc fausses d'un octet, ce qui donnait de mauvais compteurs de boucle et figeait la
+  décompression. Une ligne de correction, et le jeu s'est mis à booter. C'est l'essence du travail
+  d'émulation&nbsp;: des bugs minuscules aux conséquences spectaculaires, que seule une comparaison
+  méticuleuse avec le matériel de référence permet de trouver.
+</div>
+
+<!-- ================= 11. LOOP ================= -->
+<h2><span class="n">11.</span>La boucle d'émulation : tout synchroniser</h2>
+<p>Assembler tout cela tient, au fond, en une boucle. Pour produire une image&nbsp;:</p>
+<pre><span class="k">fn</span> run_frame(inputs) -&gt; Image {
+    appliquer_les_manettes(inputs);
     <span class="k">while</span> !fin_de_trame {
         cpu.step(bus);        <span class="c">// le CPU exécute une instruction…</span>
         <span class="c">// …chaque accès mémoire a fait avancer l'horloge, ce qui</span>
-        <span class="c">// déclenche au bon moment : rendu d'une scanline, NMI/IRQ,</span>
-        <span class="c">// HDMA, rattrapage de l'audio.</span>
+        <span class="c">// déclenche AU BON MOMENT, via l'ordonnanceur :</span>
+        <span class="c">//   • le rendu d'une ligne d'écran,</span>
+        <span class="c">//   • les interruptions NMI / IRQ,</span>
+        <span class="c">//   • les transferts HDMA,</span>
+        <span class="c">//   • le rattrapage du processeur audio.</span>
     }
     <span class="k">return</span> framebuffer;   <span class="c">// l'image de 256×224 est prête</span>
 }</pre>
 <p>
-  Le binaire d'interface appelle <code>run_frame</code> à la cadence de la région (50 ou 60 fois
-  par seconde), convertit l'image en pixels à l'écran (fenêtre <code>winit</code> + <code>pixels</code>),
-  envoie le son à la carte audio (<code>cpal</code>) et transmet l'état du clavier comme
-  s'il s'agissait d'une manette.
+  Le frontend appelle <code>run_frame</code> à la cadence de la région (50 ou 60 fois par
+  seconde), convertit l'image en pixels à l'écran (via une fenêtre <code>winit</code> et la
+  bibliothèque <code>pixels</code>), envoie le son à la carte audio (<code>cpal</code>), et
+  transmet l'état du clavier comme s'il s'agissait d'une manette. Le rythme est tenu par une
+  <strong>échéance absolue</strong>&nbsp;: on calcule l'instant idéal de la prochaine image et on
+  attend jusque‑là, pour un défilement parfaitement régulier.
 </p>
 
-<!-- ================= BEYOND ================= -->
-<h2><span class="n">10.</span>Au‑delà de la console</h2>
+<!-- ================= 12. SAVE STATES ================= -->
+<h2><span class="n">12.</span>Au‑delà de la console : sauvegardes et save states</h2>
 <p>
   Parce que l'émulateur <strong>possède la totalité de l'état</strong> de la machine, il peut
-  faire des choses impossibles sur le vrai matériel :
+  faire des choses impossibles sur le vrai matériel&nbsp;:
 </p>
 <ul>
-  <li><strong>Sauvegardes SRAM</strong> : la pile de sauvegarde de la cartouche est un simple fichier <code>.srm</code> à côté de la ROM, chargé au lancement, réécrit en quittant.</li>
-  <li><strong>Save states</strong> : on sérialise <em>tout</em> l'état (CPU, PPU, APU, mémoires) dans un fichier. Le recharger fait reprendre le jeu exactement où il en était — au pixel et à l'échantillon près (c'est vérifié : après sauvegarde/rechargement, l'émulation reste identique bit pour bit).</li>
-  <li><strong>Débogage</strong> : traces d'instructions, captures d'écran, inspection de la mémoire — les outils qui ont permis de construire et de valider l'émulateur.</li>
+  <li><strong>Sauvegardes de cartouche (SRAM)</strong>&nbsp;: la pile de sauvegarde de la vraie cartouche est simplement un fichier <code>.srm</code> à côté de la ROM, chargé au lancement et réécrit en quittant.</li>
+  <li><strong>Save states</strong>&nbsp;: on <em>sérialise</em> l'intégralité de l'état — CPU, PPU, APU, toutes les mémoires — dans un fichier. Le recharger fait reprendre le jeu <strong>exactement</strong> où il en était, au pixel et à l'échantillon près. Cette exactitude est vérifiée automatiquement&nbsp;: après sauvegarde puis rechargement, l'émulation reste identique bit pour bit.</li>
+  <li><strong>Outils de débogage</strong>&nbsp;: traces d'instructions, captures d'écran, inspection de la mémoire — les instruments qui ont permis de construire et de valider l'émulateur.</li>
 </ul>
-
-<h2><span class="n">11.</span>En résumé</h2>
-<p>
-  Émuler la SNES, c'est <strong>faire cohabiter fidèlement une demi‑douzaine de puces</strong> :
-  un CPU qui exécute la logique, une horloge qui rythme tout, un PPU qui compose l'image ligne
-  par ligne, un DMA qui déplace les données à temps, et un second ordinateur dédié au son. La
-  difficulté n'est pas une puce en particulier — c'est leur <strong>synchronisation exacte</strong>,
-  car les jeux exploitent le moindre détail de timing. C'est pourquoi chaque composant est écrit
-  d'après une référence matérielle vérifiée, puis validé sur de vrais jeux commerciaux.
-</p>
-<div class="card key">
-  <strong>Le principe directeur :</strong> ne jamais inventer une constante matérielle. Chaque
-  coût en cycles, chaque bit de registre, chaque table de priorités provient d'une documentation
-  de référence — et est vérifié de façon adversariale. C'est ce qui fait la différence entre
-  « ça marche à peu près » et « le jeu s'exécute vraiment comme sur la console ».
+<div class="card deep">
+  <strong>Le déterminisme, garant de justesse.</strong> Un émulateur bien écrit est
+  <em>déterministe</em>&nbsp;: à partir du même état et des mêmes entrées, il produit toujours
+  exactement la même suite d'images et de sons. C'est cette propriété qui rend les save states
+  fiables, et qui permet de tester l'émulateur en comparant ses sorties à une référence connue.
 </div>
 
+<!-- ================= 13. METHODOLOGY ================= -->
+<h2><span class="n">13.</span>Comment cet émulateur a été construit et vérifié</h2>
+<p>
+  Émuler fidèlement une console suppose une méthode aussi rigoureuse que le matériel lui‑même.
+  Trois principes ont guidé ce projet&nbsp;:
+</p>
+<h3>1. Ne jamais inventer une constante matérielle</h3>
+<p>
+  Chaque coût en cycles, chaque bit de registre, chaque table de priorités provient d'une
+  <strong>documentation de référence vérifiée</strong> (les bases de connaissances de la
+  communauté, et le code source d'émulateurs de référence). Une constante inventée « au jugé »
+  est la première cause de bugs subtils.
+</p>
+<h3>2. Vérification adversariale</h3>
+<p>
+  Chaque composant, une fois écrit, est <strong>relu par un « avocat du diable »</strong> dont
+  le but est de trouver les écarts avec le matériel réel — pas d'approuver le code. Cette
+  relecture croisée a débusqué quantité de petites erreurs avant qu'elles ne deviennent des bugs
+  visibles.
+</p>
+<h3>3. Validation par jalons sur de vrais jeux</h3>
+<p>
+  Le développement a progressé par <strong>jalons vérifiables</strong>&nbsp;: d'abord « le CPU
+  démarre », puis « le son répond », puis « les fonds s'affichent », « les sprites »,
+  « la manette pilote le jeu », « la musique joue »… Chaque jalon était prouvé sur un vrai jeu
+  commercial, avec une preuve concrète (capture d'écran, analyse du son, trace d'exécution).
+  Choisir les jalons pour qu'ils testent <em>un</em> composant à la fois rend les bugs
+  attribuables.
+</p>
+<div class="card key">
+  <strong>Le résultat&nbsp;:</strong> environ 16 000 lignes de Rust, plus de 250 tests
+  automatiques, un émulateur qui fait tourner plusieurs jeux commerciaux (image, son,
+  sauvegardes, save states) et même un jeu à puce SuperFX — le tout empaqueté dans une
+  application macOS double‑cliquable avec barre de menus et sélecteur de jeu.
+</div>
+
+<!-- ================= 14. GLOSSARY ================= -->
+<h2><span class="n">14.</span>Glossaire</h2>
+<table>
+  <tr><td class="mono">Bit / Octet</td><td>Unité de base (0 ou 1) / groupe de 8 bits (0–255).</td></tr>
+  <tr><td class="mono">Registre</td><td>Petite case mémoire interne à une puce&nbsp;; y écrire commande la puce.</td></tr>
+  <tr><td class="mono">MMIO</td><td>Adresses mémoire qui, au lieu de RAM, pilotent une puce (registres mappés en mémoire).</td></tr>
+  <tr><td class="mono">Open bus / MDR</td><td>Valeur « fantôme » renvoyée par une lecture d'adresse non mappée&nbsp;: le dernier octet vu sur le bus.</td></tr>
+  <tr><td class="mono">V‑blank</td><td>Intervalle après la dernière ligne visible, seul moment sûr pour modifier la vidéo.</td></tr>
+  <tr><td class="mono">NMI / IRQ</td><td>Interruptions&nbsp;: signaux qui détournent le CPU vers un gestionnaire (V‑blank / minuterie).</td></tr>
+  <tr><td class="mono">Tuile</td><td>Motif de 8×8 pixels, brique de base des images de la SNES.</td></tr>
+  <tr><td class="mono">Sprite / OBJ</td><td>Objet mobile (personnage, projectile), positionné librement à l'écran.</td></tr>
+  <tr><td class="mono">Palette / CGRAM</td><td>Table des couleurs&nbsp;; les pixels stockent un numéro de couleur, pas la couleur.</td></tr>
+  <tr><td class="mono">DMA / HDMA</td><td>Transferts rapides d'octets en bloc / par ligne d'écran.</td></tr>
+  <tr><td class="mono">ADSR</td><td>Enveloppe de volume d'un son (Attaque, Chute, Maintien, Extinction).</td></tr>
+  <tr><td class="mono">BRR</td><td>Format d'échantillon audio compressé de la SNES (blocs de 9 octets).</td></tr>
+  <tr><td class="mono">Mode 7</td><td>Mode graphique à rotation et zoom d'une couche unique.</td></tr>
+  <tr><td class="mono">GSU / SuperFX</td><td>Coprocesseur dans certaines cartouches, un CPU RISC qui dessine des pixels.</td></tr>
+  <tr><td class="mono">Save state</td><td>Photographie complète de l'état de la machine, rechargeable à l'identique.</td></tr>
+</table>
+
 <footer class="end">
-  Document généré pour accompagner l'émulateur SNES écrit en Rust · ≈ 16 000 lignes,
-  219 tests · CPU 65C816, PPU (modes 0–7, color math, HDMA), APU (SPC700 + S‑DSP), save states.
+  Document généré pour accompagner l'émulateur SNES écrit en Rust · CPU 65C816, PPU (modes 0–7,
+  color math, HDMA, offset‑per‑tile, hires), APU (SPC700 + S‑DSP), DMA/HDMA, coprocesseur SuperFX,
+  save states · ≈ 16 000 lignes, 250+ tests. Édition détaillée v2.0.
 </footer>
 
 </body>

@@ -17,3 +17,6 @@ roms/
 # Packaged app bundle (build artifact)
 dist/
 *.app
+
+# macOS metadata
+.DS_Store

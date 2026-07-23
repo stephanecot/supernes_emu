@@ -85,15 +85,22 @@ pub fn render_obj_line(ppu: &mut Ppu, line: u16, out: &mut [ObjPixel; 256]) {
         0
     };
 
+    // OBJ interlace ($2133 bit1): sprites are sampled at half vertical
+    // resolution (height halved for the range test, row index doubled and
+    // field-selected) so they appear half as tall (ppu.md §15, bsnes ppu-fast).
+    let obj_il = ppu.obj_interlace;
+    let field = ppu.interlace_field as u16;
+
     // --- Range: first 32 in-range sprites in rotation order; 33rd sets bit6. ---
     let mut in_range = [0usize; 32];
     let mut n_range = 0usize;
     for k in 0..128usize {
         let idx = (first + k) & 0x7F;
         let (_, height) = dims(ppu, idx, small, large);
+        let vis_height = if obj_il { height >> 1 } else { height };
         let y = ppu.oam_lo[idx * 4 + 1] as u16;
         let row = line.wrapping_sub(y) & 0xFF;
-        if (row as u32) < height as u32 {
+        if (row as u32) < vis_height as u32 {
             if n_range == 32 {
                 ppu.obj_range_over = true;
                 break;
@@ -124,9 +131,21 @@ pub fn render_obj_line(ppu: &mut Ppu, line: u16, out: &mut [ObjPixel; 256]) {
         let base_tile = b2 | ((b3 as u16 & 0x01) << 8);
 
         // Row within the sprite for this line (Y wraps mod 256), V-flipped.
+        // OBJ interlace doubles the row (skipping alternate sprite rows) and
+        // offsets by the field, applied after the V-flip (bsnes ppu-fast).
         let mut srow = line.wrapping_sub(b1) & 0xFF;
+        if obj_il {
+            srow <<= 1;
+        }
         if vflip {
             srow = height - 1 - srow;
+        }
+        if obj_il {
+            srow = if vflip {
+                srow.wrapping_sub(field)
+            } else {
+                srow.wrapping_add(field)
+            } & 0xFF;
         }
 
         let n_tiles = width / 8;

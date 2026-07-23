@@ -26,13 +26,15 @@
 //!
 //! ## `background.rs`
 //! ```ignore
-//! pub fn render_bg_line(ppu: &Ppu, bg_index: usize, line: u16, out: &mut [LayerPixel; 256]);
+//! pub fn render_bg_line(ppu: &Ppu, bg_index: usize, line: u16, phase: u32, out: &mut [LayerPixel; 256]);
 //! ```
-//! `bg_index` 0..=3 = BG1..BG4. Applies that layer's scroll, mosaic, tile-size
-//! and tilemap/char fetch for the current `ppu.bg_mode`, writing one
-//! `LayerPixel` per column (transparent = `LayerPixel::default()`). Mode 7 and
-//! offset-per-tile helpers may be additional `pub fn`s in `background.rs` /
-//! `mode7.rs`; `render.rs` is free to call them.
+//! `bg_index` 0..=3 = BG1..BG4. Applies that layer's scroll, mosaic, tile-size,
+//! offset-per-tile (modes 2/4/6), screen-interlace vertical doubling and
+//! tilemap/char fetch for the current `ppu.bg_mode`, writing one `LayerPixel`
+//! per column (transparent = `LayerPixel::default()`). `phase` (0=even/left,
+//! 1=odd/right) selects the half-dot sampled in hires modes 5/6 and is ignored
+//! in low-res modes. Mode 7 and offset-per-tile helpers may be additional
+//! `pub fn`s in `background.rs` / `mode7.rs`; `render.rs` is free to call them.
 //!
 //! ## `render.rs`
 //! ```ignore
