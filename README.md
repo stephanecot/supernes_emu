@@ -40,12 +40,16 @@ Super Mario RPG (SA-1), Super Mario Kart (DSP-1) and Mega Man X3 (CX4).
   <img src="docs/screenshots/smk_dsp1.png" width="47%" alt="Super Mario Kart (DSP-1)">
 </p>
 
+All four coprocessors are validated in real gameplay: Yoshi's Island (SuperFX) boots and renders,
+Super Mario RPG (SA-1) plays the overworld, Mega Man X3 (CX4) reaches the title (with the CX4
+scale/rotate logo animation) and opening-stage gameplay, and Super Mario Kart (DSP-1) renders a
+live Mode 7 race — its perspective-projection math, the highest-risk part, works on a real track.
+
 Known gaps: the Super Mario World *attract-mode intro* reaches gameplay but its cutscene state
 machine doesn't advance to the overworld (diagnosed, root cause not yet isolated); Mode 7,
 offset-per-tile, hires and interlace are implemented and unit-tested but not yet gated on a real
-in-game screen; the DSP-1 and CX4 math is validated up to each game's intro/title but deeper
-in-game 3D paths (Mario Kart's Mode 7 track, MMX3's wireframe bosses) aren't visually gated yet.
-See `docs/PUNCHLIST.md` for the full list and `docs/IDEAS.md` for planned features.
+in-game screen (the DSP-1 Mode 7 path is now exercised via Super Mario Kart). See
+`docs/PUNCHLIST.md` for the full list and `docs/IDEAS.md` for planned features.
 
 ## Build & run
 
