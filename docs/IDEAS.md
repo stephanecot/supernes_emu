@@ -54,6 +54,59 @@ Backlog de fonctionnalités envisagées (hors périmètre des tâches en cours).
 - **Corriger le hang de l'intro de Super Mario World** (bug connu, documenté dans PUNCHLIST) et **valider le Mode 7 sur un écran de jeu réel**
   — deux trous d'exactitude restants sur la console de base.
 
+## Idées innovantes (proposées par l'assistant, 2ᵉ vague)
+
+Idées qui exploitent trois atouts déjà en place et rarement réunis : **état déterministe et
+entièrement sérialisable** (round-trip byte-identique prouvé), **introspection complète**
+(traces CPU/SPC700/GSU/SA-1, log MMIO, watchpoints, désassembleur), et **mode headless scriptable**.
+
+- **Rejeu déterministe de session (« replay »)** — enregistrer une partie comme *(état initial + flux
+  d'entrées)* au lieu d'une vidéo : quelques Ko pour une session entière, rejouable à l'identique.
+  Faisable **parce que** le déterminisme est déjà prouvé. Double bénéfice majeur : le même mécanisme
+  devient le **banc de test de non-régression** de l'émulateur (rejouer une partie enregistrée et
+  comparer les empreintes de framebuffer → détecte toute régression d'exactitude). Bonus : « ghost »
+  (courir contre son propre run dans Mario Kart). **M**
+
+- **Netplay à rollback (style GGPO)** — jouer à deux en ligne en n'échangeant que les entrées, avec
+  correction par rembobinage. Techniquement, la partie difficile (déterminisme + snapshots rapides et
+  complets) est **déjà faite et vérifiée** ; il reste le réseau et la prédiction. Le plus ambitieux,
+  mais c'est là que l'investissement d'exactitude paye le plus. **L**
+
+- **Mode « rayons X » pédagogique** — au lieu d'un débogueur d'expert, un mode *apprenant* : activer/
+  désactiver chaque couche (BG1-4, sprites) en direct, visualiser la VRAM en tuiles, la palette,
+  les boîtes de sprites… et surtout **cliquer un pixel pour savoir ce qui l'a produit** (quelle
+  couche, quelle tuile, quelle entrée de palette, quelle priorité). Prolonge directement le PDF
+  pédagogique déjà écrit : l'émulateur devient un **instrument d'enseignement**, pas juste un
+  lecteur de jeux. Différenciant. **M/L**
+
+- **Profil technique automatique d'un jeu** — à partir du log MMIO, générer une fiche : modes BG
+  utilisés, effets détectés (HDMA, color math, fenêtres, Mode 7), coprocesseur, pic de sprites,
+  usage du DSP audio… Unique, peu coûteux (l'instrumentation existe), et cohérent avec l'identité
+  pédagogique du projet. **S/M**
+
+- **Export SPC (musique)** — un fichier `.spc` **est** exactement l'état de l'APU (64 Ko de RAM +
+  registres DSP + registres SPC700), c'est-à-dire un sous-ensemble de ce que le save state capture
+  déjà. Permet d'exporter la musique du jeu en cours pour l'écouter dans un lecteur SPC. Quasi gratuit
+  vu l'infrastructure. **S/M**
+
+- **Reprise instantanée (suspend/resume)** — sauvegarder automatiquement l'état à la fermeture et
+  reprendre exactement où on s'était arrêté au lancement suivant (comportement « console moderne »).
+  Trivial une fois les save states là, et très apprécié à l'usage. **S**
+
+- **Rembobinage à la mort / modes d'assistance** — pour les joueurs débutants (et le mode enfant
+  déjà prévu) : rembobiner automatiquement quelques secondes en arrière quand on perd une vie,
+  ralenti à la demande (½×). Rend les jeux difficiles de l'époque accessibles sans les dénaturer.
+  **S** une fois le rewind en place.
+
+- **Découverte automatique de codes de triche** — plutôt que de saisir des codes Game Genie,
+  *trouver* l'adresse mémoire d'une valeur (vies, temps, énergie) en comparant automatiquement des
+  états successifs pendant que l'événement se produit. Faisable grâce aux snapshots complets et rapides.
+  **M**
+
+- **Environnement pour l'IA (façon Gym)** — le cœur est déterministe, headless, scriptable et sans
+  I/O : l'exposer comme environnement d'apprentissage par renforcement (bindings Python), à la manière
+  des émulateurs NES devenus des bancs d'essai de recherche. Cohérent avec l'origine du projet. **M**
+
 ## Audio
 
 - **Mode muet** — couper le son via une touche (ex. M) et une entrée de menu (« Muet »), état reflété (coché) et mémorisé dans les préférences.
