@@ -174,8 +174,8 @@ Phase 0 (socle prefs)
 
 ## Décisions attendues avant de lancer
 
-1. **Format des préférences** : JSON (recommandé) ou TOML.
-2. **Filtre par défaut** : Aucun/net (recommandé) ou CRT d'emblée.
-3. **Audio en accéléré** : coupé (recommandé) ou ré-échantillonné.
+1. **Format des préférences** : JSON.
+2. **Filtre par défaut** : Aucun/net.
+3. **Audio en accéléré** : coupé
 4. **Rewind** : budget mémoire acceptable (~30–45 Mo compressé pour 30 s).
-5. **Nom du projet** : garder « SuperNES » ou en choisir un original (recommandé).
+5. **Nom du projet** : Trouve autre chose
