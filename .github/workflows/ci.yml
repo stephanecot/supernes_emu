@@ -1,9 +1,12 @@
 name: CI
 
 on:
+  # Only main: day-to-day work happens on dev and must not spend CI minutes.
   push:
     branches: [main]
+  # Still validate a pull request *before* it reaches main.
   pull_request:
+    branches: [main]
   workflow_dispatch:
 
 env:
