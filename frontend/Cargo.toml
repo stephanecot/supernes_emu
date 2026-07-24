@@ -1,6 +1,6 @@
 [package]
 name = "prisme"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [[bin]]
@@ -11,8 +11,15 @@ path = "src/main.rs"
 snes-core = { path = "../core" }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 png = "0.17"
-winit = "0.30"
+winit = { version = "0.30", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 pixels = "0.15"
 cpal = "0.15"
 rfd = "0.17"
 muda = "0.19"
+
+# Only for `localtime_r` (timezone/DST-aware timestamps in screenshot and .spc
+# file names); std has no timezone database. Already in the tree via cpal.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

@@ -4,25 +4,30 @@
 use snes_core::JoypadState;
 use winit::keyboard::KeyCode;
 
-/// Map a physical keyboard key (layout-independent scancode position, so the
-/// mapping stays put on non-QWERTY layouts) to the CLI/script button name it
-/// drives, or `None` if the key has no mapping.
+/// Built-in button -> physical key mapping. Physical keys are
+/// layout-independent scancode positions, so the mapping stays put on
+/// non-QWERTY layouts. Button names are the ones the `--script` contract uses.
+/// Single source of truth: `prefs::default_keymap` derives the persisted
+/// defaults from this table.
+pub const DEFAULT_KEYMAP: &[(&str, KeyCode)] = &[
+    ("Up", KeyCode::ArrowUp),
+    ("Down", KeyCode::ArrowDown),
+    ("Left", KeyCode::ArrowLeft),
+    ("Right", KeyCode::ArrowRight),
+    ("B", KeyCode::KeyZ),
+    ("A", KeyCode::KeyX),
+    ("Y", KeyCode::KeyA),
+    ("X", KeyCode::KeyS),
+    ("L", KeyCode::KeyQ),
+    ("R", KeyCode::KeyW),
+    ("Start", KeyCode::Enter),
+    ("Select", KeyCode::ShiftRight),
+];
+
+/// Map a physical keyboard key to the CLI/script button name it drives, or
+/// `None` if the key has no mapping.
 pub fn keycode_to_button(key: KeyCode) -> Option<&'static str> {
-    Some(match key {
-        KeyCode::ArrowUp => "Up",
-        KeyCode::ArrowDown => "Down",
-        KeyCode::ArrowLeft => "Left",
-        KeyCode::ArrowRight => "Right",
-        KeyCode::KeyZ => "B",
-        KeyCode::KeyX => "A",
-        KeyCode::KeyA => "Y",
-        KeyCode::KeyS => "X",
-        KeyCode::KeyQ => "L",
-        KeyCode::KeyW => "R",
-        KeyCode::Enter => "Start",
-        KeyCode::ShiftRight => "Select",
-        _ => return None,
-    })
+    DEFAULT_KEYMAP.iter().find(|&&(_, code)| code == key).map(|&(name, _)| name)
 }
 
 /// Set a button on a JoypadState by its CLI/script name. Names are the ones

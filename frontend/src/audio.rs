@@ -192,6 +192,10 @@ impl Resampler {
 pub struct AudioOutput {
     _stream: cpal::Stream,
     producer: Producer,
+    /// Linear amplitude applied to every frame on its way into the ring (see
+    /// `gain_for`). Muting is a gain of 0, never a stream stop: the APU keeps
+    /// running, so unmuting resumes mid-note instead of restarting the song.
+    gain: f32,
 }
 
 impl AudioOutput {
@@ -263,16 +267,62 @@ impl AudioOutput {
             return None;
         }
         eprintln!("audio: {device_rate} Hz, {channels} ch, {sample_format:?}");
-        Some(AudioOutput { _stream: stream, producer })
+        Some(AudioOutput { _stream: stream, producer, gain: 1.0 })
     }
 
-    /// Push a run of 32 kHz stereo frames into the ring. Overflowing frames are
-    /// dropped (the rate controller will have slowed the consumer to prevent
-    /// this in steady state).
+    /// Set the output gain (see `gain_for`). Out-of-range or non-finite values
+    /// are clamped to `0.0..=1.0`.
+    pub fn set_gain(&mut self, gain: f32) {
+        self.gain = clamp_gain(gain);
+    }
+
+    /// Push a run of 32 kHz stereo frames into the ring, scaled by the current
+    /// gain. Overflowing frames are dropped (the rate controller will have
+    /// slowed the consumer to prevent this in steady state).
     pub fn push(&mut self, frames: &[(i16, i16)]) {
+        let gain = self.gain;
         for &(l, r) in frames {
-            let f = [l as f32 / 32768.0, r as f32 / 32768.0];
+            let f = [l as f32 / 32768.0 * gain, r as f32 / 32768.0 * gain];
             self.producer.push(f);
+        }
+    }
+}
+
+/// Clamp a requested gain into `0.0..=1.0`; a non-finite request (which would
+/// poison every sample it multiplies) becomes silence.
+fn clamp_gain(gain: f32) -> f32 {
+    if gain.is_finite() {
+        gain.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+/// Linear amplitude for a mute flag + 0..=100 volume setting. Muting wins over
+/// any volume; the mapping is linear in amplitude (100 % = unity gain, i.e. the
+/// unmodified S-DSP output), so 0 % is exact silence and the setting can never
+/// amplify past the DSP's own full scale.
+pub fn gain_for(mute: bool, volume: u8) -> f32 {
+    if mute {
+        return 0.0;
+    }
+    volume.min(100) as f32 / 100.0
+}
+
+/// One step of the volume control: 10-percentage-point increments, snapped to a
+/// multiple of 10 and clamped to 0..=100. A value already off-grid (hand-edited
+/// preferences file) snaps to the next grid point in the requested direction.
+pub fn step_volume(volume: u8, up: bool) -> u8 {
+    let v = volume.min(100);
+    if up {
+        (v / 10 * 10 + 10).min(100)
+    } else {
+        // Round down to the grid first, so 42 -> 40 rather than 32.
+        let floor = v / 10 * 10;
+        if floor == v {
+            v.saturating_sub(10)
+        } else {
+            floor
         }
     }
 }
@@ -304,6 +354,39 @@ mod tests {
         }
         assert!(!p.push([0.0, 0.0]), "ring must report full");
         assert_eq!(c.fill(), RING_CAPACITY - 1);
+    }
+
+    #[test]
+    fn gain_for_maps_mute_and_volume() {
+        assert_eq!(gain_for(false, 100), 1.0);
+        assert_eq!(gain_for(false, 0), 0.0);
+        assert_eq!(gain_for(true, 100), 0.0, "mute overrides volume");
+        assert!((gain_for(false, 50) - 0.5).abs() < 1e-6);
+        // A hand-edited file could hold >100; never amplify past unity.
+        assert_eq!(gain_for(false, 250), 1.0);
+    }
+
+    #[test]
+    fn step_volume_walks_the_ten_percent_grid() {
+        assert_eq!(step_volume(100, true), 100, "clamped at the top");
+        assert_eq!(step_volume(90, true), 100);
+        assert_eq!(step_volume(0, false), 0, "clamped at the bottom");
+        assert_eq!(step_volume(10, false), 0);
+        assert_eq!(step_volume(50, true), 60);
+        assert_eq!(step_volume(50, false), 40);
+        // Off-grid values snap toward the requested direction.
+        assert_eq!(step_volume(42, true), 50);
+        assert_eq!(step_volume(42, false), 40);
+        assert_eq!(step_volume(250, false), 90);
+    }
+
+    #[test]
+    fn clamp_gain_rejects_out_of_range_and_non_finite() {
+        assert_eq!(clamp_gain(0.5), 0.5);
+        assert_eq!(clamp_gain(2.0), 1.0);
+        assert_eq!(clamp_gain(-1.0), 0.0);
+        assert_eq!(clamp_gain(f32::NAN), 0.0);
+        assert_eq!(clamp_gain(f32::INFINITY), 0.0);
     }
 
     #[test]

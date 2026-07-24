@@ -17,9 +17,41 @@ pub fn state_path(rom_path: &Path, slot: u8) -> PathBuf {
     }
 }
 
+/// Number of manual save-state slots (`prefs.save_slot` cycles 0..SLOT_COUNT).
+pub const SLOT_COUNT: u8 = 10;
+
+/// Sidecar path of the automatic session state ("instant resume"): `<rom>
+/// .resume`. Deliberately outside the `.state`/`.stateN` series so an
+/// automatic write can never overwrite a state the player saved by hand.
+pub fn resume_path(rom_path: &Path) -> PathBuf {
+    rom_path.with_extension("resume")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resume_file_is_distinct_from_every_manual_slot() {
+        let rom = Path::new("/roms/game.sfc");
+        let resume = resume_path(rom);
+        assert_eq!(resume, PathBuf::from("/roms/game.resume"));
+        for slot in 0..SLOT_COUNT {
+            assert_ne!(state_path(rom, slot), resume, "slot {slot} collides with the resume file");
+        }
+        // Zipped ROMs follow the same base-name rule as `.srm`/`.state`.
+        assert_eq!(resume_path(Path::new("/roms/game.zip")), PathBuf::from("/roms/game.resume"));
+    }
+
+    #[test]
+    fn every_slot_has_its_own_file() {
+        let rom = Path::new("/roms/game.sfc");
+        let mut paths: Vec<PathBuf> = (0..SLOT_COUNT).map(|s| state_path(rom, s)).collect();
+        let count = paths.len();
+        paths.sort();
+        paths.dedup();
+        assert_eq!(paths.len(), count);
+    }
 
     #[test]
     fn slot0_is_dot_state() {

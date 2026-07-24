@@ -20,6 +20,7 @@ description: Build, test, lint and run the SNES emulator (Rust workspace) — ru
 
 | Flag | Behavior |
 |---|---|
+| `--version` / `-V` | Print `Prisme - SuperNes <version>` and exit (no ROM needed) |
 | `--info` | Print parsed header (title, mapping LoROM/HiROM, region, ROM/SRAM size, checksum), then exit |
 | `--disasm [--addr BB:AAAA] [--count N]` | Disassemble N instructions (default 30) from address (default: reset vector), then exit |
 | `--headless --frames N` | No window, no audio; emulate N frames, then exit 0 |
@@ -32,6 +33,7 @@ description: Build, test, lint and run the SNES emulator (Rust workspace) — ru
 | `--watch BB:AAAA` | Log every read/write at a bus address |
 | `--script PATH` | Headless input script; each line: `<frame> <button> <frames_held>` with buttons `A B X Y L R Start Select Up Down Left Right` |
 | `--dump-state DIR` | On exit dump `wram.bin vram.bin cgram.bin oam.bin apuram.bin` into DIR |
+| `--dump-spc PATH.spc` | On exit write the APU state as a 66048-byte `.spc` music file (headless only) |
 | `--load-state FILE` | Headless: `Snes::load_state` from FILE before emulating frame 0 (rejects a state saved from a different ROM) |
 | `--save-state-at FRAME FILE` | Headless: write `Snes::save_state` to FILE right after emulating frame FRAME |
 
