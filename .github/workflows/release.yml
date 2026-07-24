@@ -1,0 +1,121 @@
+name: Release
+
+# Tag a commit to cut a release:  git tag v0.2.0 && git push origin v0.2.0
+# (or run this workflow by hand from the Actions tab to test the packaging).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos:
+    name: macOS (universal .app)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin, aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build both architectures
+        run: |
+          cargo build --release -p prisme --target x86_64-apple-darwin
+          cargo build --release -p prisme --target aarch64-apple-darwin
+
+      # One binary that runs on both Apple Silicon and Intel Macs.
+      - name: Merge into a universal binary
+        run: |
+          mkdir -p target/release
+          lipo -create -output target/release/prisme \
+            target/x86_64-apple-darwin/release/prisme \
+            target/aarch64-apple-darwin/release/prisme
+          lipo -info target/release/prisme
+
+      # Reuses the same bundler used locally, so the CI artifact and a local
+      # build are produced the exact same way.
+      - name: Bundle Prisme.app
+        run: SKIP_BUILD=1 ./scripts/make-app.sh
+
+      - name: Zip the bundle
+        run: ditto -c -k --keepParent dist/Prisme.app Prisme-macos-universal.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: Prisme-macos-universal.zip
+
+  windows:
+    name: Windows (x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release -p prisme
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path package | Out-Null
+          Copy-Item target/release/prisme.exe package/
+          Copy-Item README.md package/
+          Compress-Archive -Path package/* -DestinationPath Prisme-windows-x64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: Prisme-windows-x64.zip
+
+  release:
+    name: Publish release
+    needs: [macos, windows]
+    # Only publish for real tags; a manual run just builds the artifacts.
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          cat > notes.md <<'EOF'
+          ## Prisme - SuperNes
+
+          A Super Nintendo emulator written from scratch in Rust.
+
+          | Download | Platform |
+          |---|---|
+          | `Prisme-macos-universal.zip` | macOS 10.13+ (Apple Silicon and Intel) |
+          | `Prisme-windows-x64.zip` | Windows x64 |
+
+          **macOS:** the app is **not signed or notarised** (that needs a paid Apple
+          Developer account), so Gatekeeper will refuse the first launch. Either
+          right-click the app and choose *Open*, or run:
+          `xattr -dr com.apple.quarantine Prisme.app`
+
+          **Windows:** unpack and run `prisme.exe`. The native menu bar is macOS-only;
+          on Windows use the keyboard shortcuts documented in the README.
+
+          **ROMs are not included** — supply your own dumps of games you own.
+          EOF
+          gh release create "$TAG" \
+            --repo "${{ github.repository }}" \
+            --title "Prisme - SuperNes $TAG" \
+            --notes-file notes.md \
+            Prisme-macos-universal.zip \
+            Prisme-windows-x64.zip

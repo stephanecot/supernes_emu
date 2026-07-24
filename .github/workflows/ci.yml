@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # The emulator core is pure computation and must pass everywhere.
+      - name: Test core
+        run: cargo test -p snes-core --lib
+
+      - name: Test frontend
+        run: cargo test -p prisme
+
+      # Proves the windowed frontend still compiles on this platform. The
+      # native menu bar is macOS-only (cfg-gated); Windows falls back to
+      # keyboard shortcuts, so this is also the guard against that path rotting.
+      - name: Build release binary
+        run: cargo build --release -p prisme
+
+      # Smoke test with no display: emulate a few frames of a synthetic ROM and
+      # make sure the headless path still works on this platform.
+      - name: Headless smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import struct
+          # Minimal valid LoROM image: header at $7FC0 with a reset vector.
+          rom = bytearray(0x10000)
+          title = b"CI SMOKE TEST        "
+          rom[0x7FC0:0x7FC0+21] = title
+          rom[0x7FC0+0x15] = 0x20          # LoROM
+          rom[0x7FC0+0x19] = 0x01          # NTSC
+          rom[0x7FFC] = 0x00; rom[0x7FFD] = 0x80   # reset vector -> $8000
+          rom[0x0000] = 0x80; rom[0x0001] = 0xFE   # BRA to self
+          open("ci-smoke.sfc","wb").write(bytes(rom))
+          PY
+          ./target/release/prisme ci-smoke.sfc --info
+          ./target/release/prisme ci-smoke.sfc --headless --frames 60
