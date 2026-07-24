@@ -20,3 +20,6 @@ dist/
 
 # macOS metadata
 .DS_Store
+
+# Debug dumps agents sometimes drop at the repo root (they belong in target/debug-out/)
+/*.png
