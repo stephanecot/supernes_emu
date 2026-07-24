@@ -107,6 +107,30 @@ entièrement sérialisable** (round-trip byte-identique prouvé), **introspectio
   I/O : l'exposer comme environnement d'apprentissage par renforcement (bindings Python), à la manière
   des émulateurs NES devenus des bancs d'essai de recherche. Cohérent avec l'origine du projet. **M**
 
+## Rendu amélioré par IA (exploratoire)
+
+- **Amélioration du rendu en temps réel** — question ouverte : peut-on améliorer l'image via l'IA ?
+  Conclusion de l'analyse : oui, mais **pas par un upscaler neuronal appliqué à l'image finale**.
+  - Pourquoi l'approche naïve déçoit : (1) **instabilité temporelle** — le réseau hallucine des détails
+    légèrement différents à chaque image, d'où un scintillement sur les décors qui défilent ;
+    (2) **latence** ajoutée (5-10 ms/image) là où les joueurs la ressentent ; (3) le **dithering** SNES
+    était conçu pour être fondu par une télé cathodique — le « nettoyer » casse l'intention d'origine.
+  - **Approche recommandée, propre à un émulateur** : exploiter la sémantique interne dont on dispose
+    (couches BG1-4 et sprites séparées, identité des tuiles, palettes, décalages de défilement exacts).
+    → **Cache de tuiles HD** : agrandir hors ligne, une seule fois, chaque tuile 8x8 unique avec un gros
+    modèle de qualité, indexée par empreinte de contenu ; à l'exécution ce n'est plus qu'un blit.
+    Coût runtime quasi nul et **stabilité temporelle parfaite** (même tuile -> même version HD).
+    Traiter les couches séparément avant composition, en utilisant le défilement exact (pas besoin
+    d'estimer un flux optique). Agrandir la *forme* en espace d'indices de palette puis appliquer la
+    palette après, pour gérer gratuitement les permutations de palettes (cycles de couleurs, flashs).
+  - **Précédent** : c'est le principe des packs de textures HD de Dolphin (textures identifiées par
+    empreinte, remplacées par des versions upscalées à l'IA).
+  - **Limites** : le Mode 7 et les sprites mis à l'échelle cassent l'hypothèse du blit de tuiles ;
+    les tuiles écrites dynamiquement (décompression VRAM, animations) imposent une génération à la
+    volée la première fois ; et « mieux » reste **subjectif** -> toujours une option, jamais un défaut.
+  - **À faire d'abord** (moins cher, non contesté) : les filtres de la Phase 2 (CRT/scanlines) et un
+    upscaler pixel-art classique type **xBRZ** — non neuronal, temps réel, sans latence.
+
 ## Audio
 
 - **Mode muet** — couper le son via une touche (ex. M) et une entrée de menu (« Muet »), état reflété (coché) et mémorisé dans les préférences.
