@@ -1069,6 +1069,54 @@ mod tests {
         assert_eq!(u16::from_le_bytes([lo, hi]), 0x7FFE);
     }
 
+    /// LoROM cart declaring a CX4 (chipset $F3), so the bus routes the
+    /// $6000-$7FFF window in banks $00-$3F/$80-$BF to the CX4 unit.
+    fn cx4_lorom_bus() -> Bus {
+        let base = 0x7FC0;
+        let mut rom = vec![0u8; 0x100000];
+        rom[base..base + 21].copy_from_slice(b"CX4 TEST             ");
+        rom[base + 0x15] = 0x20; // LoROM
+        rom[base + 0x16] = 0xF3; // CX4
+        rom[base + 0x19] = 1; // NTSC
+        rom[base + 0x3C] = 0x00;
+        rom[base + 0x3D] = 0x80;
+        // Fix the checksum so `from_bytes` scores the LoROM header.
+        rom[base + 0x1C] = 0;
+        rom[base + 0x1D] = 0;
+        rom[base + 0x1E] = 0;
+        rom[base + 0x1F] = 0;
+        let cs = crate::cartridge::compute_checksum(&rom).wrapping_add(510);
+        let cp = 0xFFFFu16 - cs;
+        rom[base + 0x1C..base + 0x1E].copy_from_slice(&cp.to_le_bytes());
+        rom[base + 0x1E..base + 0x20].copy_from_slice(&cs.to_le_bytes());
+        let cart = Cartridge::from_bytes(rom).unwrap();
+        assert!(cart.cx4.is_some(), "CX4 must be detected");
+        Bus::new(cart)
+    }
+
+    #[test]
+    fn cx4_command_through_bus() {
+        let mut bus = cx4_lorom_bus();
+        // Cmd $54 (24-bit signed square): a = READ_3WORD($7F80); write a*a to
+        // $7F83 and a*a>>24 to $7F86. Feed a = 3 -> square = 9.
+        bus.write_no_tick(0x00_7F80, 0x03);
+        bus.write_no_tick(0x00_7F81, 0x00);
+        bus.write_no_tick(0x00_7F82, 0x00);
+        bus.write_no_tick(0x00_7F4F, 0x54); // command trigger
+        assert_eq!(bus.read_no_tick(0x00_7F83), 0x09);
+        assert_eq!(bus.read_no_tick(0x00_7F84), 0x00);
+        assert_eq!(bus.read_no_tick(0x00_7F85), 0x00);
+        // Status $7F5E always reads idle ($00) in the HLE.
+        assert_eq!(bus.read_no_tick(0x00_7F5E), 0x00);
+        // The 3 KB data-RAM window at $6000 round-trips as plain RAM.
+        bus.write_no_tick(0x00_6000, 0xA5);
+        assert_eq!(bus.read_no_tick(0x00_6000), 0xA5);
+        // $80-$BF mirror addresses the same CX4 window.
+        assert_eq!(bus.read_no_tick(0x80_6000), 0xA5);
+        // ROM at $8000-$FFFF still maps as normal LoROM (open-bus-free read).
+        let _ = bus.read_no_tick(0x00_8000);
+    }
+
     #[test]
     fn wram_mirrors() {
         let mut bus = test_bus();

@@ -16,6 +16,7 @@ pub mod sram;
 
 pub use mapping::Mapping;
 
+use crate::coprocessor::cx4::{self, Cx4};
 use crate::coprocessor::dsp1::{self, Dsp1, Dsp1Mapping};
 use crate::coprocessor::sa1::{self, Sa1};
 use crate::coprocessor::superfx::{SuperFx, VCR_GSU2};
@@ -62,6 +63,15 @@ pub struct Cartridge {
     pub dsp1: Option<Dsp1>,
     #[serde(default)]
     pub dsp1_mapping: Option<Dsp1Mapping>,
+    /// CX4 (Capcom Custom Chip 4 / Hitachi HG51B169, HLE) coprocessor, present
+    /// only when the header declares chipset $16 = $F3 on a LoROM cart (Mega Man
+    /// X2/X3). `None` for all other carts, which take their original mapping
+    /// path. The CX4 exposes an 8 KB window at $6000-$7FFF in banks
+    /// $00-$3F/$80-$BF; ROM $8000-$FFFF maps as normal LoROM (cx4.md §1-2). It
+    /// borrows the ROM image (commands fetch model/line/sprite data through the
+    /// LoROM window), so it is not owned by the CX4 unit.
+    #[serde(default)]
+    pub cx4: Option<Cx4>,
 }
 
 impl Cartridge {
@@ -138,6 +148,21 @@ impl Cartridge {
         };
         let dsp1 = dsp1_mapping.map(|_| Dsp1::new());
 
+        // CX4: chipset $16 = $F3 exactly (the $Fx "custom" family also carries
+        // $F5/$F6/$F9 for other, unrelated chips), LoROM map-mode (cx4.md §1).
+        // Guard on the other coprocessors being absent to keep the detection
+        // ordering explicit; the $F3 code cannot collide with SuperFX ($1x),
+        // SA-1 ($3x / map-mode $x3) or DSP ($03/$04/$05) anyway.
+        let cx4 = if superfx.is_none()
+            && sa1.is_none()
+            && dsp1.is_none()
+            && cx4::is_cx4(map_mode, chipset)
+        {
+            Some(Cx4::new())
+        } else {
+            None
+        };
+
         Ok(Cartridge {
             rom,
             sram: Sram::new(sram_size),
@@ -151,6 +176,7 @@ impl Cartridge {
             sa1,
             dsp1,
             dsp1_mapping,
+            cx4,
         })
     }
 
@@ -262,6 +288,33 @@ impl Cartridge {
         }
     }
 
+    /// CX4 cartridge-space read: the 8 KB CX4 window at $6000-$7FFF (banks
+    /// $00-$3F/$80-$BF), else normal LoROM ROM/SRAM. `$7F5E` reads $00 (status
+    /// idle); every other window byte reads back raw C4RAM (cx4.md §2). Only
+    /// called when `cx4` is `Some`.
+    fn cx4_read(&self, addr: u32) -> Option<u8> {
+        let bank = ((addr >> 16) & 0xFF) as u8;
+        let off = (addr & 0xFFFF) as u16;
+        if cx4::maps(bank, off) {
+            return Some(self.cx4.as_ref().unwrap().read(off));
+        }
+        mapping::read(self.mapping, &self.rom, &self.sram, addr)
+    }
+
+    /// CX4 cartridge-space write: a write into the $6000-$7FFF window may trigger
+    /// a command ($7F4F) or a ROM->RAM DMA load ($7F47); the CX4 borrows the ROM
+    /// image for those fetches (cx4.md §4). Writes outside the window fall to the
+    /// normal LoROM SRAM path. Only called when `cx4` is `Some`.
+    fn cx4_write(&mut self, addr: u32, value: u8) {
+        let bank = ((addr >> 16) & 0xFF) as u8;
+        let off = (addr & 0xFFFF) as u16;
+        if cx4::maps(bank, off) {
+            self.cx4.as_mut().unwrap().write(&self.rom, off, value);
+        } else {
+            mapping::write(self.mapping, &mut self.sram, addr, value);
+        }
+    }
+
     /// Bus read into cartridge space. `None` = unmapped (open bus).
     pub fn read(&self, addr: u32) -> Option<u8> {
         if self.sa1.is_some() {
@@ -269,6 +322,9 @@ impl Cartridge {
         }
         if self.superfx.is_some() {
             return self.superfx_read(addr);
+        }
+        if self.cx4.is_some() {
+            return self.cx4_read(addr);
         }
         mapping::read(self.mapping, &self.rom, &self.sram, addr)
     }
@@ -280,6 +336,10 @@ impl Cartridge {
         }
         if self.superfx.is_some() {
             self.superfx_write(addr, value);
+            return;
+        }
+        if self.cx4.is_some() {
+            self.cx4_write(addr, value);
             return;
         }
         mapping::write(self.mapping, &mut self.sram, addr, value);
@@ -566,6 +626,55 @@ mod tests {
         let cart = Cartridge::from_bytes(rom).unwrap();
         assert!(cart.superfx.is_some());
         assert!(cart.dsp1.is_none());
+    }
+
+    #[test]
+    fn cx4_lorom_header_detected() {
+        // LoROM map-mode $20, chipset $F3 = CX4 (Mega Man X2/X3).
+        let mut rom = synth_rom(0x100000, super::LOROM_HEADER, 0x20, 1, 0);
+        rom[super::LOROM_HEADER + 0x16] = 0xF3;
+        let rom = rom_with_checksum(&rom, super::LOROM_HEADER);
+        let cart = Cartridge::from_bytes(rom).unwrap();
+        assert_eq!(cart.mapping, Mapping::LoRom);
+        assert!(cart.cx4.is_some(), "CX4 detected");
+        assert!(cart.superfx.is_none());
+        assert!(cart.sa1.is_none());
+        assert!(cart.dsp1.is_none());
+    }
+
+    #[test]
+    fn cx4_sibling_custom_chips_not_misdetected() {
+        // $F5/$F6/$F9 are OTHER custom chips, not CX4 (cx4.md §1).
+        for chip in [0xF5u8, 0xF6, 0xF9] {
+            let mut rom = synth_rom(0x100000, super::LOROM_HEADER, 0x20, 1, 0);
+            rom[super::LOROM_HEADER + 0x16] = chip;
+            let rom = rom_with_checksum(&rom, super::LOROM_HEADER);
+            let cart = Cartridge::from_bytes(rom).unwrap();
+            assert!(cart.cx4.is_none(), "chipset ${chip:02X} must not be CX4");
+        }
+    }
+
+    #[test]
+    fn cx4_command_through_cartridge() {
+        // Cmd $25 (24x24 multiply, low 24 bits): $7F80 = $7F80 * $7F83.
+        let mut rom = synth_rom(0x100000, super::LOROM_HEADER, 0x20, 1, 0);
+        rom[super::LOROM_HEADER + 0x16] = 0xF3;
+        let rom = rom_with_checksum(&rom, super::LOROM_HEADER);
+        let mut cart = Cartridge::from_bytes(rom).unwrap();
+        // $00:7F80 = 2 (24-bit LE), $00:7F83 = 3.
+        cart.write(0x00_7F80, 0x02);
+        cart.write(0x00_7F81, 0x00);
+        cart.write(0x00_7F82, 0x00);
+        cart.write(0x00_7F83, 0x03);
+        cart.write(0x00_7F84, 0x00);
+        cart.write(0x00_7F85, 0x00);
+        // Command trigger.
+        cart.write(0x00_7F4F, 0x25);
+        assert_eq!(cart.read(0x00_7F80), Some(0x06));
+        // Status $7F5E always idle ($00) in the HLE.
+        assert_eq!(cart.read(0x00_7F5E), Some(0x00));
+        // The $80-$BF mirror addresses the same window.
+        assert_eq!(cart.read(0x80_7F80), Some(0x06));
     }
 
     #[test]

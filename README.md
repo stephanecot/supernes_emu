@@ -19,29 +19,33 @@ Playable rendering and audio for LoROM/HiROM games (NTSC and PAL), plus SuperFX 
 | S-DSP audio | BRR, Gaussian interpolation, ADSR/GAIN, noise, pitch modulation, echo |
 | PPU | BG modes 0–7 (2/4/8bpp), sprites, windows, color math, mosaic, HDMA, offset-per-tile, hires (5/6), interlace |
 | Mode 7 | Rotation/scaling implemented + unit-tested; not yet gated on a real in-game screen |
-| SuperFX (GSU) | Working — Yoshi's Island boots and renders GSU-decompressed graphics |
+| Cartridge coprocessors | SuperFX (GSU), SA-1, DSP-1 (HLE), CX4 (HLE) — all boot & render their real games |
 | DMA | GDMA + HDMA (indirect, per-line) |
 | Timing / IRQ | NMI, H/V IRQ ($4207–$420A), FastROM ($420D), open-bus (MDR) |
 | Cartridge | LoROM / HiROM / SuperFX detection, region detection, battery SRAM |
 | Frontend | winit + pixels window, cpal audio, native macOS menu bar, ROM picker, save states, FPS overlay, headless PNG/WAV/trace dumps |
 
-259 core unit tests pass. Verified end-to-end on four commercial games: backgrounds, sprites,
+332 core unit tests pass. Verified end-to-end on eight commercial games: backgrounds, sprites,
 color-math menus, real in-game music (WAV-analysed), input-driven gameplay (Mario runs, jumps and
 scrolls a level), H/V-IRQ raster splits, battery saves, byte-identical save-state round-trips, and
-— via the from-scratch SuperFX/GSU coprocessor — Yoshi's Island booting to its language-select
-screen.
+all four cartridge coprocessors booting and rendering their real games — Yoshi's Island (SuperFX),
+Super Mario RPG (SA-1), Super Mario Kart (DSP-1) and Mega Man X3 (CX4).
 
 <p>
-  <img src="docs/screenshots/smb1_gameplay.png" width="47%" alt="Super Mario Bros gameplay">
-  <img src="docs/screenshots/yoshi_superfx.png" width="47%" alt="Yoshi's Island (SuperFX) language select">
+  <img src="docs/screenshots/smrpg_sa1.png" width="47%" alt="Super Mario RPG (SA-1)">
+  <img src="docs/screenshots/mmx3_cx4.png" width="47%" alt="Mega Man X3 (CX4)">
+</p>
+<p>
+  <img src="docs/screenshots/yoshi_superfx.png" width="47%" alt="Yoshi's Island (SuperFX)">
+  <img src="docs/screenshots/smk_dsp1.png" width="47%" alt="Super Mario Kart (DSP-1)">
 </p>
 
 Known gaps: the Super Mario World *attract-mode intro* reaches gameplay but its cutscene state
 machine doesn't advance to the overworld (diagnosed, root cause not yet isolated); Mode 7,
 offset-per-tile, hires and interlace are implemented and unit-tested but not yet gated on a real
-in-game screen (none of the test ROMs exercise them where checked); deeper Yoshi's Island play
-past language-select is untested. Other cartridge coprocessors (SA-1, DSP-1, …) are not
-implemented. See `docs/PUNCHLIST.md` for the full list and `docs/IDEAS.md` for planned features.
+in-game screen; the DSP-1 and CX4 math is validated up to each game's intro/title but deeper
+in-game 3D paths (Mario Kart's Mode 7 track, MMX3's wireframe bosses) aren't visually gated yet.
+See `docs/PUNCHLIST.md` for the full list and `docs/IDEAS.md` for planned features.
 
 ## Build & run
 
