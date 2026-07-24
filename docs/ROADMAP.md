@@ -177,7 +177,10 @@ Aujourd'hui, lancer l'émulateur ouvre une boîte de dialogue de fichiers. L'obj
 - Grille de jeux avec **miniatures**, recherche, tri, **favoris** (épinglés en tête), section
   « repris récemment » (branchée sur la reprise instantanée, Phase 1).
 - **Fiche de jeu** au clic : miniature, titre, région, mapping, taille, sauvegarde, **coprocesseur
-  détecté**, temps de jeu cumulé, save states existants (avec vignette de chacun).
+  détecté**, temps de jeu cumulé, save states existants (avec vignette de chacun), et la **galerie
+  des captures d'écran et des vidéos** de ce jeu (alimentée par la Phase 1 item 5 et la Phase 11).
+  L'utilisateur peut promouvoir une de ses captures comme **vignette du jeu**, à la place de celle
+  générée automatiquement.
 - **Tout est auto-alimenté** : l'en-tête de cartouche est déjà lu par le cœur (titre/mapping/région/
   SRAM/puce), et les **miniatures sont générées par l'émulateur lui-même** — lancer la ROM en
   headless quelques centaines de frames et capturer une image (exactement ce que font déjà les
@@ -250,6 +253,36 @@ passages (un boss trop dur, un niveau bloquant, une phase de grind — ou simple
 
 ---
 
+## Phase 11 — Enregistrement vidéo **[M/L]** *(idée retenue)*
+
+Enregistrer des séquences de jeu, rangées avec le jeu concerné comme les captures d'écran.
+
+**Deux approches, à combiner plutôt qu'à opposer :**
+
+1. **Enregistrement direct** (simple, coûteux) — capturer les images et l'audio pendant qu'on joue,
+   puis encoder. L'encodage vidéo n'a pas de solution pure-Rust confortable : le plus pragmatique est
+   d'appeler **ffmpeg s'il est présent** (détecter sa présence, sinon désactiver proprement l'option
+   avec un message clair). Risque : à 50-60 images/s, capturer + encoder en direct peut faire chuter
+   la cadence — à mesurer.
+
+2. **Enregistrement par rejeu déterministe** (élégant, quasi gratuit) — enregistrer seulement
+   *(état initial + flux d'entrées)*, ce qui ne coûte **rien** pendant la partie et tient en quelques
+   Ko. Puis « Exporter en vidéo » **rejoue la séquence en headless** et encode hors ligne, à pleine
+   qualité et sans impact sur le confort de jeu. C'est faisable **parce que** l'émulation est
+   déterministe (déjà prouvé byte-identique) et que le mode headless produit déjà images et audio.
+   *Recommandation : viser cette approche, l'enregistrement direct n'étant qu'un repli.*
+
+**Autres points :**
+- **Audio** : muxer la piste audio (on sait déjà produire un WAV via `--dump-audio`) avec les images.
+- **GIF court** : pour le partage rapide, un export GIF de quelques secondes est faisable **sans
+  dépendance externe** (encodeur GIF pur Rust). Bon complément à l'export vidéo lourd.
+- **Rangement** : même schéma que les captures — `Videos/<jeu>/<horodatage>.mp4`, visible dans la
+  fiche de jeu (Phase 8).
+- **Déclenchement** : une touche pour démarrer/arrêter l'enregistrement + entrée de menu, avec un
+  témoin visible à l'écran pendant l'enregistrement.
+
+---
+
 ## Hors périmètre immédiat (à replanifier plus tard)
 
 - **Périphériques exotiques** : multitap (4 joueurs), SNES Mouse, Super Scope. **M/L chacun**
@@ -274,7 +307,8 @@ Phase 0 (socle prefs JSON)                                    ← débloque 7 au
         │      └─ Phase 6 (mode enfant)
         ├─ Phase 2 (zoom + filtres + ratio)
         ├─ Phase 4 (répertoires)
-        │      └─ Phase 5 (rewind)
+        │      ├─ Phase 5 (rewind)
+        │      └─ Phase 11 (enregistrement video)          ← via rejeu deterministe
         └─ Phase 10 (canal agent : l'IA joue)                  ← socle technique de la triche
                └─ Phase 9 (triches assistées par l'IA)         (UI de la Phase 8 pour l'affichage)
 ```
