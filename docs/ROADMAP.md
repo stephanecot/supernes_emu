@@ -283,6 +283,42 @@ Enregistrer des séquences de jeu, rangées avec le jeu concerné comme les capt
 
 ---
 
+## Phase 12 — Amélioration des captures par IA **[M]** *(option, idée retenue)*
+
+**Pourquoi c'est ici que l'IA a du sens.** Les trois objections à un upscaling neuronal en temps réel
+(voir `IDEAS.md`) **tombent toutes** sur une capture : pas de scintillement temporel puisqu'il n'y a
+qu'une image, pas de latence de jeu puisque c'est hors ligne, et pas de budget de 16 ms — on peut
+prendre une seconde ou deux et un **gros modèle de qualité**. La capture est donc l'endroit idéal pour
+viser le meilleur rendu possible.
+
+**Principe directeur : ne jamais perdre l'original.** La capture brute (256×224, fidèle) est toujours
+écrite ; la version améliorée est produite **à côté** (`<horodatage>.png` + `<horodatage>@4x.png`).
+L'utilisateur garde le document authentique et l'image « jolie ».
+
+**Traitement en arrière-plan** — l'amélioration s'exécute sur un thread séparé pour que la partie ne
+bégaie pas ; la capture brute est disponible immédiatement, l'améliorée arrive une seconde après.
+
+**Choix du moteur (configurable, dégradation propre)** :
+1. **xBRZ (recommandé pour commencer)** — algorithme d'agrandissement pensé pour le pixel art :
+   **aucune dépendance externe**, quasi instantané, et visuellement excellent sur ce type d'image.
+   Souvent supérieur à un réseau généraliste sur des sprites 16 bits.
+2. **Modèle neuronal local** — un modèle de super-résolution (type Real-ESRGAN) exécuté via **Core ML**
+   sur macOS (Neural Engine/GPU), embarqué dans l'app. Qualité maximale, entièrement hors ligne.
+3. **Outil externe si présent** — détecter un binaire configuré (ex. `realesrgan-ncnn-vulkan`) et
+   l'utiliser ; s'il est absent, **désactiver l'option proprement** avec un message clair plutôt que
+   d'échouer.
+   *(Un LLM n'est pas l'outil adapté ici : c'est un travail de modèle de vision, pas de langage.)*
+
+**Réutilisation pour la vidéo** : l'export vidéo (Phase 11) étant lui aussi **hors ligne** (rejeu
+déterministe puis encodage), il peut passer par **le même pipeline d'amélioration** image par image.
+Une seule brique sert aux deux — et là encore, la stabilité temporelle est assurée parce que le rejeu
+est déterministe.
+
+**Réserve assumée** : « mieux » reste subjectif (le dithering SNES était conçu pour être fondu par une
+télé cathodique). D'où le caractère **facultatif**, désactivé par défaut, avec l'original toujours conservé.
+
+---
+
 ## Hors périmètre immédiat (à replanifier plus tard)
 
 - **Périphériques exotiques** : multitap (4 joueurs), SNES Mouse, Super Scope. **M/L chacun**
@@ -309,6 +345,7 @@ Phase 0 (socle prefs JSON)                                    ← débloque 7 au
         ├─ Phase 4 (répertoires)
         │      ├─ Phase 5 (rewind)
         │      └─ Phase 11 (enregistrement video)          ← via rejeu deterministe
+        │             └─ Phase 12 (amelioration IA des captures/videos, option)
         └─ Phase 10 (canal agent : l'IA joue)                  ← socle technique de la triche
                └─ Phase 9 (triches assistées par l'IA)         (UI de la Phase 8 pour l'affichage)
 ```
