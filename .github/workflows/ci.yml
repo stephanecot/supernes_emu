@@ -16,10 +16,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, windows-latest]
+        os: [macos-14, windows-latest, ubuntu-latest]
 
     steps:
       - uses: actions/checkout@v7
+
+      # winit/pixels need X11+Wayland, cpal needs ALSA, and rfd/muda pull in GTK3.
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libasound2-dev libgtk-3-dev libxkbcommon-dev \
+            libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

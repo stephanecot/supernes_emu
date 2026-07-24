@@ -77,9 +77,40 @@ jobs:
           name: windows
           path: Prisme-windows-x64.zip
 
+  linux:
+    name: Linux (x64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # winit/pixels need X11+Wayland, cpal needs ALSA, rfd/muda pull in GTK3.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libasound2-dev libgtk-3-dev libxkbcommon-dev \
+            libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev
+
+      - name: Build
+        run: cargo build --release -p prisme
+
+      - name: Package
+        run: |
+          mkdir -p package
+          cp target/release/prisme package/
+          cp README.md package/
+          tar -czf Prisme-linux-x64.tar.gz -C package .
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux
+          path: Prisme-linux-x64.tar.gz
+
   release:
     name: Publish release
-    needs: [macos, windows]
+    needs: [macos, windows, linux]
     # Only publish for real tags; a manual run just builds the artifacts.
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
@@ -91,7 +122,7 @@ jobs:
           merge-multiple: true
 
       - name: Checksums
-        run: shasum -a 256 *.zip | tee SHA256SUMS.txt
+        run: shasum -a 256 *.zip *.tar.gz | tee SHA256SUMS.txt
 
       - name: Attach the binaries to the release
         env:
@@ -109,6 +140,7 @@ jobs:
           |---|---|
           | `Prisme-macos-universal.zip` | macOS 10.13+ (Apple Silicon and Intel) |
           | `Prisme-windows-x64.zip` | Windows x64 |
+          | `Prisme-linux-x64.tar.gz` | Linux x64 (glibc) |
 
           **macOS:** the app is **not signed or notarised** (that needs a paid Apple
           Developer account), so Gatekeeper will refuse the first launch. Either
@@ -118,9 +150,14 @@ jobs:
           **Windows:** unpack and run `prisme.exe`. The native menu bar is macOS-only;
           on Windows use the keyboard shortcuts documented in the README.
 
+          **Linux:** unpack and run `./prisme`. Needs ALSA, GTK3 and X11/Wayland
+          runtime libraries (present on most desktop installs); on Debian/Ubuntu:
+          `sudo apt install libasound2 libgtk-3-0 libxkbcommon0`. The menu bar is
+          macOS-only here too, so use the keyboard shortcuts.
+
           **ROMs are not included** — supply your own dumps of games you own.
           EOF
-          ASSETS=(Prisme-macos-universal.zip Prisme-windows-x64.zip SHA256SUMS.txt)
+          ASSETS=(Prisme-macos-universal.zip Prisme-windows-x64.zip Prisme-linux-x64.tar.gz SHA256SUMS.txt)
           if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
             # Release already exists (drafted in the UI): just attach/replace assets.
             gh release upload "$TAG" "${ASSETS[@]}" \
