@@ -16,6 +16,7 @@ pub mod sram;
 
 pub use mapping::Mapping;
 
+use crate::coprocessor::dsp1::{self, Dsp1, Dsp1Mapping};
 use crate::coprocessor::sa1::{self, Sa1};
 use crate::coprocessor::superfx::{SuperFx, VCR_GSU2};
 use crate::scheduler::Region;
@@ -52,6 +53,15 @@ pub struct Cartridge {
     /// battery-backed BW-RAM; the plain `sram` field is unused for SA-1 carts.
     #[serde(default)]
     pub sa1: Option<Sa1>,
+    /// DSP-1 math coprocessor (NEC uPD77C25, HLE), present only when the header
+    /// declares a DSP chipset ($16 = $03/$04/$05). `None` for all other carts,
+    /// which take their original mapping path. The DR/SR ports are decoded by
+    /// the bus (a DR read streams result bytes and so needs `&mut`);
+    /// `dsp1_mapping` records the LoROM/HiROM port placement (dsp1.md §2, §5).
+    #[serde(default)]
+    pub dsp1: Option<Dsp1>,
+    #[serde(default)]
+    pub dsp1_mapping: Option<Dsp1Mapping>,
 }
 
 impl Cartridge {
@@ -116,6 +126,18 @@ impl Cartridge {
             None
         };
 
+        // DSP-1 (NEC uPD77C25 HLE): chipset $16 = $03/$04/$05 (co-processor
+        // family high nibble $0 = DSP), DR/SR placement chosen from the map mode
+        // (dsp1.md §5). The high nibble is mutually exclusive with SuperFX ($1)
+        // and SA-1 ($3), but guard on those being absent to keep the detection
+        // ordering explicit and collision-free.
+        let dsp1_mapping = if superfx.is_none() && sa1.is_none() {
+            dsp1::detect(chipset, map_mode)
+        } else {
+            None
+        };
+        let dsp1 = dsp1_mapping.map(|_| Dsp1::new());
+
         Ok(Cartridge {
             rom,
             sram: Sram::new(sram_size),
@@ -127,6 +149,8 @@ impl Cartridge {
             checksum_valid,
             superfx,
             sa1,
+            dsp1,
+            dsp1_mapping,
         })
     }
 
@@ -495,6 +519,53 @@ mod tests {
         let rom = rom_with_checksum(&rom, super::LOROM_HEADER);
         let cart = Cartridge::from_bytes(rom).unwrap();
         assert!(cart.sa1.is_some());
+    }
+
+    #[test]
+    fn dsp1_lorom_header_detected() {
+        // LoROM map-mode $20, chipset $03 (ROM + DSP co-processor, high nibble
+        // $0 = DSP family). Selects the LoROM DR/SR placement (banks $30-$3F).
+        let mut rom = synth_rom(0x40000, super::LOROM_HEADER, 0x20, 1, 0);
+        rom[super::LOROM_HEADER + 0x16] = 0x03;
+        let rom = rom_with_checksum(&rom, super::LOROM_HEADER);
+        let cart = Cartridge::from_bytes(rom).unwrap();
+        assert_eq!(cart.dsp1_mapping, Some(Dsp1Mapping::LoRom));
+        assert!(cart.dsp1.is_some());
+        assert!(cart.superfx.is_none());
+        assert!(cart.sa1.is_none());
+    }
+
+    #[test]
+    fn dsp1_hirom_header_detected() {
+        // HiROM map-mode $21, chipset $05 (ROM + DSP + RAM + battery).
+        let mut rom = synth_rom(0x40000, super::HIROM_HEADER, 0x21, 1, 0);
+        rom[super::HIROM_HEADER + 0x16] = 0x05;
+        let rom = rom_with_checksum(&rom, super::HIROM_HEADER);
+        let cart = Cartridge::from_bytes(rom).unwrap();
+        assert_eq!(cart.dsp1_mapping, Some(Dsp1Mapping::HiRom));
+        assert!(cart.dsp1.is_some());
+    }
+
+    #[test]
+    fn plain_carts_have_no_dsp1() {
+        let lo = Cartridge::from_bytes(synth_rom(0x20000, super::LOROM_HEADER, 0x20, 2, 3))
+            .unwrap();
+        assert!(lo.dsp1.is_none());
+        assert!(lo.dsp1_mapping.is_none());
+        let hi = Cartridge::from_bytes(synth_rom(0x20000, super::HIROM_HEADER, 0x31, 1, 0))
+            .unwrap();
+        assert!(hi.dsp1.is_none());
+    }
+
+    #[test]
+    fn superfx_cart_not_misdetected_as_dsp1() {
+        // GSU chipset $15 (high nibble $1) must not be taken for DSP.
+        let mut rom = synth_rom(0x80000, super::LOROM_HEADER, 0x20, 2, 0);
+        rom[super::LOROM_HEADER + 0x16] = 0x15;
+        let rom = rom_with_checksum(&rom, super::LOROM_HEADER);
+        let cart = Cartridge::from_bytes(rom).unwrap();
+        assert!(cart.superfx.is_some());
+        assert!(cart.dsp1.is_none());
     }
 
     #[test]

@@ -3,6 +3,7 @@
 
 use crate::apu::Apu;
 use crate::cartridge::Cartridge;
+use crate::coprocessor::dsp1::Dsp1Port;
 use crate::cpu::CpuBus;
 use crate::dma::Dma;
 use crate::joypad::{Joypad, JoypadState};
@@ -319,7 +320,9 @@ impl Bus {
                 // NMI/IRQ vector fetch at $00:FFEA/$FFEE is redirected to the
                 // SNV/SIV override when SCNT.N/S selects it (sa1.md §3.1).
                 0x6000..=0xFFFF => {
-                    if let Some(v) = self.sa1_vector_override(bank, off) {
+                    if let Some(v) = self.dsp1_read(bank, off) {
+                        v
+                    } else if let Some(v) = self.sa1_vector_override(bank, off) {
                         v
                     } else {
                         self.cart.read(addr).unwrap_or(self.mdr)
@@ -474,7 +477,11 @@ impl Bus {
                 0x420D => self.fastrom = value & 1 != 0,
                 // $420E-$421F: read-only/unused, writes have no effect.
                 0x4300..=0x437F => self.dma.write((off & 0x7F) as u8, value),
-                0x6000..=0xFFFF => self.cart.write(addr, value),
+                0x6000..=0xFFFF => {
+                    if !self.dsp1_write(bank, off, value) {
+                        self.cart.write(addr, value);
+                    }
+                }
                 _ => {}
             },
             0x7E | 0x7F => {
@@ -667,6 +674,36 @@ impl Bus {
             0xFFEF => s.scpu_irq_vector().map(|v| (v >> 8) as u8),
             _ => None,
         }
+    }
+
+    /// DSP-1 DR/SR read for a system-bank cartridge address ($6000-$FFFF in
+    /// banks $00-$3F/$80-$BF), or `None` when the cart has no DSP-1 or the
+    /// address is outside its DR/SR windows. A DR read consumes/streams a result
+    /// byte, so this borrows `&mut` (dsp1.md §2). SR read is always $80 (RQM
+    /// ready): the HLE completes each command instantly.
+    fn dsp1_read(&mut self, bank: u8, off: u16) -> Option<u8> {
+        let port = self.cart.dsp1_mapping?.decode(bank, off)?;
+        let dsp = self.cart.dsp1.as_mut()?;
+        Some(match port {
+            Dsp1Port::Dr => dsp.read_dr(),
+            Dsp1Port::Sr => dsp.read_sr(),
+        })
+    }
+
+    /// DSP-1 DR write for a system-bank cartridge address. Returns `true` when
+    /// the address selected a DSP-1 port so the caller skips normal cartridge
+    /// space. SR is read-only; writes into the SR window are swallowed.
+    fn dsp1_write(&mut self, bank: u8, off: u16, value: u8) -> bool {
+        let Some(mapping) = self.cart.dsp1_mapping else {
+            return false;
+        };
+        let Some(port) = mapping.decode(bank, off) else {
+            return false;
+        };
+        if port == Dsp1Port::Dr {
+            self.cart.dsp1.as_mut().unwrap().write_dr(value);
+        }
+        true
     }
 
     /// Advance the master clock during a DMA transfer. Uses the same
@@ -988,6 +1025,48 @@ mod tests {
         rom[0x7FC0 + 0x3D] = 0x80;
         rom[0] = 0x42; // visible at $00:8000
         Bus::new(Cartridge::from_bytes(rom).unwrap())
+    }
+
+    /// LoROM cart declaring a DSP-1 (chipset $03), so the bus routes banks
+    /// $30-$3F:$8000-$FFFF to the DSP-1 DR ($8000-$BFFF) / SR ($C000-$FFFF).
+    fn dsp1_lorom_bus() -> Bus {
+        let base = 0x7FC0;
+        let mut rom = vec![0u8; 0x40000];
+        rom[base..base + 21].copy_from_slice(b"DSP1 TEST            ");
+        rom[base + 0x15] = 0x20; // LoROM
+        rom[base + 0x16] = 0x03; // ROM + DSP co-processor
+        rom[base + 0x19] = 1; // NTSC
+        rom[base + 0x3C] = 0x00;
+        rom[base + 0x3D] = 0x80;
+        let cart = Cartridge::from_bytes(rom).unwrap();
+        assert!(cart.dsp1.is_some(), "DSP-1 must be detected");
+        Bus::new(cart)
+    }
+
+    #[test]
+    fn dsp1_dr_multiply_through_bus() {
+        let mut bus = dsp1_lorom_bus();
+        // SR ($30:C000) always reports RQM ready ($80).
+        assert_eq!(bus.read_no_tick(0x30_C000), 0x80);
+        // Op00 Multiply: A=$4000 (0.5), B=$4000 (0.5) -> R=$2000 (0.25).
+        // Command byte then parameter words little-endian, all via DR ($30:8000).
+        bus.write_no_tick(0x30_8000, 0x00); // command
+        bus.write_no_tick(0x30_8000, 0x00); // A low
+        bus.write_no_tick(0x30_8000, 0x40); // A high
+        bus.write_no_tick(0x30_8000, 0x00); // B low
+        bus.write_no_tick(0x30_8000, 0x40); // B high
+        let lo = bus.read_no_tick(0x30_8000);
+        let hi = bus.read_no_tick(0x30_8000);
+        assert_eq!(u16::from_le_bytes([lo, hi]), 0x2000);
+        // Mirror bank $B0 selects the same DR port.
+        bus.write_no_tick(0xB0_8000, 0x00);
+        bus.write_no_tick(0xB0_8000, 0xFF);
+        bus.write_no_tick(0xB0_8000, 0x7F); // A=$7FFF
+        bus.write_no_tick(0xB0_8000, 0xFF);
+        bus.write_no_tick(0xB0_8000, 0x7F); // B=$7FFF
+        let lo = bus.read_no_tick(0xB0_8000);
+        let hi = bus.read_no_tick(0xB0_8000);
+        assert_eq!(u16::from_le_bytes([lo, hi]), 0x7FFE);
     }
 
     #[test]
