@@ -309,10 +309,11 @@ bégaie pas ; la capture brute est disponible immédiatement, l'améliorée arri
    d'échouer.
    *(Un LLM n'est pas l'outil adapté ici : c'est un travail de modèle de vision, pas de langage.)*
 
-**Réutilisation pour la vidéo** : l'export vidéo (Phase 11) étant lui aussi **hors ligne** (rejeu
-déterministe puis encodage), il peut passer par **le même pipeline d'amélioration** image par image.
-Une seule brique sert aux deux — et là encore, la stabilité temporelle est assurée parce que le rejeu
-est déterministe.
+**Périmètre : captures d'écran uniquement.** L'amélioration par IA **ne s'applique pas aux vidéos**
+pour le moment (décision prise). Techniquement ce serait possible — l'export vidéo (Phase 11) est
+lui aussi hors ligne et pourrait réutiliser le même pipeline — mais c'est hors périmètre : le coût
+(des milliers d'images par séquence au lieu d'une) et le rendu en mouvement demandent une évaluation
+séparée. À reconsidérer seulement une fois les captures éprouvées.
 
 **Réserve assumée** : « mieux » reste subjectif (le dithering SNES était conçu pour être fondu par une
 télé cathodique). D'où le caractère **facultatif**, désactivé par défaut, avec l'original toujours conservé.
@@ -345,7 +346,7 @@ Phase 0 (socle prefs JSON)                                    ← débloque 7 au
         ├─ Phase 4 (répertoires)
         │      ├─ Phase 5 (rewind)
         │      └─ Phase 11 (enregistrement video)          ← via rejeu deterministe
-        │             └─ Phase 12 (amelioration IA des captures/videos, option)
+        │             └─ Phase 12 (amelioration IA des CAPTURES seulement, option)
         └─ Phase 10 (canal agent : l'IA joue)                  ← socle technique de la triche
                └─ Phase 9 (triches assistées par l'IA)         (UI de la Phase 8 pour l'affichage)
 ```
