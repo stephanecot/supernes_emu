@@ -4,6 +4,41 @@
 use super::Sa1State;
 
 impl Sa1State {
+    /// Side-effect-free program-byte fetch for the `--trace-sa1` disassembler.
+    /// Covers the SA-1's code regions (I-RAM, BW-RAM, ROM via the MMC, and the
+    /// intercepted own-vectors); I/O space returns 0 (never contains code).
+    pub(crate) fn fetch_no_tick(&self, rom: &[u8], addr: u32) -> u8 {
+        let addr = addr & 0xFF_FFFF;
+        match addr {
+            0x00_FFFA | 0x00_FFEA => return self.cnv as u8,
+            0x00_FFFB | 0x00_FFEB => return (self.cnv >> 8) as u8,
+            0x00_FFFE | 0x00_FFEE => return self.civ as u8,
+            0x00_FFFF | 0x00_FFEF => return (self.civ >> 8) as u8,
+            0x00_FFFC => return self.crv as u8,
+            0x00_FFFD => return (self.crv >> 8) as u8,
+            _ => {}
+        }
+        if let Some(o) = self.mmc.rom_offset(addr) {
+            if rom.is_empty() {
+                return 0;
+            }
+            return rom.get(o % rom.len()).copied().unwrap_or(0);
+        }
+        let bank = (addr >> 16) & 0xFF;
+        let off = (addr & 0xFFFF) as u16;
+        match bank {
+            0x00..=0x3F | 0x80..=0xBF => match off {
+                0x0000..=0x07FF | 0x3000..=0x37FF => self.iram[off as usize & 0x7FF],
+                _ => 0,
+            },
+            0x40..=0x4F if !self.bwram.is_empty() => {
+                let o = ((bank - 0x40) << 16 | off as u32) as usize;
+                self.bwram[o % self.bwram.len()]
+            }
+            _ => 0,
+        }
+    }
+
     // ---- Register I/O ------------------------------------------------------
 
     /// Read a status register ($2300-$23FF). Config registers ($2200-$22FF) are
@@ -229,12 +264,22 @@ impl Sa1State {
 
     // ---- BW-RAM / I-RAM writes with protection -----------------------------
 
-    /// BW-RAM write honouring the master write-enable (SBWE for the S-CPU, CBWE
-    /// for the SA-1). The BWPA protected-area fault is not enforced (bsnes does
-    /// not enforce it either; `sa1.md` §9).
-    pub(crate) fn write_bwram(&mut self, from_scpu: bool, offset: usize, value: u8) {
-        let enabled = if from_scpu { self.sbwe } else { self.cbwe };
-        if !enabled || self.bwram.is_empty() {
+    /// BW-RAM write with the exact bsnes protection gate (`bwram.cpp`
+    /// `writeCPU`/`writeLinear`): a write is dropped only when **both** master
+    /// write-enables are off (SBWE and CBWE) **and** the address lies within the
+    /// BWPA protected area (`offset & 0x3FFFF < 0x100 << bwpa`). Otherwise it
+    /// stores — a single enable bit, or an address outside the protected area,
+    /// permits the write regardless of which CPU issued it. (The earlier
+    /// per-CPU `SBWE ? : CBWE` gate wrongly dropped SMRPG's `$40:3D00` handshake
+    /// write, which is outside the protected area with both enables off.)
+    pub(crate) fn write_bwram(&mut self, _from_scpu: bool, offset: usize, value: u8) {
+        if self.bwram.is_empty() {
+            return;
+        }
+        if !self.sbwe
+            && !self.cbwe
+            && (offset & 0x3FFFF) < (0x100usize << self.bwpa)
+        {
             return;
         }
         let idx = offset % self.bwram.len();

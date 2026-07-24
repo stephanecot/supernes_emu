@@ -147,13 +147,20 @@ fn iram_protection_blocks_write() {
 
 #[test]
 fn bwram_protection_blocks_write() {
+    // bsnes gate: a write is dropped only when SBWE=0 AND CBWE=0 AND the
+    // address is inside the BWPA protected area (offset < 0x100 << bwpa).
     let mut s = sa1();
-    // SBWE disabled by default.
-    s.write_bwram_scpu(0x100, 0x77);
-    assert_eq!(s.read_bwram(0x100), 0x00);
+    // Default bwpa=0 -> protected area is offsets 0x00..0xFF. Both enables off.
+    // Inside the protected area -> dropped.
+    s.write_bwram_scpu(0x00, 0x77);
+    assert_eq!(s.read_bwram(0x00), 0x00, "protected low byte, both enables off");
+    // Outside the protected area (offset 0x100) -> stored even with enables off.
+    s.write_bwram_scpu(0x100, 0x55);
+    assert_eq!(s.read_bwram(0x100), 0x55, "outside protected area stores anyway");
+    // Enabling SBWE permits the protected-area write too.
     s.write_io(NO_ROM, 0x2226, 0x80); // SBWE enable
-    s.write_bwram_scpu(0x100, 0x77);
-    assert_eq!(s.read_bwram(0x100), 0x77);
+    s.write_bwram_scpu(0x00, 0x99);
+    assert_eq!(s.read_bwram(0x00), 0x99, "SBWE enable lifts protection");
 }
 
 #[test]

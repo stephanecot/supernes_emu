@@ -34,6 +34,7 @@ struct Args {
     trace: Option<PathBuf>,
     trace_spc: Option<PathBuf>,
     trace_gsu: Option<PathBuf>,
+    trace_sa1: Option<PathBuf>,
     trace_start_frame: u32,
     trace_end_frame: u32,
     log_mmio: bool,
@@ -56,6 +57,7 @@ const USAGE: &str = "usage: snes-frontend [rom.sfc|.smc|.zip] [flags]
   --trace PATH [--trace-start-frame A --trace-end-frame B]
   --trace-spc PATH                      SPC700 trace, same bounds
   --trace-gsu PATH                      GSU/SuperFX trace, same bounds (needs a SuperFX cart)
+  --trace-sa1 PATH                      SA-1 65C816 trace, same bounds (needs an SA-1 cart)
   --log-mmio                            log named MMIO writes to stderr
   --watch BB:AAAA                       log every read/write at a bus address
   --script PATH                         input script: <frame> <button> <held>
@@ -121,6 +123,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             "--trace" => a.trace = Some(value(&mut it, "--trace")?.into()),
             "--trace-spc" => a.trace_spc = Some(value(&mut it, "--trace-spc")?.into()),
             "--trace-gsu" => a.trace_gsu = Some(value(&mut it, "--trace-gsu")?.into()),
+            "--trace-sa1" => a.trace_sa1 = Some(value(&mut it, "--trace-sa1")?.into()),
             "--trace-start-frame" => {
                 a.trace_start_frame = parse_num(&value(&mut it, "--trace-start-frame")?)?
             }
@@ -196,6 +199,9 @@ fn run(args: Args) -> Result<(), String> {
     if args.trace_gsu.is_some() && !args.headless {
         eprintln!("--trace-gsu requires --headless; ignoring");
     }
+    if args.trace_sa1.is_some() && !args.headless {
+        eprintln!("--trace-sa1 requires --headless; ignoring");
+    }
 
     if !args.headless {
         if args.dump_audio.is_some() {
@@ -210,6 +216,7 @@ fn run(args: Args) -> Result<(), String> {
     };
 
     let cart_has_gsu = cart.superfx.is_some();
+    let cart_has_sa1 = cart.sa1.is_some();
     let mut snes = Snes::new(cart);
     if let Some(path) = &args.load_state {
         let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
@@ -252,6 +259,17 @@ fn run(args: Args) -> Result<(), String> {
     };
     let mut gsu_installed = false;
 
+    // SA-1 trace: same frame bounds; the SA-1 CPU runs lazily inside Bus
+    // sa1_catch_up, so the sink is installed on the Snes for the frame range.
+    if args.trace_sa1.is_some() && !cart_has_sa1 {
+        eprintln!("--trace-sa1: no SA-1 coprocessor in this cart; skipping");
+    }
+    let sa1_writer = match &args.trace_sa1 {
+        Some(path) if cart_has_sa1 => Some(Rc::new(RefCell::new(open_trace(path)?))),
+        _ => None,
+    };
+    let mut sa1_installed = false;
+
     let mut audio_pcm: Vec<(i16, i16)> = Vec::new();
 
     for frame in 0..args.frames {
@@ -280,6 +298,18 @@ fn run(args: Args) -> Result<(), String> {
             } else if !in_range && gsu_installed {
                 snes.clear_gsu_trace();
                 gsu_installed = false;
+            }
+        }
+        if let Some(w) = &sa1_writer {
+            if in_range && !sa1_installed {
+                let w = Rc::clone(w);
+                snes.set_sa1_trace(Box::new(move |line: &str| {
+                    let _ = writeln!(w.borrow_mut(), "{line}");
+                }));
+                sa1_installed = true;
+            } else if !in_range && sa1_installed {
+                snes.clear_sa1_trace();
+                sa1_installed = false;
             }
         }
         let tracing = trace_writer.is_some() && in_range;
@@ -325,6 +355,13 @@ fn run(args: Args) -> Result<(), String> {
     }
     if let Some(w) = &spc_writer {
         w.borrow_mut().flush().map_err(|e| format!("flush spc trace: {e}"))?;
+    }
+
+    if sa1_installed {
+        snes.clear_sa1_trace();
+    }
+    if let Some(w) = &sa1_writer {
+        w.borrow_mut().flush().map_err(|e| format!("flush sa1 trace: {e}"))?;
     }
 
     if gsu_installed {

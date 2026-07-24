@@ -54,6 +54,10 @@ pub struct Sa1 {
     /// The SA-1's own 65C816 (independent register file from the S-CPU).
     pub(crate) cpu: Cpu,
     pub(crate) st: Sa1State,
+    /// `--trace-sa1` sink: fires once per SA-1 instruction, immediately before
+    /// it executes. Host-side tap, not part of the serialized state.
+    #[serde(skip)]
+    trace: Option<Box<dyn FnMut(&str)>>,
 }
 
 /// Everything the SA-1 owns except the CPU register file (kept separate so the
@@ -163,6 +167,7 @@ impl Sa1 {
         let size = bwram_size.clamp(0x800, BWRAM_MAX);
         Sa1 {
             cpu: Cpu::new(),
+            trace: None,
             st: Sa1State {
                 iram: Box::new([0; 0x800]),
                 bwram: vec![0; size],
@@ -214,6 +219,17 @@ impl Sa1 {
         }
     }
 
+    /// Install a `--trace-sa1` sink (one call per SA-1 instruction, before it
+    /// executes). Mirrors `Snes::set_gsu_trace`; not part of the save state.
+    pub fn set_trace(&mut self, sink: Box<dyn FnMut(&str)>) {
+        self.trace = Some(sink);
+    }
+
+    /// Remove the SA-1 trace sink; drop the returned box to flush its writer.
+    pub fn clear_trace(&mut self) -> Option<Box<dyn FnMut(&str)>> {
+        self.trace.take()
+    }
+
     // ---- Catch-up ----------------------------------------------------------
 
     /// True when the SA-1 CPU is actively executing: not held in reset (CCNT.r)
@@ -239,6 +255,12 @@ impl Sa1 {
         while remaining > 0 {
             if self.st.sa1_wait {
                 break;
+            }
+            if let Some(sink) = self.trace.as_mut() {
+                let st = &self.st;
+                let mut fetch = |a: u32| st.fetch_no_tick(rom, a);
+                let line = crate::debug::trace::trace_line(&self.cpu, &mut fetch);
+                sink(&line);
             }
             let mut bus = cpu::Sa1Bus::new(&mut self.st, rom);
             self.cpu.step(&mut bus);

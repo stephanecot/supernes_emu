@@ -101,6 +101,25 @@ impl Snes {
         self.bus.cart.superfx.as_mut().and_then(|fx| fx.clear_gsu_trace())
     }
 
+    /// True if the loaded cartridge has an SA-1 coprocessor.
+    pub fn has_sa1(&self) -> bool {
+        self.bus.cart.sa1.is_some()
+    }
+
+    /// Install a `--trace-sa1` sink (one call per SA-1 CPU instruction, before
+    /// it executes). The SA-1 runs lazily inside `Bus::sa1_catch_up`, so the
+    /// sink stays installed until `clear_sa1_trace`. No-op without an SA-1 cart.
+    pub fn set_sa1_trace(&mut self, sink: Box<dyn FnMut(&str)>) {
+        if let Some(s) = self.bus.cart.sa1.as_mut() {
+            s.set_trace(sink);
+        }
+    }
+
+    /// Remove the SA-1 trace sink; drop the returned box to flush its writer.
+    pub fn clear_sa1_trace(&mut self) -> Option<Box<dyn FnMut(&str)>> {
+        self.bus.cart.sa1.as_mut().and_then(|s| s.clear_trace())
+    }
+
     /// Copy the PPU's freshly-rendered frame into `self.framebuffer`, the
     /// mirror the frontend reads by field access (`snes.framebuffer`).
     fn mirror_framebuffer(&mut self) {
