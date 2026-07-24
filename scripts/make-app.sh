@@ -53,7 +53,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>            <string>${APP_NAME}</string>
-    <key>CFBundleDisplayName</key>     <string>${APP_NAME}</string>
+    <key>CFBundleDisplayName</key>     <string>Prisme - SuperNes</string>
     <key>CFBundleExecutable</key>      <string>${APP_NAME}</string>
 ${ICON_KEY}
     <key>CFBundleIdentifier</key>      <string>com.stephanecot.prisme</string>

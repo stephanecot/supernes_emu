@@ -147,6 +147,15 @@ est le vrai sujet : **529 Ko par état**.
 
 ## Phase 7 — Identité : nom + logo original **[✅ FAIT]**
 
+**Nom retenu : « Prisme - SuperNes ».** *Prisme* est le nom de l'application (et de la future
+plateforme) ; *SuperNes* indique la console émulée. Ce choix anticipe le support d'**autres consoles**
+plus tard : Prisme devient la coque (accueil, bibliothèque, réglages, save states, mode IA) et chaque
+console est un cœur interchangeable. L'architecture s'y prête déjà — le cœur est une bibliothèque
+séparée (`snes-core`) sans I/O, et le frontend ne dépend d'elle que par une interface étroite
+(`run_frame`, `JoypadState`, `FrameBuffer`, save states). À garder en tête lors de la refonte UI
+(Phase 8) : ne pas coder en dur les spécificités SNES dans l'écran d'accueil, sans pour autant
+sur-concevoir maintenant.
+
 Point à considérer sérieusement : le nom actuel **« SuperNES » est très proche de la marque
 « Super NES » de Nintendo**. Pour un dépôt public, un nom **original** est plus sain (et plus
 identifiable). Le logo/icône actuel (4 boutons colorés) peut être conservé ou retravaillé autour du
