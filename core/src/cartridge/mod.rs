@@ -16,6 +16,7 @@ pub mod sram;
 
 pub use mapping::Mapping;
 
+use crate::coprocessor::sa1::{self, Sa1};
 use crate::coprocessor::superfx::{SuperFx, VCR_GSU2};
 use crate::scheduler::Region;
 use sram::Sram;
@@ -45,6 +46,12 @@ pub struct Cartridge {
     /// carts, which take the exact original mapping path.
     #[serde(default)]
     pub superfx: Option<SuperFx>,
+    /// SA-1 coprocessor unit (second 65C816 + Super MMC + BW-RAM), present only
+    /// when the header declares an SA-1 chipset. `None` for plain LoROM/HiROM and
+    /// SuperFX carts, which take their original mapping paths. The SA-1 owns the
+    /// battery-backed BW-RAM; the plain `sram` field is unused for SA-1 carts.
+    #[serde(default)]
+    pub sa1: Option<Sa1>,
 }
 
 impl Cartridge {
@@ -99,6 +106,16 @@ impl Cartridge {
             None
         };
 
+        // SA-1: map_mode ($15) low nibble $3 or chipset ($16) high nibble $3
+        // (sa1.md §8). Mutually exclusive with the SuperFX high nibble $1, so a
+        // GSU cart is never misdetected. BW-RAM size comes from the SRAM-size
+        // header byte; `Sa1::new` clamps it to 2 KB..256 KB.
+        let sa1 = if superfx.is_none() && sa1::is_sa1(map_mode, chipset) {
+            Some(Sa1::new(sram_size))
+        } else {
+            None
+        };
+
         Ok(Cartridge {
             rom,
             sram: Sram::new(sram_size),
@@ -109,6 +126,7 @@ impl Cartridge {
             header_checksum,
             checksum_valid,
             superfx,
+            sa1,
         })
     }
 
@@ -157,8 +175,74 @@ impl Cartridge {
         }
     }
 
+    /// SA-1 cartridge-space read (ROM via the Super MMC, BW-RAM linear banks
+    /// $40-$4F, and the S-CPU BW-RAM window $6000-$7FFF). The $2200-$23FF I/O
+    /// registers and the $3000-$37FF I-RAM are decoded by the bus directly.
+    /// `None` = open bus. Only called when `sa1` is `Some`.
+    fn sa1_read(&self, addr: u32) -> Option<u8> {
+        let s = self.sa1.as_ref().unwrap();
+        if let Some(off) = s.rom_offset(addr) {
+            if self.rom.is_empty() {
+                return None;
+            }
+            return Some(self.rom[mapping::mirror(off, self.rom.len())]);
+        }
+        let bank = ((addr >> 16) & 0xFF) as u8;
+        let off = (addr & 0xFFFF) as u16;
+        if (0x40..=0x4F).contains(&bank) {
+            let lin = ((bank as usize - 0x40) << 16) | off as usize;
+            return Some(s.read_bwram(lin));
+        }
+        if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && (0x6000..=0x7FFF).contains(&off) {
+            return Some(s.read_bwram(s.scpu_window_offset(off)));
+        }
+        None
+    }
+
+    /// SA-1 cartridge-space write (BW-RAM only; ROM writes are ignored). Only
+    /// called when `sa1` is `Some`.
+    fn sa1_write(&mut self, addr: u32, value: u8) {
+        let bank = ((addr >> 16) & 0xFF) as u8;
+        let off = (addr & 0xFFFF) as u16;
+        if (0x40..=0x4F).contains(&bank) {
+            let lin = ((bank as usize - 0x40) << 16) | off as usize;
+            self.sa1.as_mut().unwrap().write_bwram_scpu(lin, value);
+        } else if matches!(bank, 0x00..=0x3F | 0x80..=0xBF)
+            && (0x6000..=0x7FFF).contains(&off)
+        {
+            let s = self.sa1.as_mut().unwrap();
+            let lin = s.scpu_window_offset(off);
+            s.write_bwram_scpu(lin, value);
+        }
+    }
+
+    /// S-CPU read of an SA-1 I/O register ($2200-$23FF). The SA-1 borrows the
+    /// ROM image (the variable-length bit reader streams from ROM). Only called
+    /// when `sa1` is `Some`.
+    pub fn sa1_read_io(&mut self, addr: u16) -> u8 {
+        self.sa1.as_mut().unwrap().read_io(&self.rom, addr)
+    }
+
+    /// S-CPU write of an SA-1 I/O register ($2200-$23FF). May start the SA-1
+    /// arithmetic unit / DMA / bit reader or reset/halt the SA-1 CPU. Only
+    /// called when `sa1` is `Some`.
+    pub fn sa1_write_io(&mut self, addr: u16, value: u8) {
+        self.sa1.as_mut().unwrap().write_io(&self.rom, addr, value);
+    }
+
+    /// Catch the SA-1 CPU up by `budget` SA-1 cycles against the borrowed ROM.
+    /// No-op for non-SA-1 carts.
+    pub fn sa1_run(&mut self, budget: i64) {
+        if let Some(s) = self.sa1.as_mut() {
+            s.run(&self.rom, budget);
+        }
+    }
+
     /// Bus read into cartridge space. `None` = unmapped (open bus).
     pub fn read(&self, addr: u32) -> Option<u8> {
+        if self.sa1.is_some() {
+            return self.sa1_read(addr);
+        }
         if self.superfx.is_some() {
             return self.superfx_read(addr);
         }
@@ -166,6 +250,10 @@ impl Cartridge {
     }
 
     pub fn write(&mut self, addr: u32, value: u8) {
+        if self.sa1.is_some() {
+            self.sa1_write(addr, value);
+            return;
+        }
         if self.superfx.is_some() {
             self.superfx_write(addr, value);
             return;
@@ -383,5 +471,39 @@ mod tests {
         let rom = synth_rom(0x20000, super::LOROM_HEADER, 0x20, 2, 3);
         let cart = Cartridge::from_bytes(rom).unwrap();
         assert!(cart.superfx.is_none());
+    }
+
+    #[test]
+    fn sa1_header_detected() {
+        // SA-1 cart: LoROM-position header ($7FC0, reached at $00:FFC0 under the
+        // SA-1 MMC), map-mode $23 (low nibble $3), chipset $34 (high nibble $3),
+        // SRAM byte $05 -> 32 KB BW-RAM.
+        let mut rom = synth_rom(0x80000, super::LOROM_HEADER, 0x23, 1, 0x05);
+        rom[super::LOROM_HEADER + 0x16] = 0x34;
+        let rom = rom_with_checksum(&rom, super::LOROM_HEADER);
+        let cart = Cartridge::from_bytes(rom).unwrap();
+        let s = cart.sa1.as_ref().expect("SA-1 detected");
+        assert_eq!(s.bwram_size(), 0x8000);
+        assert!(cart.superfx.is_none());
+    }
+
+    #[test]
+    fn sa1_detected_by_chipset_high_nibble() {
+        // map-mode $20 (plain LoROM nibble) but chipset high nibble $3 -> SA-1.
+        let mut rom = synth_rom(0x80000, super::LOROM_HEADER, 0x20, 1, 0);
+        rom[super::LOROM_HEADER + 0x16] = 0x35;
+        let rom = rom_with_checksum(&rom, super::LOROM_HEADER);
+        let cart = Cartridge::from_bytes(rom).unwrap();
+        assert!(cart.sa1.is_some());
+    }
+
+    #[test]
+    fn plain_carts_have_no_sa1() {
+        let lo = Cartridge::from_bytes(synth_rom(0x20000, super::LOROM_HEADER, 0x20, 2, 3))
+            .unwrap();
+        assert!(lo.sa1.is_none());
+        let hi = Cartridge::from_bytes(synth_rom(0x20000, super::HIROM_HEADER, 0x31, 1, 0))
+            .unwrap();
+        assert!(hi.sa1.is_none());
     }
 }

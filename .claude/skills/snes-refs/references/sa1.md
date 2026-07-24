@@ -2,9 +2,11 @@
 
 Sources: fullsnes (nocash SNES specs, cartridge coprocessor list),
 Super Famicom Development Wiki `sa-1-registers`, SnesLab `SA-1`,
-VitorVilela7 `SNES-SA-1-doc`, PeterLemon `SNES_SA-1.INC`, nesdev wiki ROM header.
-Values transcribed, not guessed. Items I could not fully verify upstream are flagged
-**[VERIFY]**.
+VitorVilela7 `SNES-SA-1-doc`, PeterLemon `SNES_SA-1.INC`, nesdev wiki ROM header,
+and **bsnes `sfc/coprocessor/sa1/` source** (arithmetic, MMC bank bits, BWPA storage —
+verified 2026-07 pass). Values transcribed, not guessed. Remaining unverified items are
+flagged **[VERIFY]**; the arithmetic div-by-0, MCNT bits, MMC LoROM fixed blocks, and
+BWPA formula [VERIFY]s were resolved against bsnes this pass.
 
 The SA-1 is a cartridge coprocessor: a second **65C816** CPU (same ISA as the main
 S-CPU core in `core/src/cpu/`) plus a custom "Super MMC" mapper, an arithmetic unit,
@@ -130,7 +132,7 @@ free-running counter; H/V mode mirrors the PPU dot/scanline counters.
 |-------|-------|------------|--------------------------------------------------------------------|
 | $2226 | SBWE  | `P-------` | S-CPU BW-RAM write enable. P: 0=protect, 1=writes allowed          |
 | $2227 | CBWE  | `P-------` | SA-1 BW-RAM write enable. P: 0=protect, 1=writes allowed           |
-| $2228 | BWPA  | `----AAAA` | BW-RAM write-protected area size = 1024·2^(AAAA+1)? **[VERIFY: exact formula, docs read `256·2^AAAA` in some sources]**; $F disables protection |
+| $2228 | BWPA  | `----AAAA` | BW-RAM write-protected area = first **256·2^AAAA** bytes (= `0x100 << AAAA`) of BW-RAM. Verified points: AAAA=0 → 256 B ($40:0000-$40:00FF); AAAA=2 → 1024 B ($40:0000-$40:03FF). AAAA=$F → 256·2^15 = 8 MB, i.e. all BW-RAM protected (does **not** disable). bsnes stores only the raw 4-bit value (`mmio.bwp = data & 0x0f`). **NOTE: the Super Famicom Wiki prints "1024·2^(AAAA+1)" — that formula contradicts its own worked example (256 B at AAAA=0) and is wrong; 256·2^AAAA is correct.** |
 | $2229 | SIWP  | `76543210` | S-CPU I-RAM write protect: each bit enables writes to one 256-byte page $30xx-$37xx |
 | $222A | CIWP  | `76543210` | SA-1 I-RAM write protect: per-page enable ($30xx-$37xx / $00xx-$07xx) |
 
@@ -156,7 +158,7 @@ free-running counter; H/V mode mirrors the PPU dot/scanline counters.
 
 | Addr  | Name  | Bits       | Meaning                                                             |
 |-------|-------|------------|--------------------------------------------------------------------|
-| $2250 | MCNT  | `------OO` | Operation: 00=multiply, 01=divide, 10=cumulative sum (multiply-accumulate). Bit0 also clears the accumulator when starting a fresh sum. |
+| $2250 | MCNT  | `------AM` | Two independent bits: **M** = bit0 `md` (divide select, meaningful only when acm=0: 0=multiply, 1=divide); **A** = bit1 `acm` (0=multiply/divide, 1=cumulative multiply-accumulate). Writing $2250 with **acm=1 (bit1) resets the 40-bit result accumulator MR to 0** — this is the fresh-sum start, NOT bit0. Resulting op encodings: 00=multiply, 01=divide, 10/11=cumulative sum. |
 | $2251 | MAL   | `nnnnnnnn` | Multiplicand / dividend, low  (signed 16-bit)                       |
 | $2252 | MAH   | `nnnnnnnn` | Multiplicand / dividend, high. Writing $2252 does **not** start op   |
 | $2253 | MBL   | `nnnnnnnn` | Multiplier / divisor, low (signed for multiply, unsigned for divide)|
@@ -210,10 +212,11 @@ bind one block to a 1 MB region of the S-CPU/SA-1 address space:
 | FXB $2223 | $F0-$FF                    | $A0-$BF ($8000-$FFFF)              |
 
 - `AAA` (bits 0-2) selects the 1 MB block (0-7) for the HiROM region.
-- `B` (bit 7) controls the paired LoROM region: **B=1** → LoROM maps the same `AAA`
-  block ("projection"); **B=0** → LoROM maps a fixed block (0,1,2,3 for CX/DX/EX/FX
-  respectively), independent of AAA. **[VERIFY: fixed-block indices per bsnes MMC; some
-  docs word this as "B=0 uses default sequential mapping".]**
+- `B` (bit 7, bsnes `cbmode`/`dbmode`/`ebmode`/`fbmode`) controls the paired LoROM region:
+  **B=1** → LoROM maps the same `AAA` block as the HiROM region ("projection"); **B=0** →
+  LoROM maps a fixed default block — **0, 1, 2, 3** for CXB/DXB/EXB/FXB respectively,
+  independent of `AAA`. (Confirmed: bsnes stores `cb = data & 0x07`, `cbmode = data & 0x80`;
+  SnesLab: "When cleared, LoROM banks default to {$00,$01,$02,$03}." [VERIFY resolved.])
 - HiROM banks map linearly: within a bound 1 MB block, bank $C0..$CF = block offset
   $00000..$FFFFF. LoROM maps each 32 KB half-bank to consecutive 32 KB ROM slices within
   the block.
@@ -225,21 +228,26 @@ bind one block to a 1 MB region of the S-CPU/SA-1 address space:
 ### Arithmetic unit ($2250-$2254 → $2306-$230B)
 
 Set `MCNT` ($2250), load `MA`/`MB`; the operation starts when **$2254 (MBH)** is written.
-Result latency (real hardware):
+Exact behavior transcribed from bsnes (`sfc/coprocessor/sa1/io.cpp`, `$2254` handler):
 
-| MCNT.OO | Operation                    | Inputs                     | Result                                 | Latency  |
-|---------|------------------------------|----------------------------|----------------------------------------|----------|
-| 00      | signed 16×16 multiply        | MA (s16) × MB (s16)        | 32-bit product → MR1-MR4 ($2306-$2309) | 5 cyc    |
-| 01      | signed 16 ÷ unsigned 16 div  | MA (s16) ÷ MB (u16)        | quotient (s16) MR1-MR2, remainder (u16) MR3-MR4 | 5 cyc |
-| 10      | cumulative multiply-sum (MAC)| Σ (MA×MB), signed          | 40-bit accumulator → MR1-MR5 ($2306-$230A) | 6 cyc |
+| acm/md | Operation                    | Inputs                     | Result / side effects                                                                                     |
+|--------|------------------------------|----------------------------|----------------------------------------------------------------------------------------------------------|
+| 0/0    | signed 16×16 multiply        | MA (s16) × MB (s16)        | `MR = (u32)((s16)MA * (s16)MB)` → 32-bit product in MR1-MR4 ($2306-$2309). **MB cleared to 0** after.     |
+| 0/1    | signed÷unsigned divide       | MA (s16) ÷ MB (u16)        | quotient (16-bit) → MR1-MR2 ($2306-$2307), remainder (u16) → MR3-MR4 ($2308-$2309). **MA and MB cleared to 0** after. |
+| 1/-    | cumulative multiply-add (MAC)| Σ (s16 MA × s16 MB)        | `MR += (s16)MA*(s16)MB`; then `OF = (MR>>40)&1`; MR kept to 40 bits → MR1-MR5 ($2306-$230A). **MB cleared to 0** after. |
 
-- Cumulative sum: each MBH write multiplies MA×MB and adds to the 40-bit accumulator.
-  Start a fresh string by first writing MCNT with the sum bit; overflow of the 40-bit
-  accumulator sets `OF` ($230B). Division by zero also flagged via OF/result convention
-  **[VERIFY: exact div-by-0 result]**.
-- Emulation: results can be computed instantly; if a game reads MR before latency has
-  elapsed it may see stale data, but almost all software waits. Model the 5/6-cycle
-  latency only if a self-test requires it.
+Divide algorithm (bsnes, rounds toward −∞): `d = (s16)MA + (u16)MB*65536; rem = d % MB;
+quot = d / MB − 65536; MR = rem<<16 | quot`.
+
+- **Division by zero (MB==0)**: `MR = 0` (both quotient and remainder read 0). **OF is NOT
+  touched** by multiply or divide — only the cumulative-sum path writes `OF`. (Resolves the
+  earlier [VERIFY]: there is no divide-by-zero overflow flag.)
+- **Cumulative sum**: each MBH write does `MR += MA*MB`; `OF` ($230B) = bit 40 of the running
+  sum (set when the 40-bit accumulator overflows), then MR is truncated to 40 bits. Start a
+  fresh string by writing $2250 with acm=1, which zeroes MR (see §3.6).
+- **Latency**: real hardware needs a few cycles before MR is valid (~5 cyc mul/div, ~6 cyc
+  sum — *not verified upstream this pass*). bsnes computes the result **instantly** on the
+  $2254 write and models no latency; do the same unless a self-test requires otherwise.
 
 ### Variable-length bit processing ($2258-$225B → $230C-$230D)
 
@@ -307,7 +315,8 @@ $4x S-DD1, $5x S-RTC, $Ex Other, $Fx Custom.
 - BW-RAM/I-RAM write-protection registers — often ignored (games rarely rely on faults).
 - `VC` $230E version register — open bus on hardware; safe to return open bus / 0.
 - Char-conversion DMA type-1 exact BRF double-buffer timing — approximated.
-- Exact `BWPA` protected-area size formula — verify if a title depends on it.
+- `BWPA` protected-area size = 256·2^AAAA (resolved, §3.4); bsnes stores the raw value and
+  modern builds do not enforce the fault — safe to ignore unless a title depends on it.
 
 ## 10. Timing details that matter most for correctness
 

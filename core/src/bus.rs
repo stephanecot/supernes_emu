@@ -119,6 +119,11 @@ pub struct Bus {
     /// clocks), analogous to the APU. Unused (stays equal to the clock) when the
     /// cart has no GSU.
     gsu_clock: u64,
+    /// Master-clock timestamp of the last SA-1 catch-up. The SA-1 CPU runs at
+    /// master/2 as a catch-up against elapsed master cycles, analogous to the
+    /// GSU. Unused (tracks the clock) when the cart has no SA-1.
+    #[serde(default)]
+    sa1_clock: u64,
     /// Opt-in stderr taps for the frontend debug flags. Not part of a save
     /// state (host-side debug config, not emulated hardware).
     #[serde(skip)]
@@ -160,6 +165,7 @@ impl Bus {
             hdma_inited: false,
             hdma_running: false,
             gsu_clock: 0,
+            sa1_clock: 0,
             debug: DebugHooks::default(),
         }
     }
@@ -259,6 +265,17 @@ impl Bus {
                     self.gsu_catch_up(self.scheduler.clock);
                     self.cart.superfx.as_mut().unwrap().read_mmio(off)
                 }
+                // SA-1 I/O registers ($2200-$23FF). Catch the SA-1 up first so
+                // status registers (SFR/CFR, arithmetic result, timer latch)
+                // reflect everything it has executed (sa1.md §3).
+                0x2200..=0x23FF if self.cart.sa1.is_some() => {
+                    self.sa1_catch_up(self.scheduler.clock);
+                    self.cart.sa1_read_io(off)
+                }
+                // SA-1 I-RAM ($3000-$37FF, 2 KB), shared between both CPUs.
+                0x3000..=0x37FF if self.cart.sa1.is_some() => {
+                    self.cart.sa1.as_ref().unwrap().read_iram((off & 0x7FF) as usize)
+                }
                 // $2181-$2183 are write-only: open bus.
                 // Divergence (timing.md §8, mmio.md line 114): on hardware,
                 // reading $4016/$4017 or $4218-$421F while the auto-joypad busy
@@ -298,8 +315,16 @@ impl Bus {
                     self.dma.read((off & 0x7F) as u8).unwrap_or(self.mdr)
                 }
                 // Cartridge regions: $6000-$7FFF (HiROM SRAM window / LoROM
-                // expansion) and $8000-$FFFF ROM.
-                0x6000..=0xFFFF => self.cart.read(addr).unwrap_or(self.mdr),
+                // expansion) and $8000-$FFFF ROM. On an SA-1 cart the S-CPU
+                // NMI/IRQ vector fetch at $00:FFEA/$FFEE is redirected to the
+                // SNV/SIV override when SCNT.N/S selects it (sa1.md §3.1).
+                0x6000..=0xFFFF => {
+                    if let Some(v) = self.sa1_vector_override(bank, off) {
+                        v
+                    } else {
+                        self.cart.read(addr).unwrap_or(self.mdr)
+                    }
+                }
                 // Everything else ($2000-$20FF, $2184-$3FFF, $4000-$41FF gaps,
                 // $4200-$420F write-only NMITIMEN..MEMSEL, $4220-$42FF,
                 // $4380-$5FFF): open bus.
@@ -355,6 +380,24 @@ impl Bus {
                     self.gsu_catch_up(self.scheduler.clock);
                     self.cart.superfx.as_mut().unwrap().write_mmio(off, value);
                     self.gsu_clock = self.scheduler.clock;
+                }
+                // SA-1 I/O registers ($2200-$23FF). Catch the SA-1 up first, then
+                // rebase its clock: a write may release the SA-1 from reset or
+                // halt (CCNT), and the next run must not receive a retroactive
+                // budget for the idle span (sa1.md §3.1, §10).
+                0x2200..=0x23FF if self.cart.sa1.is_some() => {
+                    self.sa1_catch_up(self.scheduler.clock);
+                    self.cart.sa1_write_io(off, value);
+                    self.sa1_clock = self.scheduler.clock;
+                }
+                // SA-1 I-RAM ($3000-$37FF), honouring the SIWP per-page S-CPU
+                // write protection.
+                0x3000..=0x37FF if self.cart.sa1.is_some() => {
+                    self.cart
+                        .sa1
+                        .as_mut()
+                        .unwrap()
+                        .write_iram_scpu((off & 0x7FF) as usize, value);
                 }
                 // $4016 bit0 = OUT0, the shared latch line to BOTH ports.
                 0x4016 => {
@@ -561,6 +604,9 @@ impl Bus {
             // Same lazy catch-up for the GSU, bounding a run to ~one scanline of
             // GSU clocks even when the SNES CPU never touches its registers.
             self.gsu_catch_up(self.scheduler.clock);
+            // And for the SA-1 CPU, which runs continuously and independently of
+            // any S-CPU register access (sa1.md §1).
+            self.sa1_catch_up(self.scheduler.clock);
         }
     }
 
@@ -582,6 +628,44 @@ impl Bus {
         if budget > 0 {
             self.cart.superfx_run(budget as i64);
             self.gsu_clock = now;
+        }
+    }
+
+    /// Advance the SA-1 CPU by the master cycles elapsed since the last sync,
+    /// divided by 2 (SA-1 = master/2, sa1.md §1/§10). No-op for non-SA-1 carts;
+    /// while the SA-1 is held in reset or halted the baseline just tracks the
+    /// master clock so the next run starts from the current time.
+    fn sa1_catch_up(&mut self, now: u64) {
+        let running = match self.cart.sa1.as_ref() {
+            Some(s) => s.is_running(),
+            None => return,
+        };
+        if !running {
+            self.sa1_clock = now;
+            return;
+        }
+        let budget = now.saturating_sub(self.sa1_clock) / 2;
+        if budget > 0 {
+            self.cart.sa1_run(budget as i64);
+            self.sa1_clock = now;
+        }
+    }
+
+    /// SA-1 S-CPU vector override for a $00:FFEA/$FFEE fetch, or `None` when the
+    /// cart is not SA-1, the address is not a vector, or SCNT.N/S is not
+    /// selecting the override (sa1.md §3.1). NMI vector = $FFEA/$FFEB (SNV),
+    /// IRQ vector = $FFEE/$FFEF (SIV); both are fetched from bank $00.
+    fn sa1_vector_override(&self, bank: u8, off: u16) -> Option<u8> {
+        if bank != 0x00 {
+            return None;
+        }
+        let s = self.cart.sa1.as_ref()?;
+        match off {
+            0xFFEA => s.scpu_nmi_vector().map(|v| v as u8),
+            0xFFEB => s.scpu_nmi_vector().map(|v| (v >> 8) as u8),
+            0xFFEE => s.scpu_irq_vector().map(|v| v as u8),
+            0xFFEF => s.scpu_irq_vector().map(|v| (v >> 8) as u8),
+            _ => None,
         }
     }
 
@@ -877,7 +961,13 @@ impl CpuBus for Bus {
         // STOP (SFR.IRQ, unless masked by CFGR bit7), cleared when the SNES
         // reads SFR (superfx.md §5).
         let gsu = self.cart.superfx.as_ref().is_some_and(|fx| fx.irq_line());
-        self.scheduler.irq_pending || gsu
+        // The SA-1 raises a level-held IRQ to the S-CPU via SFR.I/SFR.D, gated by
+        // the SIE enables; cleared when the S-CPU acknowledges through $2202
+        // (sa1.md §3.1). Catch the SA-1 up first so a just-executed SCNT.I write
+        // by SA-1 code is visible on the line.
+        self.sa1_catch_up(self.scheduler.clock);
+        let sa1 = self.cart.sa1.as_ref().is_some_and(|s| s.scpu_irq_line());
+        self.scheduler.irq_pending || gsu || sa1
     }
 }
 
@@ -1535,6 +1625,103 @@ mod tests {
         assert_eq!(bus.read_no_tick(0x70_0007), 0x04);
         // And through the $6000-$7FFF mirror of $70:0000-1FFF.
         assert_eq!(bus.read_no_tick(0x00_6006), 0x04);
+    }
+
+    /// LoROM-position SA-1 header (map-mode $23, chipset $34), 512 KB image.
+    fn sa1_bus() -> Bus {
+        let mut rom = vec![0u8; 0x80000];
+        rom[0x7FC0..0x7FC0 + 21].copy_from_slice(b"SA1 TEST             ");
+        rom[0x7FC0 + 0x15] = 0x23; // map-mode: SA-1 (low nibble 3)
+        rom[0x7FC0 + 0x16] = 0x34; // chipset: SA-1 (high nibble 3)
+        rom[0x7FC0 + 0x18] = 0x05; // 32 KB BW-RAM
+        rom[0x7FC0 + 0x19] = 1; // NTSC
+        rom[0x7FC0 + 0x3C] = 0x00;
+        rom[0x7FC0 + 0x3D] = 0x80;
+        // Valid checksum so the SA-1 map-mode nibble ($3, which the LoROM/HiROM
+        // scorer penalizes) still yields a plausible header.
+        let cs = crate::cartridge::compute_checksum(&rom).wrapping_add(510);
+        let cp = 0xFFFFu16 - cs;
+        rom[0x7FDC..0x7FDE].copy_from_slice(&cp.to_le_bytes());
+        rom[0x7FDE..0x7FE0].copy_from_slice(&cs.to_le_bytes());
+        Bus::new(Cartridge::from_bytes(rom).unwrap())
+    }
+
+    #[test]
+    fn sa1_message_port_write_raises_sa1_visible_flag() {
+        let mut bus = sa1_bus();
+        assert!(bus.cart.sa1.is_some());
+        // S-CPU writes CCNT ($2200) low nibble = message to SA-1; the SA-1 reads
+        // it back in CFR ($2301) low nibble.
+        CpuBus::write(&mut bus, 0x00_2200, 0x0A);
+        assert_eq!(bus.read_no_tick(0x00_2301) & 0x0F, 0x0A);
+        // CCNT.I (bit7) raises the S-CPU->SA-1 IRQ pending flag CFR.I.
+        CpuBus::write(&mut bus, 0x00_2200, 0x80);
+        assert_eq!(bus.read_no_tick(0x00_2301) & 0x80, 0x80);
+    }
+
+    #[test]
+    fn sa1_arithmetic_unit_reachable_through_bus() {
+        let mut bus = sa1_bus();
+        // Signed 16x16 multiply via $2250-$2254, result read at $2306-$2309.
+        CpuBus::write(&mut bus, 0x00_2250, 0x00); // MCNT: multiply
+        CpuBus::write(&mut bus, 0x00_2251, 0x0C); // MAL = 12
+        CpuBus::write(&mut bus, 0x00_2252, 0x00); // MAH
+        CpuBus::write(&mut bus, 0x00_2253, 0x0A); // MBL = 10
+        CpuBus::write(&mut bus, 0x00_2254, 0x00); // MBH -> run
+        let lo = bus.read_no_tick(0x00_2306) as u16;
+        let hi = bus.read_no_tick(0x00_2307) as u16;
+        assert_eq!(lo | (hi << 8), 120);
+    }
+
+    #[test]
+    fn sa1_iram_shared_through_bus() {
+        let mut bus = sa1_bus();
+        // Enable all S-CPU I-RAM pages (SIWP $2229), then write/read I-RAM at
+        // $3000-$37FF.
+        CpuBus::write(&mut bus, 0x00_2229, 0xFF);
+        CpuBus::write(&mut bus, 0x00_3010, 0x5C);
+        assert_eq!(bus.read_no_tick(0x00_3010), 0x5C);
+    }
+
+    #[test]
+    fn sa1_bwram_linear_and_window_through_bus() {
+        let mut bus = sa1_bus();
+        CpuBus::write(&mut bus, 0x00_2226, 0x80); // SBWE: allow S-CPU BW-RAM writes
+        // Linear BW-RAM in bank $40.
+        CpuBus::write(&mut bus, 0x40_0100, 0x77);
+        assert_eq!(bus.read_no_tick(0x40_0100), 0x77);
+        // The $6000-$7FFF window with BMAPS=0 selects the first 8 KB block, so
+        // $00:6100 aliases linear offset $0100.
+        assert_eq!(bus.read_no_tick(0x00_6100), 0x77);
+    }
+
+    #[test]
+    fn sa1_scpu_irq_vector_override_intercepts_fetch() {
+        let mut bus = sa1_bus();
+        // Program SIV = $1234 and select it (SCNT.S = bit6).
+        CpuBus::write(&mut bus, 0x00_220E, 0x34); // SIVL
+        CpuBus::write(&mut bus, 0x00_220F, 0x12); // SIVH
+        CpuBus::write(&mut bus, 0x00_2209, 0x40); // SCNT.S -> IRQ vec = SIV
+        // The S-CPU IRQ vector fetch at $00:FFEE/$FFEF now returns SIV, not ROM.
+        assert_eq!(bus.read_no_tick(0x00_FFEE), 0x34);
+        assert_eq!(bus.read_no_tick(0x00_FFEF), 0x12);
+        // With no NMI override selected, $FFEA falls through to ROM.
+        CpuBus::write(&mut bus, 0x00_2209, 0x00);
+        assert!(bus.sa1_vector_override(0x00, 0xFFEE).is_none());
+    }
+
+    #[test]
+    fn sa1_scpu_irq_line_gated_by_sie() {
+        let mut bus = sa1_bus();
+        // SCNT.I (bit7) requests the S-CPU IRQ, but SIE.I is disabled: no line.
+        CpuBus::write(&mut bus, 0x00_2209, 0x80);
+        assert!(!CpuBus::irq_level(&mut bus));
+        // Enable SIE.I ($2201 bit7): the line asserts.
+        CpuBus::write(&mut bus, 0x00_2201, 0x80);
+        assert!(CpuBus::irq_level(&mut bus));
+        // S-CPU acknowledges via SIC.I ($2202 bit7): line de-asserts.
+        CpuBus::write(&mut bus, 0x00_2202, 0x80);
+        assert!(!CpuBus::irq_level(&mut bus));
     }
 
     #[test]
