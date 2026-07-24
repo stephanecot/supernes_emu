@@ -2,6 +2,10 @@
 
 Backlog de fonctionnalités envisagées (hors périmètre des tâches en cours). À prioriser au fil de l'eau.
 
+## Divers
+- trouve un nouveau titre / logo original
+- Afficher la version dans le menu
+  
 ## Affichage / options
 
 - **Modes de zoom ×2 et ×4** — permettre d'agrandir la fenêtre de rendu (256×224 → 512×448, 1024×896),
