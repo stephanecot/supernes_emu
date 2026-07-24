@@ -52,7 +52,12 @@ Petits, indépendants, forte valeur perçue. À enchaîner dans une seule passe.
 4. **Slots de save state multiples** — la brique existe (`state_path(rom, slot)`). Ajouter : slot
    courant en mémoire, `F5` sauver / `F9` charger / `F7` slot suivant (0–9), affichage bref du slot
    à l'écran (réutiliser le rendu de texte de l'overlay FPS), entrées de menu. Mémorisé.
-5. **Fast-forward ×2/×3/×4** — touche « turbo » maintenue (ex. `Tab`) + choix du facteur au menu.
+5. **Confirmation avant de quitter** — `Échap` ne doit plus quitter directement mais afficher une
+   **demande de confirmation** (« Quitter l'émulateur ? Oui / Non »), via `rfd::MessageDialog`
+   (déjà en dépendance). Points d'attention : mettre l'émulation **en pause** pendant la boîte de
+   dialogue ; « Non » reprend la partie ; la **SRAM doit être sauvegardée** dans tous les cas de
+   sortie (Échap confirmé, croix rouge, Cmd+Q) ; éventuellement une préférence « ne plus demander ».
+6. **Fast-forward ×2/×3/×4** — touche « turbo » maintenue (ex. `Tab`) + choix du facteur au menu.
    Implémentation : N appels `run_frame` par image présentée dans la boucle de `video.rs`.
    **Audio coupé pendant l'accéléré** (décision par défaut : le plus simple et le plus propre).
    Vérifier que ×4 tient le budget CPU (sinon dégrader silencieusement au facteur atteignable).

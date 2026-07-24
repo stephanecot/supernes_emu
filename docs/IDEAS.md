@@ -5,6 +5,9 @@ Backlog de fonctionnalités envisagées (hors périmètre des tâches en cours).
 ## Divers
 - trouve un nouveau titre / logo original
 - Afficher la version dans le menu
+- **Confirmation avant de quitter** — `Échap` ne doit pas quitter directement l'émulateur, mais
+  afficher une confirmation (« Quitter ? Oui / Non »). Mettre l'émulation en pause pendant la
+  boîte de dialogue ; sauvegarder la SRAM dans tous les cas de sortie ; option « ne plus demander ».
   
 ## Affichage / options
 
