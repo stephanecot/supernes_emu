@@ -186,11 +186,17 @@ impl Cx4 {
     /// no-sub-sprite branch should also cull to the on-screen box.
     pub(super) fn conv_oam(&mut self, rom: &[u8]) {
         let oam_start = (self.ram[0x626] as usize) << 2;
-        // Clear OAM-to-be from $61fd downward to the write cursor.
+        // Clear OAM-to-be from $61fd downward to the write cursor. `i` steps by 4
+        // and, being misaligned vs `oam_start`, can pass it, so guard the usize
+        // subtraction against underflow (an unguarded `i -= 4` at i<4 wraps to a
+        // huge index and panics).
         let mut i = 0x1FD;
         while i > oam_start {
             self.ram[i] = 0xE0;
-            i -= 4;
+            match i.checked_sub(4) {
+                Some(n) => i = n,
+                None => break,
+            }
         }
 
         if self.ram[0x620] == 0 {
