@@ -1,4 +1,4 @@
-# supernes_emu
+# Prisme
 
 A Super Nintendo (SNES / Super Famicom) emulator written from scratch in Rust — CPU, PPU, a full audio path, and the SuperFX cartridge coprocessor, with no platform SDKs beyond a pure-Rust window/input/audio stack.
 
@@ -57,8 +57,8 @@ Requires a recent stable Rust toolchain.
 
 ```sh
 cargo build --release
-cargo run --release -p snes-frontend -- path/to/game.sfc   # or .smc / .zip
-cargo run --release -p snes-frontend                        # no path: opens a ROM picker
+cargo run --release -p prisme -- path/to/game.sfc   # or .smc / .zip
+cargo run --release -p prisme                        # no path: opens a ROM picker
 ```
 
 Launching without a ROM path (and without `--headless`) opens a native
@@ -122,16 +122,16 @@ the path with `--save PATH`.
 ### Headless / debugging
 
 ```sh
-cargo run --release -p snes-frontend -- game.sfc --info                 # header, mapping, region
-cargo run --release -p snes-frontend -- game.sfc --headless --frames 600 --dump-frame out.png
-cargo run --release -p snes-frontend -- game.sfc --headless --frames 1500 --dump-audio out.wav
-cargo run --release -p snes-frontend -- game.sfc --headless --frames 900 --dump-state statedir/  # WRAM/VRAM/CGRAM/OAM
-cargo run --release -p snes-frontend -- game.sfc --disasm                # 65C816 disassembly from the reset vector
-cargo run --release -p snes-frontend -- game.sfc --trace t.log --trace-start-frame 0 --trace-end-frame 2      # 65C816
-cargo run --release -p snes-frontend -- game.sfc --trace-spc s.log --trace-start-frame 0 --trace-end-frame 2  # SPC700
-cargo run --release -p snes-frontend -- superfx.sfc --trace-gsu g.log --trace-start-frame 0 --trace-end-frame 2  # SuperFX GSU
-cargo run --release -p snes-frontend -- game.sfc --headless --frames 300 --script inputs.txt  # scripted joypad
-cargo run --release -p snes-frontend -- game.sfc --save /path/to/slot1.srm  # override the default .srm sidecar
+cargo run --release -p prisme -- game.sfc --info                 # header, mapping, region
+cargo run --release -p prisme -- game.sfc --headless --frames 600 --dump-frame out.png
+cargo run --release -p prisme -- game.sfc --headless --frames 1500 --dump-audio out.wav
+cargo run --release -p prisme -- game.sfc --headless --frames 900 --dump-state statedir/  # WRAM/VRAM/CGRAM/OAM
+cargo run --release -p prisme -- game.sfc --disasm                # 65C816 disassembly from the reset vector
+cargo run --release -p prisme -- game.sfc --trace t.log --trace-start-frame 0 --trace-end-frame 2      # 65C816
+cargo run --release -p prisme -- game.sfc --trace-spc s.log --trace-start-frame 0 --trace-end-frame 2  # SPC700
+cargo run --release -p prisme -- superfx.sfc --trace-gsu g.log --trace-start-frame 0 --trace-end-frame 2  # SuperFX GSU
+cargo run --release -p prisme -- game.sfc --headless --frames 300 --script inputs.txt  # scripted joypad
+cargo run --release -p prisme -- game.sfc --save /path/to/slot1.srm  # override the default .srm sidecar
 ```
 
 The 65C816 trace is Mesen2-compatible for diffing against a reference emulator; the SPC700 and
@@ -139,7 +139,7 @@ GSU traces use the same idea for the audio CPU and the SuperFX coprocessor.
 
 ### macOS app bundle
 
-`scripts/make-app.sh` builds a double-clickable `SuperNES.app` (with icon) into `dist/`:
+`scripts/make-app.sh` builds a double-clickable `Prisme.app` (with icon) into `dist/`:
 
 ```sh
 ./scripts/make-app.sh              # release-build, then bundle
@@ -153,7 +153,7 @@ Launched from Finder with no arguments, the app opens the ROM picker.
 
 - `core/` — `snes-core`, the pure emulation library (no I/O), fully testable headless.
   - `cpu/`, `ppu/`, `apu/`, `bus.rs`, `scheduler.rs`, `dma.rs`, `cartridge/`, `coprocessor/` (SuperFX/GSU), `debug/`
-- `frontend/` — `snes-frontend`, the winit/pixels/cpal binary and CLI (picker, menu bar, save states, FPS overlay).
+- `frontend/` — `prisme`, the winit/pixels/cpal binary and CLI (picker, menu bar, save states, FPS overlay).
 - `scripts/` — `make-app.sh` (macOS `.app` bundler); `packaging/` — app icon assets.
 - `docs/` — architecture, the pedagogical PDF, `PUNCHLIST.md` (known accuracy gaps), `IDEAS.md` (planned features).
 - `.claude/` — development tooling: subagent definitions and a condensed, source-verified SNES hardware reference (`skills/snes-refs/references/`).

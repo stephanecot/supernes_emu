@@ -9,12 +9,12 @@ description: Build, test, lint and run the SNES emulator (Rust workspace) — ru
 
 - `cargo check --workspace` — fast gate; must be error-free before any agent returns.
 - `cargo test -p snes-core` — unit tests on pure logic.
-- `cargo build --release -p snes-frontend` — release build (use `--release` for any run beyond a few frames; debug builds are ~20× too slow for full-speed emulation).
+- `cargo build --release -p prisme` — release build (use `--release` for any run beyond a few frames; debug builds are ~20× too slow for full-speed emulation).
 - `cargo clippy --workspace` — final-pass lint only, not a per-change gate.
 
 # Frontend CLI contract
 
-`cargo run --release -p snes-frontend -- <rom> [flags]`
+`cargo run --release -p prisme -- <rom> [flags]`
 
 `<rom>` accepts `.sfc`/`.smc` raw or `.zip` (first ROM entry inside). If omitted and `--headless` is not set, a native file-open dialog (rfd, filtered to `.sfc`/`.smc`/`.zip`, starting in `roms/` if present) is shown instead — not usable from a headless/agent shell; agents must always pass `<rom>` explicitly. `--headless` still requires `<rom>` explicitly (errors otherwise). **This contract is what all agents rely on — if you change a flag, update this file in the same change.**
 

@@ -1,10 +1,10 @@
 [package]
-name = "snes-frontend"
+name = "prisme"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "snes-frontend"
+name = "prisme"
 path = "src/main.rs"
 
 [dependencies]

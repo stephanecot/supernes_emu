@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Build a double-clickable macOS .app bundle for the SNES emulator.
 #
-#   ./scripts/make-app.sh            # release-build, then bundle -> dist/SuperNES.app
+#   ./scripts/make-app.sh            # release-build, then bundle -> dist/Prisme.app
 #   SKIP_BUILD=1 ./scripts/make-app.sh   # bundle the existing target/release binary (no cargo)
 #
-# Double-click dist/SuperNES.app in Finder: it opens the native game picker
+# Double-click dist/Prisme.app in Finder: it opens the native game picker
 # (and menu bar) with no terminal. Since it is built locally it is not
 # quarantined, so Gatekeeper lets it run directly.
 set -euo pipefail
@@ -12,15 +12,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-APP_NAME="SuperNES"
-BIN_SRC="target/release/snes-frontend"
+APP_NAME="Prisme"
+BIN_SRC="target/release/prisme"
 APP="dist/${APP_NAME}.app"
 
 if [ "${SKIP_BUILD:-0}" != "1" ]; then
   # cargo is not on the login PATH on this machine; add the toolchain dir.
   export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$HOME/.cargo/bin:$PATH"
   echo "Building release binary..."
-  cargo build --release -p snes-frontend
+  cargo build --release -p prisme
 fi
 
 if [ ! -x "$BIN_SRC" ]; then
@@ -56,7 +56,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleDisplayName</key>     <string>${APP_NAME}</string>
     <key>CFBundleExecutable</key>      <string>${APP_NAME}</string>
 ${ICON_KEY}
-    <key>CFBundleIdentifier</key>      <string>com.stephanecot.supernes</string>
+    <key>CFBundleIdentifier</key>      <string>com.stephanecot.prisme</string>
     <key>CFBundlePackageType</key>     <string>APPL</string>
     <key>CFBundleInfoDictionaryVersion</key> <string>6.0</string>
     <key>CFBundleShortVersionString</key>    <string>${VERSION}</string>

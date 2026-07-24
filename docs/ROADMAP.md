@@ -59,8 +59,17 @@ Petits, indépendants, forte valeur perçue. À enchaîner dans une seule passe.
    sortie (Échap confirmé, croix rouge, Cmd+Q) ; éventuellement une préférence « ne plus demander ».
 6. **Fast-forward ×2/×3/×4** — touche « turbo » maintenue (ex. `Tab`) + choix du facteur au menu.
    Implémentation : N appels `run_frame` par image présentée dans la boucle de `video.rs`.
-   **Audio coupé pendant l'accéléré** (décision par défaut : le plus simple et le plus propre).
-   Vérifier que ×4 tient le budget CPU (sinon dégrader silencieusement au facteur atteignable).
+   **Audio coupé pendant l'accéléré** (décision retenue). Vérifier que ×4 tient le budget CPU
+   (sinon dégrader silencieusement au facteur atteignable).
+7. **Reprise instantanée (suspend/resume)** *(idée retenue)* — à la fermeture, écrire
+   automatiquement un save state « de session » ; au lancement suivant du même jeu, reprendre
+   exactement où on s'était arrêté (comportement « console moderne »). Trivial : les save states
+   existent et sont fiables. Le stocker à part des slots manuels (ex. `<jeu>.resume`) pour ne
+   jamais les écraser. Préférence : reprise automatique ou proposée.
+8. **Export SPC (musique)** *(idée retenue)* — entrée de menu « Exporter la musique (.spc) ».
+   Un fichier `.spc` **est** exactement : en-tête ID666 + 64 Ko de RAM APU + 128 octets de registres
+   DSP + les registres du SPC700 — c'est-à-dire un sous-ensemble de ce que le save state capture
+   déjà. Il ne reste qu'à le réécrire au bon format et remplir l'en-tête (titre du jeu). **S/M**
 
 ---
 
@@ -136,7 +145,7 @@ est le vrai sujet : **529 Ko par état**.
 
 ---
 
-## Phase 7 — Identité : nom + logo original **[S/M, mais décision à prendre]**
+## Phase 7 — Identité : nom + logo original **[✅ FAIT]**
 
 Point à considérer sérieusement : le nom actuel **« SuperNES » est très proche de la marque
 « Super NES » de Nintendo**. Pour un dépôt public, un nom **original** est plus sain (et plus
@@ -149,9 +158,91 @@ Pistes de noms (à trancher) : **Chrono16**, **Aurora16**, **Kestrel**, **Nova16
 
 ---
 
+## Phase 8 — Refonte de l'interface : une vraie application **[L]** *(idée retenue — phase phare)*
+
+Aujourd'hui, lancer l'émulateur ouvre une boîte de dialogue de fichiers. L'objectif : **un véritable
+écran d'accueil**, complet et soigné, qui fait passer le projet d'« émulateur qui marche » à
+« application qu'on a envie d'ouvrir ».
+
+**Écran d'accueil / bibliothèque**
+- Grille de jeux avec **miniatures**, recherche, tri, **favoris** (épinglés en tête), section
+  « repris récemment » (branchée sur la reprise instantanée, Phase 1).
+- **Fiche de jeu** au clic : miniature, titre, région, mapping, taille, sauvegarde, **coprocesseur
+  détecté**, temps de jeu cumulé, save states existants (avec vignette de chacun).
+- **Tout est auto-alimenté** : l'en-tête de cartouche est déjà lu par le cœur (titre/mapping/région/
+  SRAM/puce), et les **miniatures sont générées par l'émulateur lui-même** — lancer la ROM en
+  headless quelques centaines de frames et capturer une image (exactement ce que font déjà les
+  gates), puis mettre en cache. **Aucune base de données ni jaquette externe nécessaire.**
+- Synergie : la fiche peut afficher le **profil technique automatique** du jeu (modes BG utilisés,
+  HDMA, color math, Mode 7, pic de sprites…) — voir l'idée du même nom dans `IDEAS.md`. C'est le
+  genre de détail qui distingue vraiment l'application.
+
+**Panneaux de réglages** — remplacer les réglages éparpillés dans le menu natif par un vrai panneau :
+affichage (zoom/filtre/ratio), audio (volume/muet), entrées (**remapping** clavier+manette),
+répertoires, mode enfant, triches.
+
+**Identité visuelle** — reprendre celle de *Prisme* : fond sombre, accents aux quatre couleurs du
+prisme (rouge/jaune/vert/bleu), typographie sobre. Cohérent avec l'icône et le PDF pédagogique.
+
+**Décision d'architecture (le vrai sujet de cette phase) :** tout ceci demande une **interface
+graphique** que le frontend actuel (framebuffer brut + menu natif macOS) ne sait pas faire.
+Recommandation : intégrer **`egui`** (s'intègre nativement à winit/wgpu, donc à `pixels`), en mode
+immédiat — rapide à écrire, thémable, et qui cohabite avec le rendu du jeu.
+C'est **l'investissement qui débloque d'un coup** : la bibliothèque, les panneaux de réglages, le
+remapping (Phase 3), le gestionnaire de triches (Phase 9) et les réglages du mode enfant (Phase 6),
+tous aujourd'hui bridés par l'absence d'UI. À faire tôt plutôt que tard, pour ne pas bâtir cinq
+demi-solutions dans le menu natif.
+
+---
+
+## Phase 9 — Triches assistées par l'IA **[M]** *(idée retenue — dépend de la Phase 10)*
+
+**Pas de codes Game Genie** (ni saisie, ni décodage, ni base de codes) : c'est **l'IA qui trouve et
+applique** la triche, en langage naturel.
+
+- **Usage visé :** l'utilisateur demande « donne-moi des vies infinies » ou « remets mon énergie au
+  maximum ». L'agent s'en charge.
+- **Méthode de l'agent** (via le canal de contrôle de la Phase 10, qui donne accès à la mémoire et
+  aux snapshots) : recherche par **intersections successives** — prendre un instantané, laisser
+  l'événement se produire (perdre une vie), reprendre un instantané, ne garder que les adresses dont
+  la valeur a évolué comme attendu ; répéter 3–5 fois jusqu'à isoler l'adresse. L'agent pilote
+  lui-même ces itérations au lieu de faire cliquer l'utilisateur.
+- **Application :** figer la valeur (écriture continue) ou la fixer une fois, avec possibilité
+  d'annuler. Mémoriser les triches trouvées **par jeu** (dans les préférences) pour les réactiver
+  sans refaire la recherche.
+- **Faisable parce que** les snapshots complets sont rapides, toute la WRAM est accessible, et
+  l'émulation est déterministe (on peut rejouer le même événement à l'identique).
+- L'UI de la Phase 8 sert à présenter les triches trouvées et à les (dés)activer.
+
+---
+
+## Phase 10 — Mode « IA » : faire jouer un agent **[M]** *(idée retenue)*
+
+Permettre à une instance **Claude Code locale de jouer à la place de l'utilisateur** sur certains
+passages (un boss trop dur, un niveau bloquant, une phase de grind — ou simplement une démo).
+
+- **Ce qui existe déjà et rend ça faisable** : le cœur est déterministe, headless, piloté par script
+  d'entrées, et sait exporter une image (`--dump-frame`) et l'état mémoire (`--dump-state`).
+- **À construire : un canal de contrôle** — un mode `--agent` exposant un protocole simple en
+  JSON par ligne (stdin/stdout ou socket local) :
+  `step N` (avancer N frames), `press <bouton> <durée>`, `screenshot` (renvoie un PNG),
+  `read-mem <adr> <len>`, `save-state` / `load-state`. L'agent boucle alors :
+  **observer l'image → décider → envoyer des entrées**.
+- **Intégration côté app** : une entrée de menu « Laisser l'IA jouer » qui met la partie en pause,
+  lance l'agent sur l'état courant, puis rend la main (avec un save state avant/après pour pouvoir
+  annuler). Très complémentaire du **mode enfant** (Phase 6) : franchir un passage bloquant sans
+  frustration.
+- **Bénéfice secondaire** : le même canal fait de l'émulateur un banc d'essai pour l'IA de jeu
+  (l'idée « environnement type Gym » du backlog), et un outil de test automatisé pour l'émulateur
+  lui-même.
+- Points d'attention : bien délimiter ce que l'agent voit (image seule ? mémoire aussi ?), garder
+  l'utilisateur maître (arrêt à tout moment), et rester honnête sur les performances (un agent qui
+  observe image par image est lent — viser des séquences courtes et ciblées).
+
+---
+
 ## Hors périmètre immédiat (à replanifier plus tard)
 
-- **Codes de triche** (Game Genie / Pro Action Replay) — décodage des codes + patch mémoire/ROM. **M**
 - **Périphériques exotiques** : multitap (4 joueurs), SNES Mouse, Super Scope. **M/L chacun**
 - **Exactitude restante** (cf. `PUNCHLIST.md`) : hang de l'intro attract de Super Mario World,
   gate Mode 7 « pur » sur écran réel, validation des chemins profonds des coprocesseurs. **L**
@@ -161,16 +252,28 @@ Pistes de noms (à trancher) : **Chrono16**, **Aurora16**, **Kestrel**, **Nova16
 
 ## Ordre recommandé
 
+*(Les numéros sont des étiquettes, pas un ordre : l'arbre ci-dessous fait foi.)*
+
 ```
-Phase 0 (socle prefs)
-   └─ Phase 1 (version, muet/volume, screenshots, slots, fast-forward)   ← meilleur rapport valeur/effort
+Phase 7 (nom + logo)                                          ✅ FAIT — « Prisme »
+Phase 0 (socle prefs JSON)                                    ← débloque 7 autres items
+   └─ Phase 1 (version, muet, captures, slots, Échap, turbo,
+               reprise instantanée, export SPC)                ← meilleur rapport valeur/effort
+        ├─ Phase 8 (REFONTE UI : accueil, bibliothèque,        ← phase phare ; à faire TÔT,
+        │           favoris, fiches, panneaux de réglages)        elle conditionne 3 et 6
+        │      ├─ Phase 3 (manette + remapping)                ← plus gros gain d'usage
+        │      └─ Phase 6 (mode enfant)
         ├─ Phase 2 (zoom + filtres + ratio)
-        ├─ Phase 3 (manette + remapping)                                  ← plus gros gain d'usage
-        └─ Phase 4 (répertoires)
-             ├─ Phase 5 (rewind)
-             ├─ Phase 6 (mode enfant)
-             └─ Phase 7 (nom + logo)
+        ├─ Phase 4 (répertoires)
+        │      └─ Phase 5 (rewind)
+        └─ Phase 10 (canal agent : l'IA joue)                  ← socle technique de la triche
+               └─ Phase 9 (triches assistées par l'IA)         (UI de la Phase 8 pour l'affichage)
 ```
+
+**Pourquoi la Phase 8 remonte si haut :** le remapping (3), les réglages du mode enfant (6) et
+l'affichage des triches (9) ont tous besoin d'une vraie UI. Les faire avant la refonte reviendrait à
+bricoler des demi-solutions dans le menu natif, puis à les refaire. La séquence économe est donc :
+socle de préférences → quick wins → **UI** → tout ce qui en dépend.
 
 ## Décisions attendues avant de lancer
 
@@ -178,4 +281,4 @@ Phase 0 (socle prefs)
 2. **Filtre par défaut** : Aucun/net.
 3. **Audio en accéléré** : coupé
 4. **Rewind** : budget mémoire acceptable (~30–45 Mo compressé pour 30 s).
-5. **Nom du projet** : Trouve autre chose
+5. **Nom du projet** : **Prisme** ✅ (renommage appliqué : bundle, identifiant, binaire, icône, docs)
