@@ -5,6 +5,9 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # A release drafted/published from the GitHub UI also gets its binaries.
+  release:
+    types: [published]
   workflow_dispatch:
 
 env:
@@ -87,10 +90,14 @@ jobs:
         with:
           merge-multiple: true
 
-      - name: Create the GitHub release
+      - name: Checksums
+        run: shasum -a 256 *.zip | tee SHA256SUMS.txt
+
+      - name: Attach the binaries to the release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          # On a release event the tag lives in the payload; on a tag push it is the ref.
+          TAG: ${{ github.event.release.tag_name || github.ref_name }}
         run: |
           set -euo pipefail
           cat > notes.md <<'EOF'
@@ -113,9 +120,15 @@ jobs:
 
           **ROMs are not included** — supply your own dumps of games you own.
           EOF
-          gh release create "$TAG" \
-            --repo "${{ github.repository }}" \
-            --title "Prisme - SuperNes $TAG" \
-            --notes-file notes.md \
-            Prisme-macos-universal.zip \
-            Prisme-windows-x64.zip
+          ASSETS=(Prisme-macos-universal.zip Prisme-windows-x64.zip SHA256SUMS.txt)
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            # Release already exists (drafted in the UI): just attach/replace assets.
+            gh release upload "$TAG" "${ASSETS[@]}" \
+              --repo "${{ github.repository }}" --clobber
+          else
+            gh release create "$TAG" \
+              --repo "${{ github.repository }}" \
+              --title "Prisme - SuperNes $TAG" \
+              --notes-file notes.md \
+              "${ASSETS[@]}"
+          fi
