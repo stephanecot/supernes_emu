@@ -110,14 +110,21 @@ pub struct Prefs {
     pub volume: u8,
     /// On-screen FPS overlay (`F` hotkey / `View > Show FPS`).
     pub show_fps: bool,
-    /// Integer window-size shortcut, 1..=8 (`F1`-`F4`/`Affichage > Zoom` only
-    /// ever set 1..=4; a hand-edited file can go higher, clamped by
-    /// `sanitize`). This picks the *starting* window size
-    /// (`render::zoomed_dims`, clamped to fit the monitor) — the window is
-    /// then freely resizable by dragging, independent of this value (see
-    /// `App::apply_resize`/`render::letterbox`); resizing by hand does not
-    /// write a new `zoom` back.
-    pub zoom: u8,
+    /// Integer window-size step the player picked, 1..=8, or `None` while they
+    /// never picked one — in which case the starting size is resolved from the
+    /// monitor at launch (`render::default_zoom`) instead of from a constant.
+    /// This picks the *starting* window size (`render::zoomed_dims`, clamped to
+    /// fit the monitor) — the window is then freely resizable by dragging,
+    /// independent of this value (see `App::apply_resize`/`render::letterbox`);
+    /// resizing by hand does not write a new `zoom` back.
+    pub zoom: Option<u8>,
+    /// Whether `zoom` was picked on the *current* ladder, whose first usable
+    /// step is 512x448 and whose native 256x224 entry sits last. Absent from a
+    /// file written before the ladder was shifted, which is precisely what
+    /// tells an inherited `zoom: 1` — the head and the default of the old
+    /// ladder, i.e. the postage-stamp window — from a deliberate
+    /// `Taille native`. See `sanitize`.
+    pub zoom_chosen: bool,
     /// Display filter name: `none` (sharp nearest-neighbour, the default),
     /// `smooth` (bilinear), `crt` (bilinear + darkened alternating source
     /// scanlines). Unknown names are preserved as written so a file from a
@@ -223,7 +230,8 @@ impl Default for Prefs {
             mute: false,
             volume: 100,
             show_fps: false,
-            zoom: crate::video::WINDOW_SCALE as u8,
+            zoom: None,
+            zoom_chosen: false,
             filter: "none".to_string(),
             aspect: "pixel-perfect".to_string(),
             save_dir: None,
@@ -358,9 +366,23 @@ impl Prefs {
     /// Clamp values a hand-edited file could put out of range. Free-form
     /// strings (`filter`, `aspect`) are left alone: an unknown name is the
     /// caller's business and must survive a round trip.
+    ///
+    /// `zoom` also carries a migration. A file written before the window-size
+    /// ladder was shifted holds a bare number and no `zoom_chosen`; `1` there
+    /// is the head *and* the default of that old ladder, so it says "nothing
+    /// was ever chosen" rather than "give me 256x224", and re-applying it would
+    /// reopen the postage-stamp window that made the ladder be shifted in the
+    /// first place. It is dropped back to `None`, which resolves to
+    /// `render::default_zoom`. Anything above it was a size the player could
+    /// only get by asking for it, so it is kept.
     fn sanitize(&mut self) {
         self.volume = self.volume.min(100);
-        self.zoom = self.zoom.clamp(1, 8);
+        self.zoom = match self.zoom {
+            Some(zoom) if self.zoom_chosen => Some(zoom.clamp(1, 8)),
+            Some(zoom) if zoom > 1 => Some(zoom.min(8)),
+            _ => None,
+        };
+        self.zoom_chosen = self.zoom.is_some();
         self.fast_forward_factor = self.fast_forward_factor.clamp(2, 4);
         self.save_slot = self.save_slot.min(9);
     }
@@ -419,7 +441,10 @@ mod tests {
         assert!(!p.mute);
         assert_eq!(p.volume, 100);
         assert!(!p.show_fps);
-        assert_eq!(p.zoom, crate::video::WINDOW_SCALE as u8);
+        // No window size until the player picks one: it is resolved from the
+        // monitor at launch (`render::default_zoom`), not from a constant.
+        assert_eq!(p.zoom, None);
+        assert!(!p.zoom_chosen);
         assert_eq!(p.filter, "none");
         assert_eq!(p.aspect, "pixel-perfect");
         assert_eq!(p.save_dir, None);
@@ -510,7 +535,8 @@ mod tests {
         p.mute = true;
         p.volume = 42;
         p.show_fps = true;
-        p.zoom = 4;
+        p.zoom = Some(4);
+        p.zoom_chosen = true;
         p.filter = "crt".to_string();
         p.aspect = "tv".to_string();
         p.save_dir = Some(PathBuf::from("/tmp/saves"));
@@ -689,9 +715,14 @@ mod tests {
         )
         .expect("parse");
         assert_eq!(p.volume, 100);
-        assert_eq!(p.zoom, 1);
+        // A zoom of 0 is no size at all: back to "never chosen".
+        assert_eq!(p.zoom, None);
         assert_eq!(p.fast_forward_factor, 2);
         assert_eq!(p.save_slot, 9);
+        // …and one above the ladder is kept as written, since the window is
+        // freely resizable anyway.
+        let p = Prefs::from_json("{\"zoom\": 12, \"zoom_chosen\": true}").expect("parse");
+        assert_eq!(p.zoom, Some(8));
 
         // A file written by an older build (fast_forward_factor allowed up to
         // 8, and the macOS menu only ever offered 2/3/4 — review point G) is
@@ -699,6 +730,52 @@ mod tests {
         // value the menu's radio group can't represent.
         let p = Prefs::from_json("{\"fast_forward_factor\": 8}").expect("parse");
         assert_eq!(p.fast_forward_factor, 4);
+    }
+
+    /// The migration the shifted ladder needs. A `zoom` written before it was
+    /// shifted carries no `zoom_chosen`, and `1` there is the head *and* the
+    /// default of the old ladder — the postage-stamp window the player
+    /// complained about. It must be read as "never chosen" so the adaptive
+    /// default applies; a deliberate `Taille native` picked on the current
+    /// ladder carries the flag and must survive untouched.
+    #[test]
+    fn an_inherited_native_zoom_is_read_as_never_chosen() {
+        // The file the person who reported the problem actually has.
+        let p = Prefs::from_json("{\"zoom\": 1}").expect("parse");
+        assert_eq!(p.zoom, None, "an inherited zoom of 1 must not size the window");
+        assert!(!p.zoom_chosen);
+
+        // The same value, deliberately picked on the current ladder.
+        let p = Prefs::from_json("{\"zoom\": 1, \"zoom_chosen\": true}").expect("parse");
+        assert_eq!(p.zoom, Some(1), "a chosen native size must be honoured");
+        assert!(p.zoom_chosen);
+
+        // A legacy file naming a size only a click could produce is kept: the
+        // migration is about the unusable step, not about every old value.
+        for zoom in [2u8, 3, 4] {
+            let p = Prefs::from_json(&format!("{{\"zoom\": {zoom}}}")).expect("parse");
+            assert_eq!(p.zoom, Some(zoom), "a legacy zoom of {zoom} is usable");
+            assert!(p.zoom_chosen);
+        }
+
+        // A file that never mentioned the field at all, and one written by this
+        // build before any choice was made.
+        for json in ["{}", "{\"zoom\": null}", "{\"zoom_chosen\": true}"] {
+            let p = Prefs::from_json(json).expect("parse");
+            assert_eq!(p.zoom, None, "{json}");
+            assert!(!p.zoom_chosen, "{json}");
+        }
+
+        // Every step of the ladder round-trips once it has been chosen.
+        for &(zoom, _) in crate::ui::settings::ZOOM_CHOICES {
+            let mut p = Prefs::default();
+            p.zoom = Some(zoom);
+            p.zoom_chosen = true;
+            let back = Prefs::from_json(&serde_json::to_string(&p).expect("serialize"))
+                .expect("parse");
+            assert_eq!(back.zoom, Some(zoom));
+            assert!(back.zoom_chosen);
+        }
     }
 
     #[test]

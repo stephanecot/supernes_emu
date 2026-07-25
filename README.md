@@ -83,7 +83,10 @@ save-state slot, `0`-`9` jump straight to that slot, `F6` reset (power-on
 reset, keeps battery SRAM), `F8` export the current music as `.spc`, `F10`
 toggle instant-resume-on-launch, `[`/`]` step the fast-forward factor (2/3/4×,
 held with `Tab`), `F` toggle the FPS overlay, `M` mute, `+`/`-` volume, `F12`
-screenshot, `F1`-`F4` set the window zoom to ×1-×4, `V` cycle the display
+screenshot, `F1`-`F4` set the window size (512×448, 768×672, 1024×896,
+1280×1120; the native 256×224 is offered in the settings screen only, and the
+size a fresh install opens at is the largest of these that fits the monitor),
+`V` cycle the display
 filter (Aucun/Lissé/CRT), `R` toggle the pixel-aspect-ratio mode
 (pixel-perfect/TV authentique), `F11` toggle fullscreen (also Ctrl+Cmd+F on
 macOS, that platform's own convention), `C` toggle the quit confirmation,
@@ -159,7 +162,7 @@ exist:
 | Audio | Muet | Cmd+M | `M` |
 | Audio | Volume +/− | Cmd+=/Cmd+- | `+`/`-` |
 | Affichage | Show FPS | Cmd+F | `F` |
-| Affichage | Zoom > ×N | — | `F1`-`F4` |
+| Affichage | Taille de la fenêtre | — | `F1`-`F4` |
 | Affichage | Filtre > Aucun/Lissé/CRT | — | `V` (cycles) |
 | Affichage | Ratio > Pixel-parfait/TV authentique | — | `R` (toggles) |
 | Affichage | Plein écran | Ctrl+Cmd+F | `F11` |

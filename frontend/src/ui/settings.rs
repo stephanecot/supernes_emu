@@ -38,10 +38,27 @@ use super::tabs::{self, Tab};
 use super::theme;
 use super::{Action, Setting};
 
-/// Window-size shortcuts offered by the display section, with their label.
-/// The window itself stays freely resizable — these only set a size (see
-/// `render::zoomed_dims`), which is why the section says so.
-pub const ZOOM_CHOICES: &[(u8, &str)] = &[(1, "×1"), (2, "×2"), (3, "×3"), (4, "×4")];
+/// Window sizes offered by the display section, labelled by the picture they
+/// actually produce rather than by a multiplier: a factor only means something
+/// next to the base it multiplies, and that base — 256x224 — is exactly what
+/// made the first step of the previous ladder a postage stamp nobody could use.
+///
+/// The native size is still reachable and comes **last**, named for what it is:
+/// an expert entry, no longer the head of the list nor the default (which is
+/// resolved from the monitor, see `render::default_zoom`). The window itself
+/// stays freely resizable — these only set a size (see `render::zoomed_dims`).
+pub const ZOOM_CHOICES: &[(u8, &str)] = &[
+    (2, "512 × 448"),
+    (3, "768 × 672"),
+    (4, "1024 × 896"),
+    (5, "1280 × 1120"),
+    (1, "Taille native (256 × 224)"),
+];
+
+/// Sizes `F1`-`F4` set, in that order: the four usable steps of the ladder.
+/// The native size deliberately has no hotkey — a key that shrinks the window
+/// to a postage stamp is one nobody means to press.
+pub const ZOOM_HOTKEYS: [u8; 4] = [2, 3, 4, 5];
 
 /// Display filters, in `render::Filter::next`'s cycle order (the `V` hotkey).
 pub const FILTER_CHOICES: &[(Filter, &str)] =
@@ -64,13 +81,21 @@ const NAV_GAP: f32 = 24.0;
 /// hint line that long cannot be scanned: the controls stay inside this reading
 /// column, left-aligned, and the space beyond it is left free (it is where the
 /// `Entrées` section draws the controller).
-const READING_W: f32 = 720.0;
+const READING_W: f32 = 800.0;
+/// Corner radius of the section rail's own surface, and how far above the
+/// first entry that surface starts — the rail is a band of the screen's
+/// furniture, like the footer, not a list floating on the page.
+const RAIL_RADIUS: f32 = 8.0;
+const RAIL_PAD_Y: f32 = 8.0;
 /// Height of one entry of the section list.
 const NAV_ITEM_H: f32 = 32.0;
 /// Left padding of an entry's label, and the width of the accent bar marking
 /// the selected one.
 const NAV_PAD_X: f32 = 12.0;
 const NAV_BAR_W: f32 = 3.0;
+/// How far an entry's band is inset from the rail's own edges, so the selected
+/// one reads as a piece laid *on* the rail rather than as a slice of it.
+const NAV_INSET: f32 = 6.0;
 /// Width reserved for a setting's label, so the controls of a section line up.
 const LABEL_W: f32 = 190.0;
 /// Width of the button-name column of the bindings list (`Entrées`).
@@ -216,6 +241,10 @@ pub struct SettingsModel<'a> {
     pub prefs: &'a Prefs,
     /// Live window state, not a preference.
     pub fullscreen: bool,
+    /// Window size step in force. Live state too: while the player has picked
+    /// none, it is resolved from the monitor at launch rather than read from
+    /// `prefs` (see `video::App::zoom`).
+    pub zoom: u8,
     /// Folder the library actually scans, already resolved through its
     /// fallbacks (`library::library_dir`).
     pub library_dir: &'a Path,
@@ -341,6 +370,15 @@ fn body(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
     let (nav_w, content_w, reading_w) = layout_dims(ui.available_width());
     let height = ui.available_height();
     ui.horizontal_top(|ui| {
+        // The gap is claimed here rather than by a separator between the two
+        // columns: the rail has a surface of its own, and a hairline floating
+        // in the middle of the gap would draw a second, misplaced edge.
+        ui.spacing_mut().item_spacing.x = NAV_GAP;
+        let rail = Rect::from_min_size(
+            egui::pos2(ui.cursor().left(), ui.cursor().top() - RAIL_PAD_Y),
+            Vec2::new(nav_w, height + RAIL_PAD_Y),
+        );
+        ui.painter().rect_filled(rail, RAIL_RADIUS, theme::BG_DEEP);
         ui.allocate_ui_with_layout(Vec2::new(nav_w, height), Layout::top_down(Align::Min), |ui| {
             ui.set_min_width(nav_w);
             for section in Section::ALL {
@@ -353,7 +391,6 @@ fn body(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
                 }
             }
         });
-        ui.separator();
         ui.allocate_ui_with_layout(
             Vec2::new(content_w, height),
             Layout::top_down(Align::Min),
@@ -402,18 +439,19 @@ fn nav_item(ui: &mut egui::Ui, section: Section, selected: bool) -> egui::Respon
         response.hovered() || response.has_focus(),
         tabs::TRANSITION,
     );
+    let band = rect.shrink2(Vec2::new(NAV_INSET, 0.0));
     if selected {
-        ui.painter().rect_filled(rect, 6.0, theme::BG_WIDGET);
+        ui.painter().rect_filled(band, 6.0, theme::BG_WIDGET);
         ui.painter().rect_filled(
             Rect::from_min_size(
-                egui::pos2(rect.left(), rect.center().y - NAV_ITEM_H / 4.0),
+                egui::pos2(band.left(), band.center().y - NAV_ITEM_H / 4.0),
                 Vec2::new(NAV_BAR_W, NAV_ITEM_H / 2.0),
             ),
             1.0,
             theme::ACCENT,
         );
     } else if lit > 0.0 {
-        ui.painter().rect_filled(rect, 6.0, theme::BG_WIDGET.gamma_multiply(lit));
+        ui.painter().rect_filled(band, 6.0, theme::BG_WIDGET.gamma_multiply(lit));
     }
     let font =
         if selected { theme::strong(theme::SIZE_BODY) } else { theme::font(theme::SIZE_BODY) };
@@ -423,10 +461,10 @@ fn nav_item(ui: &mut egui::Ui, section: Section, selected: bool) -> egui::Respon
         section.label().to_owned(),
         font,
         colour,
-        (rect.width() - 2.0 * NAV_PAD_X).max(1.0),
+        (band.width() - 2.0 * NAV_PAD_X).max(1.0),
     );
     ui.painter().galley(
-        egui::pos2(rect.left() + NAV_PAD_X, rect.center().y - galley.size().y / 2.0),
+        egui::pos2(band.left() + NAV_PAD_X, band.center().y - galley.size().y / 2.0),
         galley,
         colour,
     );
@@ -434,7 +472,7 @@ fn nav_item(ui: &mut egui::Ui, section: Section, selected: bool) -> egui::Respon
         // Keyboard focus must be visible on its own, not only through the
         // colour change a pointer also produces.
         ui.painter().rect_stroke(
-            rect.shrink(1.0),
+            band.shrink(1.0),
             6.0,
             egui::Stroke::new(1.0, theme::ACCENT),
             egui::StrokeKind::Inside,
@@ -449,12 +487,15 @@ fn display_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
 
     row(ui, "Taille de la fenêtre", |ui| {
         for &(zoom, label) in ZOOM_CHOICES {
-            if ui.selectable_label(prefs.zoom == zoom, label).clicked() {
+            if ui.selectable_label(model.zoom == zoom, label).clicked() {
                 action = Action::Set(Setting::Zoom(zoom));
             }
         }
     });
-    hint(ui, "La fenêtre reste librement redimensionnable ; ces paliers fixent une taille (F1-F4).");
+    hint(
+        ui,
+        "La fenêtre reste librement redimensionnable ; ces paliers fixent une taille (F1-F4). Sans choix, elle s'ouvre à la plus grande taille confortable sur cet écran.",
+    );
 
     let filter = Filter::from_pref(&prefs.filter);
     row(ui, "Filtre", |ui| {
@@ -990,9 +1031,43 @@ mod tests {
         assert_eq!(Section::default(), Section::Display);
     }
 
+    /// The ladder no longer starts at the native picture and no longer speaks
+    /// in multipliers: every step is named by the window it produces, the
+    /// unusable one comes last, and the label has to be the size the renderer
+    /// would actually ask for — a label that drifts from `zoomed_dims` is a
+    /// promise the window does not keep.
+    #[test]
+    fn the_window_sizes_are_labelled_in_pixels_with_the_native_one_last() {
+        assert_eq!(
+            ZOOM_CHOICES.iter().map(|&(z, _)| z).collect::<Vec<_>>(),
+            vec![2, 3, 4, 5, 1],
+            "the ladder must not start at 256x224, and must end there"
+        );
+        let steps: Vec<u8> = ZOOM_CHOICES[..ZOOM_CHOICES.len() - 1].iter().map(|&(z, _)| z).collect();
+        for &(zoom, label) in ZOOM_CHOICES {
+            let (w, h) = crate::render::zoomed_dims(zoom, Aspect::PixelPerfect);
+            assert!(label.contains(&w.to_string()), "{label} does not name its width {w}");
+            assert!(label.contains(&h.to_string()), "{label} does not name its height {h}");
+            assert!(!label.starts_with('×'), "{label} still reads as a multiplier");
+        }
+        assert!(ZOOM_CHOICES.last().unwrap().1.starts_with("Taille native"));
+        // F1-F4 land on the four usable steps, in the ladder's own order —
+        // never on the native one.
+        assert_eq!(ZOOM_HOTKEYS.to_vec(), steps);
+        assert!(!ZOOM_HOTKEYS.contains(&1));
+        // The adaptive default is always one of the steps the panel offers, so
+        // a window nobody sized still shows a selected entry.
+        for height in [0u32, 400, 600, 768, 900, 1080, 1440, 2160, 4320] {
+            let zoom = crate::render::default_zoom(height);
+            assert!(zoom > 1, "{height}: the default must never be the native size");
+            assert!(steps.contains(&zoom), "{height}: {zoom} is not on the ladder");
+        }
+    }
+
     #[test]
     fn the_display_choices_match_what_the_renderer_and_the_hotkeys_offer() {
-        assert_eq!(ZOOM_CHOICES.iter().map(|&(z, _)| z).collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+        // The steps here must be the ones `set_zoom` can reach.
+        assert!(ZOOM_CHOICES.iter().all(|&(z, _)| z <= crate::render::MAX_ZOOM));
         // Same order as the `V` hotkey's cycle (`Filter::next`).
         let filters: Vec<Filter> = FILTER_CHOICES.iter().map(|&(f, _)| f).collect();
         assert_eq!(filters, vec![Filter::None, Filter::Smooth, Filter::Crt]);
@@ -1103,6 +1178,7 @@ mod tests {
                         version: "0.0.0",
                         prefs,
                         fullscreen: false,
+                        zoom: crate::render::FALLBACK_ZOOM,
                         library_dir: Path::new("roms"),
                         config_dir: Some(Path::new("/config/Prisme")),
                         state,
@@ -1218,7 +1294,17 @@ mod tests {
     fn every_section_paints_the_settings_it_owns() {
         let prefs = Prefs::default();
         let expected: [(Section, &[&str]); 6] = [
-            (Section::Display, &["Taille de la fenêtre", "Filtre", "Ratio", "Plein écran", "×3"]),
+            (
+                Section::Display,
+                &[
+                    "Taille de la fenêtre",
+                    "Filtre",
+                    "Ratio",
+                    "Plein écran",
+                    "768 × 672",
+                    "Taille native (256 × 224)",
+                ],
+            ),
             (Section::Audio, &["Muet", "Volume"]),
             (
                 Section::Inputs,
@@ -1349,8 +1435,8 @@ mod tests {
     #[test]
     fn every_offered_choice_round_trips_through_the_preferences_file() {
         for &(zoom, _) in ZOOM_CHOICES {
-            let json = format!("{{\"zoom\": {zoom}}}");
-            assert_eq!(Prefs::from_json(&json).expect("parse").zoom, zoom);
+            let json = format!("{{\"zoom\": {zoom}, \"zoom_chosen\": true}}");
+            assert_eq!(Prefs::from_json(&json).expect("parse").zoom, Some(zoom));
         }
         for &(filter, _) in FILTER_CHOICES {
             let json = format!("{{\"filter\": {:?}}}", filter.as_pref());
@@ -1441,6 +1527,7 @@ mod tests {
                         version: "0.0.0",
                         prefs: &prefs,
                         fullscreen: false,
+                        zoom: crate::render::FALLBACK_ZOOM,
                         library_dir: Path::new("roms"),
                         config_dir: None,
                         state: &mut state,
@@ -1509,6 +1596,7 @@ mod tests {
                         version: "0.0.0",
                         prefs: &prefs,
                         fullscreen: true,
+                        zoom: crate::render::FALLBACK_ZOOM,
                         library_dir: Path::new("roms"),
                         config_dir: None,
                         state: &mut state,

@@ -44,14 +44,6 @@ use crate::ui::{
 };
 use crate::{APP_NAME, VERSION};
 
-/// Integer upscale factor for the 256x224 native framebuffer, and the
-/// `zoom` preference's default value (see `prefs::Prefs::default`). The
-/// window's *actual* size at any given moment is computed from
-/// `prefs.zoom`/`prefs.aspect` (see `render::zoomed_dims`), clamped to fit
-/// the screen (`render::clamp_to_available`) — this constant only fixes what
-/// a fresh preferences file starts at.
-pub const WINDOW_SCALE: u32 = 3;
-
 /// Shrinks the target window size requested from the primary/current monitor
 /// so it never asks for the literal full screen — leaves headroom for the
 /// menu bar, Dock and window chrome the OS reserves around it.
@@ -207,6 +199,9 @@ pub fn run(launch: Option<Launch>, prefs: Prefs) -> Result<(), String> {
     // Audio is best-effort: a missing device must never fail the emulator.
     let audio = AudioOutput::new();
 
+    // Provisional until `resumed` knows the monitor: nothing is drawn or sized
+    // before that.
+    let zoom = prefs.zoom.unwrap_or(render::FALLBACK_ZOOM);
     let mut app = App {
         title,
         snes,
@@ -231,6 +226,7 @@ pub fn run(launch: Option<Launch>, prefs: Prefs) -> Result<(), String> {
         fps_counter: FpsCounter::new(),
         status: None,
         prefs,
+        zoom,
         state: app_state,
         ui: None,
         settings: SettingsUi::default(),
@@ -364,6 +360,13 @@ struct App {
     /// `confirm_on_quit`). Every change is written back immediately so a crash
     /// cannot lose it.
     prefs: Prefs,
+    /// Window-size step in force: `prefs.zoom` when the player picked one,
+    /// otherwise the one resolved from the monitor in `resumed`
+    /// (`render::default_zoom`). Live state rather than a mirror of the
+    /// preference, for the same reason fullscreen is: a size nobody chose must
+    /// keep following the screen the application is opened on instead of being
+    /// frozen into a file that travels between machines.
+    zoom: u8,
     /// Which screen owns the window (`Accueil` / `Jeu`) and the pause flag the
     /// game screen must be restored to. See `ui::app_state`.
     state: AppState,
@@ -457,11 +460,19 @@ impl ApplicationHandler for App {
             return; // Already initialized; e.g. a redundant resume on some platforms.
         }
         let aspect = Aspect::from_pref(&self.prefs.aspect);
-        let target = render::zoomed_dims(self.prefs.zoom, aspect);
+        let max = event_loop.primary_monitor().map(|m| logical_monitor_size(&m));
+        // A size nobody ever picked is resolved here, where the monitor is
+        // finally known, and deliberately *not* written back: it must keep
+        // following the screen rather than freeze the first one it saw.
+        self.zoom = match (self.prefs.zoom, max) {
+            (Some(zoom), _) => zoom,
+            (None, Some((_, height))) => render::default_zoom(height),
+            (None, None) => render::FALLBACK_ZOOM,
+        };
+        let target = render::zoomed_dims(self.zoom, aspect);
         // Bound the initial window to the primary monitor so a large restored
         // `zoom` (or a screen smaller than the one the preference was saved
         // on) can never request an unusable, off-screen-sized window.
-        let max = event_loop.primary_monitor().map(|m| logical_monitor_size(&m));
         let (w, h) = match max {
             Some(max) => render::clamp_to_available(target, max),
             None => target,
@@ -763,9 +774,10 @@ impl App {
         // screen: its widgets take the keys (egui already saw the event) and
         // the emulated pad must not move behind a modal. Escape is the way out.
         //
-        // The window keys are the exception: at ×1/×2 the panel is wider than
-        // the window and its own size buttons can be off screen, so F1-F4 and
-        // F11 must stay live or the panel would have no way out but Escape.
+        // The window keys are the exception: at the native size the panel is
+        // wider than the window and its own size buttons can be off screen, so
+        // F1-F4 and F11 must stay live or the panel would have no way out but
+        // Escape.
         if self.settings.open {
             // A pending capture takes the keyboard before *everything* else,
             // application shortcuts included: F11 pressed here must be
@@ -781,10 +793,10 @@ impl App {
             if pressed && !repeat {
                 match code {
                     KeyCode::Escape => self.handle_escape(event_loop),
-                    KeyCode::F1 => self.set_zoom(1),
-                    KeyCode::F2 => self.set_zoom(2),
-                    KeyCode::F3 => self.set_zoom(3),
-                    KeyCode::F4 => self.set_zoom(4),
+                    KeyCode::F1 => self.set_zoom(ui::settings::ZOOM_HOTKEYS[0]),
+                    KeyCode::F2 => self.set_zoom(ui::settings::ZOOM_HOTKEYS[1]),
+                    KeyCode::F3 => self.set_zoom(ui::settings::ZOOM_HOTKEYS[2]),
+                    KeyCode::F4 => self.set_zoom(ui::settings::ZOOM_HOTKEYS[3]),
                     KeyCode::F11 => self.set_fullscreen(!self.is_fullscreen()),
                     _ => {}
                 }
@@ -852,22 +864,23 @@ impl App {
                     return;
                 }
                 // `Réglages > Affichage > Taille de la fenêtre`: set the
-                // window zoom directly, F1-F4 for x1-x4 — chosen over Ctrl+/-
-                // so it doesn't collide with the existing volume hotkeys.
+                // window size directly, F1-F4 for the four usable steps of the
+                // ladder (native is not one of them) — chosen over Ctrl+/- so
+                // it doesn't collide with the existing volume hotkeys.
                 KeyCode::F1 => {
-                    self.set_zoom(1);
+                    self.set_zoom(ui::settings::ZOOM_HOTKEYS[0]);
                     return;
                 }
                 KeyCode::F2 => {
-                    self.set_zoom(2);
+                    self.set_zoom(ui::settings::ZOOM_HOTKEYS[1]);
                     return;
                 }
                 KeyCode::F3 => {
-                    self.set_zoom(3);
+                    self.set_zoom(ui::settings::ZOOM_HOTKEYS[2]);
                     return;
                 }
                 KeyCode::F4 => {
-                    self.set_zoom(4);
+                    self.set_zoom(ui::settings::ZOOM_HOTKEYS[3]);
                     return;
                 }
                 KeyCode::F5 => {
@@ -1596,6 +1609,7 @@ impl App {
         let settings_open = self.settings.open;
         let quit_confirm = self.quit_confirm;
         let fullscreen = self.is_fullscreen();
+        let zoom = self.zoom;
         let (rom_dir, config_dir) = if settings_open {
             (library::library_dir(&self.prefs), crate::prefs::config_dir())
         } else {
@@ -1617,6 +1631,7 @@ impl App {
                         version: VERSION,
                         prefs,
                         fullscreen,
+                        zoom,
                         library_dir: &rom_dir,
                         config_dir: config_dir.as_deref(),
                         state: settings,
@@ -2262,15 +2277,17 @@ impl App {
 
     /// F1-F4 hotkeys / `Réglages > Affichage > Taille de la fenêtre`: sets the
     /// window's integer upscale factor and resizes the window to match.
-    /// Clamped to 1..=4 (the range the panel/hotkeys offer; `Prefs::sanitize`
-    /// separately allows up to 8 for a hand-edited file, which this cannot
-    /// reach through the UI).
+    /// Writing `zoom_chosen` alongside it is what keeps a deliberate
+    /// `Taille native` from being read back as the `zoom: 1` an older build
+    /// left behind (see `Prefs::sanitize`).
     fn set_zoom(&mut self, zoom: u8) {
-        let zoom = zoom.clamp(1, 4);
-        if self.prefs.zoom == zoom {
+        let zoom = zoom.clamp(1, render::MAX_ZOOM);
+        if self.zoom == zoom && self.prefs.zoom == Some(zoom) {
             return;
         }
-        self.prefs.zoom = zoom;
+        self.zoom = zoom;
+        self.prefs.zoom = Some(zoom);
+        self.prefs.zoom_chosen = true;
         self.prefs.save();
         self.resize_window_for_display_prefs();
     }
@@ -2315,7 +2332,7 @@ impl App {
         self.set_aspect(current.toggled());
     }
 
-    /// Resizes the window to `render::zoomed_dims(prefs.zoom, prefs.aspect)`,
+    /// Resizes the window to `render::zoomed_dims(self.zoom, prefs.aspect)`,
     /// clamped to fit the window's current monitor (`render::
     /// clamp_to_available`) so a large zoom/TV-ratio combination can never
     /// request an unusable, off-screen-sized window. Called after `set_zoom`
@@ -2324,7 +2341,7 @@ impl App {
     fn resize_window_for_display_prefs(&mut self) {
         let Some(window) = &self.window else { return };
         let aspect = Aspect::from_pref(&self.prefs.aspect);
-        let target = render::zoomed_dims(self.prefs.zoom, aspect);
+        let target = render::zoomed_dims(self.zoom, aspect);
         let max = window.current_monitor().map(|m| logical_monitor_size(&m));
         let (w, h) = match max {
             Some(max) => render::clamp_to_available(target, max),

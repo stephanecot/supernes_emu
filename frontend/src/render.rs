@@ -151,6 +151,38 @@ pub fn zoomed_dims(zoom: u8, aspect: Aspect) -> (u32, u32) {
     (w * z, h * z)
 }
 
+/// Largest whole upscale the settings screen offers, and the ceiling of the
+/// adaptive default. A hand-edited `prefs.json` may still go past it
+/// (`Prefs::sanitize` allows up to 8) — the window is freely resizable anyway.
+pub const MAX_ZOOM: u8 = 5;
+/// Smallest upscale the default may resolve to. 256x224 is never a starting
+/// size: on any display sold this century it is a postage stamp, which is what
+/// made the first step of the previous ladder useless.
+pub const MIN_DEFAULT_ZOOM: u8 = 2;
+/// Upscale used when the monitor's size cannot be read (no primary monitor
+/// reported, headless run).
+pub const FALLBACK_ZOOM: u8 = 3;
+/// Share of the monitor's usable height the default window may occupy.
+const DEFAULT_HEIGHT_SHARE: f64 = 0.70;
+
+/// Window upscale a fresh install starts at, resolved from the monitor rather
+/// than fixed: the largest whole multiple of the 224-line picture that stays
+/// within `DEFAULT_HEIGHT_SHARE` of `usable_height`, bounded by
+/// `MIN_DEFAULT_ZOOM..=MAX_ZOOM`. A preference file travels between machines,
+/// so a step that is comfortable on a laptop and one that is comfortable on a
+/// 4K panel cannot both be a constant.
+///
+/// `usable_height` is the monitor's logical height minus the room the OS keeps
+/// for its own chrome (`video::logical_monitor_size`), in points.
+pub fn default_zoom(usable_height: u32) -> u8 {
+    if usable_height == 0 {
+        return FALLBACK_ZOOM;
+    }
+    let budget = usable_height as f64 * DEFAULT_HEIGHT_SHARE;
+    let fits = (budget / SCREEN_HEIGHT as f64).floor() as i64;
+    fits.clamp(MIN_DEFAULT_ZOOM as i64, MAX_ZOOM as i64) as u8
+}
+
 /// Scales `target` down to fit within `max`, preserving its aspect ratio, if
 /// it doesn't already fit; otherwise returns `target` unchanged. Used to keep
 /// the window usable when the requested zoom would exceed the screen (see
@@ -389,6 +421,34 @@ mod tests {
         // A corrupt/hand-edited `prefs.zoom = 0` must not produce a
         // zero-size (unusable) window.
         assert_eq!(zoomed_dims(0, Aspect::PixelPerfect), (256, 224));
+    }
+
+    /// The default window size follows the screen instead of being a constant:
+    /// the largest whole upscale whose picture stays inside ~70 % of the usable
+    /// height, and never the native 256x224 — the step that made the previous
+    /// ladder useless.
+    #[test]
+    fn default_zoom_grows_with_the_monitor_and_never_returns_the_native_size() {
+        // A 13" laptop, a 1080p panel, a 1440p one, a 4K one — each measured
+        // after `logical_monitor_size` took its own margin off.
+        assert_eq!(default_zoom(828), 2); // 0.70 * 828 = 579 -> 2 x 224 = 448
+        assert_eq!(default_zoom(993), 3); // 695 -> 672
+        assert_eq!(default_zoom(1324), 4); // 926 -> 896
+        assert_eq!(default_zoom(1987), MAX_ZOOM); // 1391 -> capped at 1120
+        // Monotonic, and always inside the bounds the settings ladder offers.
+        let mut previous = 0;
+        for height in (1..4000).step_by(37) {
+            let zoom = default_zoom(height);
+            assert!((MIN_DEFAULT_ZOOM..=MAX_ZOOM).contains(&zoom), "{height}: {zoom}");
+            assert!(zoom >= previous, "{height}: {zoom} < {previous}");
+            previous = zoom;
+            // The window it asks for really does fit the screen it was
+            // measured on, once it is tall enough for any step at all.
+            let (_, h) = zoomed_dims(zoom, Aspect::PixelPerfect);
+            assert!(h <= height.max(448), "{height}: a {h}-point window does not fit");
+        }
+        // No monitor to measure (headless, or winit reports none).
+        assert_eq!(default_zoom(0), FALLBACK_ZOOM);
     }
 
     #[test]

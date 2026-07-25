@@ -26,7 +26,7 @@ pub enum Screen {
 /// values into `prefs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Setting {
-    /// Window zoom factor, 1..=4 (`prefs.zoom`).
+    /// Window size step of `ui::settings::ZOOM_CHOICES`, 1..=5.
     Zoom(u8),
     Filter(crate::render::Filter),
     Aspect(crate::render::Aspect),

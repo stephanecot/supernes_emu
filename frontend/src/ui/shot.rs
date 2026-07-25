@@ -788,6 +788,9 @@ impl Fixture {
                     version: crate::VERSION,
                     prefs: &self.prefs,
                     fullscreen: false,
+                    // What a fresh install resolves to with no monitor to
+                    // measure, so the capture shows a real selected step.
+                    zoom: crate::render::FALLBACK_ZOOM,
                     library_dir: &self.rom_dir,
                     config_dir: Some(&self.config_dir),
                     state: &mut self.settings_ui,
