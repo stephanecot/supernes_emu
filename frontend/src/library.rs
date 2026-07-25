@@ -140,6 +140,13 @@ pub struct GameEntry {
     pub fastrom: bool,
     pub checksum: u16,
     pub checksum_valid: bool,
+    /// Set on a game added by hand whose file is no longer where it was. A game
+    /// that vanishes from the scanned folder is simply gone — it is not there
+    /// any more — but one the player pointed at explicitly must not evaporate
+    /// in silence, which reads as a bug. It stays listed, greyed, until they
+    /// relocate or forget it. Never true for a folder entry.
+    #[serde(default)]
+    pub missing: bool,
 }
 
 impl GameEntry {
@@ -197,6 +204,39 @@ fn entry_from_cart(path: &Path, file_size: u64, modified: i64, cart: &Cartridge)
         fastrom: cart.fastrom,
         checksum: cart.header_checksum,
         checksum_valid: cart.checksum_valid,
+        missing: false,
+    }
+}
+
+/// Placeholder for an added game whose file is gone: the last known entry if
+/// the cache still holds one, else the bare minimum built from the file name.
+/// Either way it carries `missing`, so the shell can show it as unreachable
+/// rather than pretend it was never added.
+fn missing_entry(path: &Path, cache: &Cache) -> GameEntry {
+    if let Some(known) = cache.entries.iter().find(|e| e.path == path) {
+        return GameEntry { missing: true, ..known.clone() };
+    }
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    GameEntry {
+        // No header was ever read, so there is no checksum to key on; the path
+        // is the only stable identity such an entry can have.
+        id: format!("missing-{}", normalize(&name)),
+        path: path.to_path_buf(),
+        file_size: 0,
+        modified: 0,
+        title: name,
+        mapping: String::new(),
+        region: String::new(),
+        rom_bytes: 0,
+        sram_bytes: 0,
+        coprocessor: None,
+        fastrom: false,
+        checksum: 0,
+        checksum_valid: false,
+        missing: true,
     }
 }
 
@@ -292,7 +332,51 @@ pub fn cache_path() -> Option<PathBuf> {
 /// Sub-directories are not descended into: a library folder is a flat folder
 /// of games, and recursing would make an accidentally-pointed-at home
 /// directory read gigabytes.
+#[cfg(test)]
 pub fn scan_dir(dir: &Path, cache: &mut Cache) -> Result<Vec<GameEntry>, String> {
+    scan(dir, &[], cache)
+}
+
+/// Scan `dir` and fold in `extra` — games the player added one by one, which
+/// live wherever they live. A folder scan alone cannot represent those: it
+/// rebuilds the list from the directory, so anything outside it would come back
+/// only to vanish at the next pass.
+///
+/// A path listed in both is kept once, as a folder entry: adding a game that
+/// already sits in the library folder is a no-op, not a duplicate card.
+pub fn scan(dir: &Path, extra: &[PathBuf], cache: &mut Cache) -> Result<Vec<GameEntry>, String> {
+    let mut paths = rom_paths_in(dir)?;
+    let mut seen: Vec<PathBuf> = paths.iter().map(|p| identity(p)).collect();
+    let mut added: Vec<PathBuf> = Vec::new();
+    for path in extra {
+        let key = identity(path);
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.push(key);
+        added.push(path.clone());
+    }
+    paths.sort();
+
+    let mut entries = Vec::with_capacity(paths.len() + added.len());
+    for path in paths {
+        if let Some(entry) = entry_for(&path, cache) {
+            entries.push(entry);
+        }
+    }
+    for path in added {
+        // Unlike a folder entry, an added game that will not parse still gets a
+        // card: the player asked for this file by name and deserves to be told
+        // it cannot be read, rather than watching it silently not appear.
+        entries.push(entry_for(&path, cache).unwrap_or_else(|| missing_entry(&path, cache)));
+    }
+    cache.version = CACHE_VERSION;
+    cache.entries = entries.clone();
+    Ok(entries)
+}
+
+/// ROM files directly inside `dir`, sorted.
+fn rom_paths_in(dir: &Path) -> Result<Vec<PathBuf>, String> {
     let read = std::fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))?;
     let mut paths: Vec<PathBuf> = Vec::new();
     for entry in read.flatten() {
@@ -303,25 +387,33 @@ pub fn scan_dir(dir: &Path, cache: &mut Cache) -> Result<Vec<GameEntry>, String>
         paths.push(path);
     }
     paths.sort();
+    Ok(paths)
+}
 
-    let mut entries = Vec::with_capacity(paths.len());
-    for path in paths {
-        let Ok(meta) = std::fs::metadata(&path) else { continue };
-        let (size, modified) = (file_size(&meta), file_mtime(&meta));
-        if let Some(cached) = cache.valid_entry(&path, size, modified) {
-            entries.push(cached.clone());
-            continue;
-        }
-        match read_entry(&path) {
-            Ok(e) => entries.push(e),
-            // A file that is not a usable ROM (bad dump, unrelated zip) is
-            // skipped with a warning rather than failing the whole scan.
-            Err(e) => eprintln!("library: skipping {}: {e}", path.display()),
+/// Cached or freshly parsed entry for one ROM file; `None` when the file is
+/// unreachable or is not a usable ROM (bad dump, unrelated zip) — a folder scan
+/// skips those with a warning rather than failing wholesale.
+fn entry_for(path: &Path, cache: &Cache) -> Option<GameEntry> {
+    let meta = std::fs::metadata(path).ok()?;
+    let (size, modified) = (file_size(&meta), file_mtime(&meta));
+    if let Some(cached) = cache.valid_entry(path, size, modified) {
+        return Some(cached.clone());
+    }
+    match read_entry(path) {
+        Ok(e) => Some(e),
+        Err(e) => {
+            eprintln!("library: skipping {}: {e}", path.display());
+            None
         }
     }
-    cache.version = CACHE_VERSION;
-    cache.entries = entries.clone();
-    Ok(entries)
+}
+
+/// Key two paths are compared on. `canonicalize` resolves `..`, symlinks and
+/// (on macOS) case, so the same file reached by two different spellings is one
+/// game; it needs the file to exist, hence the fallback for a game whose file
+/// has moved away.
+fn identity(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 // --- ordering / filtering -------------------------------------------------
@@ -648,8 +740,9 @@ impl PlayClock {
 /// Work the library thread can be asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Job {
-    /// Rescan a folder (uses and updates the on-disk cache).
-    Scan(PathBuf),
+    /// Rescan a folder and re-read the individually added games (uses and
+    /// updates the on-disk cache).
+    Scan { dir: PathBuf, extra: Vec<PathBuf> },
     /// Generate the thumbnail of one game, unless its file already exists.
     Thumb { id: String, rom: PathBuf },
 }
@@ -673,7 +766,7 @@ pub enum Update {
 /// scan waits at most one thumbnail, not the whole backlog.
 #[derive(Debug, Default)]
 struct Queue {
-    scans: VecDeque<PathBuf>,
+    scans: VecDeque<(PathBuf, Vec<PathBuf>)>,
     thumbs: VecDeque<(String, PathBuf)>,
     /// Set when the handle is dropped: the thread returns instead of waiting.
     closed: bool,
@@ -699,9 +792,9 @@ impl Shared {
         {
             let mut queue = lock(&self.queue);
             match job {
-                Job::Scan(dir) => {
+                Job::Scan { dir, extra } => {
                     queue.thumbs.clear();
-                    queue.scans.push_back(dir);
+                    queue.scans.push_back((dir, extra));
                 }
                 Job::Thumb { id, rom } => queue.thumbs.push_back((id, rom)),
             }
@@ -716,8 +809,8 @@ impl Shared {
             if queue.closed {
                 return None;
             }
-            if let Some(dir) = queue.scans.pop_front() {
-                return Some(Job::Scan(dir));
+            if let Some((dir, extra)) = queue.scans.pop_front() {
+                return Some(Job::Scan { dir, extra });
             }
             if let Some((id, rom)) = queue.thumbs.pop_front() {
                 return Some(Job::Thumb { id, rom });
@@ -799,8 +892,8 @@ fn worker_loop(shared: &Arc<Shared>, updates: &Sender<Update>) {
     let mut cache = cache_path.as_deref().map(Cache::read_from).unwrap_or_default();
     while let Some(job) = shared.take() {
         match job {
-            Job::Scan(dir) => {
-                let (entries, error) = match scan_dir(&dir, &mut cache) {
+            Job::Scan { dir, extra } => {
+                let (entries, error) = match scan(&dir, &extra, &mut cache) {
                     Ok(entries) => {
                         if let Some(path) = &cache_path {
                             if let Err(e) = cache.write_to(path) {
@@ -865,6 +958,7 @@ mod tests {
             fastrom: false,
             checksum: 0x1234,
             checksum_valid: true,
+            missing: false,
         }
     }
 
@@ -988,6 +1082,44 @@ mod tests {
         assert!(cache.entries.is_empty(), "stale entries must be dropped");
 
         assert!(scan_dir(&dir.join("absent"), &mut cache).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_added_game_whose_file_is_gone_stays_listed_as_missing() {
+        let dir = scratch("extra-missing");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let gone = dir.join("elsewhere").join("Chrono Trigger (U).sfc");
+        let mut cache = Cache::default();
+
+        let found = scan(&dir, std::slice::from_ref(&gone), &mut cache).expect("scan");
+        // The folder is empty, so the added game is the whole library — and it
+        // must be there: a game the player named explicitly disappearing without
+        // a word reads as a bug, not as a moved file.
+        assert_eq!(found.len(), 1);
+        assert!(found[0].missing);
+        assert_eq!(found[0].path, gone);
+        assert_eq!(found[0].title, "Chrono Trigger (U).sfc");
+
+        // The known facts of a game seen before survive its file going away, so
+        // the card still names it rather than reverting to a file name.
+        cache.entries = vec![GameEntry { path: gone.clone(), ..entry("CT-0001", "CHRONO TRIGGER") }];
+        let found = scan(&dir, std::slice::from_ref(&gone), &mut cache).expect("rescan");
+        assert_eq!(found[0].title, "CHRONO TRIGGER");
+        assert!(found[0].missing);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_game_added_from_the_scanned_folder_is_not_listed_twice() {
+        let dir = scratch("extra-dup");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        // Not a parseable ROM, so the folder pass drops it; what matters is
+        // that the extra pass does not then add it back as a second card.
+        std::fs::write(dir.join("game.sfc"), b"too small").expect("write");
+        let mut cache = Cache::default();
+        let found = scan(&dir, &[dir.join("game.sfc")], &mut cache).expect("scan");
+        assert!(found.is_empty(), "{found:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1320,9 +1452,9 @@ mod tests {
         assert_eq!(shared.queued(), (0, 3));
         // Changing folder must not wait for three emulation runs, and the
         // thumbnails of the *old* folder must not be produced at all.
-        shared.push(Job::Scan(PathBuf::from("/games")));
+        shared.push(Job::Scan { dir: PathBuf::from("/games"), extra: Vec::new() });
         assert_eq!(shared.queued(), (1, 0), "queued thumbnails belong to the old folder");
-        assert_eq!(shared.take(), Some(Job::Scan(PathBuf::from("/games"))));
+        assert_eq!(shared.take(), Some(Job::Scan { dir: PathBuf::from("/games"), extra: Vec::new() }));
         assert_eq!(shared.queued(), (0, 0));
     }
 
@@ -1344,7 +1476,7 @@ mod tests {
     #[test]
     fn closing_the_queue_ends_the_thread_without_waiting() {
         let shared = Shared::new();
-        shared.push(Job::Scan(PathBuf::from("/games")));
+        shared.push(Job::Scan { dir: PathBuf::from("/games"), extra: Vec::new() });
         shared.close();
         // Would block forever on a live queue; a closed one returns at once,
         // which is what lets the process quit while a scan is still pending.

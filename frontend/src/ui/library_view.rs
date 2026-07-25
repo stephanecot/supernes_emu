@@ -233,6 +233,15 @@ pub fn show(ui: &mut egui::Ui, model: &mut LibraryModel) -> Action {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             // The folder the grid is showing is named here, where it can be
             // changed, rather than on a line of its own above the first card.
+            // A game living outside the scanned folder can only get here by
+            // being named explicitly — or dropped on the window, which the
+            // hover text advertises since nothing on screen could suggest it.
+            if icons::button(ui, Icon::Plus, "Ajouter un jeu…")
+                .on_hover_text("Ajouter un jeu situé hors du dossier — ou déposez son fichier sur la fenêtre")
+                .clicked()
+            {
+                action = Action::AddGame { replacing: None };
+            }
             if icons::button(ui, Icon::Folder, "Dossier…")
                 .on_hover_text(super::home::shorten_path(model.dir, 72))
                 .clicked()
@@ -438,7 +447,7 @@ fn card(
         egui::Align2::LEFT_TOP,
         subtitle(entry, stats),
         theme::mono(theme::SIZE_SMALL),
-        theme::TEXT_DIM,
+        if entry.missing { theme::RED } else { theme::TEXT_DIM },
     );
 
     // The favourite star sits on the picture: always there once it is one (it
@@ -467,8 +476,11 @@ fn card(
     // launch a game on a stray click.
     let play_size = Vec2::new(88.0, 30.0);
     let play_rect = Rect::from_center_size(picture_rect.center(), play_size);
+    // A game whose file is gone cannot be started, so it is not offered: a
+    // `Jouer` that can only fail is worse than no button at all. Its card still
+    // opens, which is where it can be relocated or forgotten.
     let play = ui.interact(play_rect, id.with("play"), Sense::CLICK);
-    if lit > 0.0 {
+    if lit > 0.0 && !entry.missing {
         let fill = theme::ACCENT.gamma_multiply(if play.hovered() { lit } else { 0.9 * lit });
         ui.painter().rect(
             play_rect,
@@ -507,7 +519,7 @@ fn card(
     // click on either must not also open the sheet.
     if star.clicked() {
         hit.favorite = true;
-    } else if lit > 0.0 && play.clicked() {
+    } else if lit > 0.0 && !entry.missing && play.clicked() {
         hit.play = true;
     } else if response.clicked() && !star.hovered() && !(lit > 0.0 && play.hovered()) {
         hit.open = true;
@@ -547,6 +559,11 @@ pub fn elided_galley(
 /// (`icons::paint_chip_badge`), where its accent identifies it before its name
 /// is read.
 fn subtitle(entry: &GameEntry, stats: Option<&GameStats>) -> String {
+    if entry.missing {
+        // Region and play time describe a cartridge we can no longer read; the
+        // only fact worth the line is that the file is not where it was.
+        return "Fichier introuvable".to_string();
+    }
     let mut parts = vec![entry.region.clone()];
     if let Some(played) = stats.map(|s| s.play_seconds).filter(|s| *s > 0) {
         parts.push(library::format_play_time(played));
@@ -809,6 +826,7 @@ mod tests {
             fastrom: false,
             checksum: 1,
             checksum_valid: true,
+            missing: false,
         }
     }
 

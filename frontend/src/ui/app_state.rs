@@ -81,6 +81,13 @@ pub enum Action {
     DeleteState(std::path::PathBuf),
     /// Rescan the library folder.
     Rescan,
+    /// Add one game from anywhere on disk, with the native file dialog.
+    /// `replacing` names a game whose file moved: the found file takes its
+    /// place rather than joining it.
+    AddGame { replacing: Option<std::path::PathBuf> },
+    /// Drop an individually added game from the library. The file is never
+    /// touched — forgetting a game must not be a way to delete it.
+    ForgetGame(std::path::PathBuf),
     /// Choose the library folder with the native folder dialog, then rescan.
     ChooseLibraryDir,
     /// Back to the default library folder (`prefs.library_dir = None`), then

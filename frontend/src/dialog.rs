@@ -32,6 +32,10 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 pub enum Request {
     /// Pick a cartridge to load; `start` is the folder the panel opens in.
     Rom { start: PathBuf },
+    /// Pick a cartridge to add to the library without starting it. `replacing`
+    /// carries the game being relocated, so its old entry is dropped in the
+    /// same move instead of leaving a ghost beside the found file.
+    AddRom { start: PathBuf, replacing: Option<PathBuf> },
     /// Pick the folder the library scans.
     LibraryDir { current: PathBuf },
     /// Pick the folder screenshots are written to.
@@ -44,6 +48,7 @@ pub enum Request {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Answer {
     Rom(PathBuf),
+    AddRom { path: PathBuf, replacing: Option<PathBuf> },
     LibraryDir(PathBuf),
     ScreenshotDir(PathBuf),
     SaveDir(PathBuf),
@@ -123,6 +128,10 @@ fn run(request: Request) -> Answer {
     match request {
         Request::Rom { start } => match crate::picker::pick_rom(&start) {
             Some(path) => Answer::Rom(path),
+            None => Answer::Cancelled,
+        },
+        Request::AddRom { start, replacing } => match crate::picker::pick_rom(&start) {
+            Some(path) => Answer::AddRom { path, replacing },
             None => Answer::Cancelled,
         },
         Request::LibraryDir { current } => {
@@ -259,7 +268,9 @@ mod tests {
         let mut seen = 0;
         for answer in &answers {
             match answer {
-                Answer::Rom(p) => assert!(p.extension().is_some()),
+                Answer::Rom(p) | Answer::AddRom { path: p, .. } => {
+                    assert!(p.extension().is_some())
+                }
                 Answer::LibraryDir(p) | Answer::ScreenshotDir(p) | Answer::SaveDir(p) => {
                     assert!(p.is_absolute() || p == Path::new("roms"));
                 }

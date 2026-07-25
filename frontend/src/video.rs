@@ -589,6 +589,11 @@ impl ApplicationHandler for App {
             // feeding them to the console while another application is in
             // front — playing the emulated game from the background would be
             // surprising.
+            // Dropping a file on the window is the natural way to say "this
+            // one, wherever it is". It only ever *adds* to the library — never
+            // starts the game — so a drop can't interrupt a session by
+            // accident; the new card is one click away.
+            WindowEvent::DroppedFile(path) => self.add_game(&path),
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
                 if !focused {
@@ -1209,6 +1214,24 @@ impl App {
             }
             Action::DeleteState(path) => self.delete_state(&path),
             Action::Rescan => self.rescan_library(),
+            Action::AddGame { replacing } => {
+                // A relocation opens where the game used to live: the file has
+                // most often moved with its folder, not across the disk.
+                let start = replacing
+                    .as_ref()
+                    .and_then(|p| p.parent())
+                    .filter(|p| p.is_dir())
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| library::library_dir(&self.prefs));
+                self.dialogs.request(dialog::Request::AddRom { start, replacing });
+            }
+            Action::ForgetGame(path) => {
+                if self.prefs.forget_extra_rom(&path) {
+                    self.prefs.save();
+                    self.library.ui.selected = None;
+                    self.rescan_library();
+                }
+            }
             Action::ChooseLibraryDir => {
                 // `library.dir` is still empty when the run went straight into
                 // a game: resolve the folder the same way the scan would.
@@ -1411,7 +1434,7 @@ impl App {
         self.library.ui.scanning = true;
         self.library.ui.error = None;
         self.library.pending.clear();
-        worker.submit(library::Job::Scan(dir));
+        worker.submit(library::Job::Scan { dir, extra: self.prefs.extra_roms.clone() });
     }
 
     /// Drain the library thread's updates: scan results and finished
@@ -1937,6 +1960,28 @@ impl App {
         self.dialogs.request(dialog::Request::Rom { start });
     }
 
+    /// Remember a game that lives outside the scanned folder, then rescan so it
+    /// appears. The file is only *referenced* — nothing is copied or moved, so
+    /// adding a game from a mounted volume is honest about what it is.
+    ///
+    /// A file that is not a ROM is refused here rather than added and shown as
+    /// broken: the player picked it by mistake and the message must say so
+    /// while they still remember doing it.
+    fn add_game(&mut self, path: &Path) {
+        if !library::is_rom_file(path) {
+            self.library.ui.error = Some(format!(
+                "{} n'est pas une ROM Super Nintendo (.sfc, .smc ou .zip).",
+                path.file_name().unwrap_or(path.as_os_str()).to_string_lossy()
+            ));
+            return;
+        }
+        self.library.ui.error = None;
+        if self.prefs.add_extra_rom(path) {
+            self.prefs.save();
+        }
+        self.rescan_library();
+    }
+
     /// Apply the answer of a finished native dialog, then open the next queued
     /// one. Called once per `about_to_wait` — never from `window_event`, whose
     /// stack a native modal must not be opened on.
@@ -1951,6 +1996,15 @@ impl App {
             self.set_fast_forward(false);
             self.next_deadline = Instant::now() + self.frame_duration;
             match answer {
+                dialog::Answer::AddRom { path, replacing } => {
+                    if let Some(old) = replacing {
+                        // Dropped before the add, so relocating a game onto the
+                        // very same path still leaves it in the library.
+                        self.prefs.forget_extra_rom(&old);
+                        self.library.ui.selected = None;
+                    }
+                    self.add_game(&path);
+                }
                 dialog::Answer::Rom(path) => {
                     // Remember where the player browses: it is the library's
                     // own fallback folder (`library::library_dir`).

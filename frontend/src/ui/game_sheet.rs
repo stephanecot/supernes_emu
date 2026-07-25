@@ -162,7 +162,28 @@ pub fn show(ui: &mut egui::Ui, model: &mut SheetModel) -> Action {
                         ui.scope(|ui| {
                             ui.spacing_mut().button_padding.x =
                                 (HERO_W - PLAY_LABEL_W) / 2.0;
-                            if icons::primary_button(ui, Icon::Play, "Jouer").clicked() {
+                            // A game whose file is gone offers the only two
+                            // things that can still be done with it, in place of
+                            // a `Jouer` that could only fail.
+                            if entry.missing {
+                                if ui
+                                    .button("Retrouver le fichier…")
+                                    .on_hover_text(
+                                        "Le désigner à son nouvel emplacement, ou déposer \
+                                         le fichier sur la fenêtre",
+                                    )
+                                    .clicked()
+                                {
+                                    action = Action::AddGame { replacing: Some(entry.path.clone()) };
+                                }
+                                if ui
+                                    .button("Retirer de la bibliothèque")
+                                    .on_hover_text("Le fichier lui-même n'est pas supprimé")
+                                    .clicked()
+                                {
+                                    action = Action::ForgetGame(entry.path.clone());
+                                }
+                            } else if icons::primary_button(ui, Icon::Play, "Jouer").clicked() {
                                 action = Action::Launch(entry.path.clone());
                             }
                         });
@@ -473,6 +494,7 @@ mod tests {
             fastrom: true,
             checksum: 0xABCD,
             checksum_valid: true,
+            missing: false,
         }
     }
 

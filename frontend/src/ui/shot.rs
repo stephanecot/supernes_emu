@@ -740,6 +740,7 @@ impl Fixture {
                 fastrom: game.fastrom,
                 checksum: 0x1234u16.wrapping_add((i as u16) << 8),
                 checksum_valid: game.checksum_valid,
+                missing: false,
             });
             games.insert(
                 id.clone(),
@@ -759,6 +760,27 @@ impl Fixture {
                 pending.insert(id);
             }
         }
+
+        // A game added by hand whose file has since moved. It earns a place in
+        // the fixture because it is the one card state that cannot occur in a
+        // scanned folder, and therefore the one that would otherwise never be
+        // looked at before a player met it.
+        entries.push(GameEntry {
+            id: "missing-secret-of-evermore".to_string(),
+            path: PathBuf::from("/Volumes/Sauvegardes/Secret of Evermore (E).zip"),
+            title: "SECRET OF EVERMORE".to_string(),
+            missing: true,
+            file_size: 0,
+            modified: 0,
+            mapping: String::new(),
+            region: String::new(),
+            rom_bytes: 0,
+            sram_bytes: 0,
+            coprocessor: None,
+            fastrom: false,
+            checksum: 0,
+            checksum_valid: false,
+        });
 
         // Save slots and screenshots of the game the sheet opens on. Three of
         // the four states carry the picture written beside them when they were

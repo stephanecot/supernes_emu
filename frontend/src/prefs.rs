@@ -207,6 +207,11 @@ pub struct Prefs {
     /// Folder the library screen scans for ROMs; `None` falls back to
     /// `last_rom_dir`, then to `roms/` (see `library::library_dir`).
     pub library_dir: Option<PathBuf>,
+    /// Games added one by one, wherever they live. The scanned folder cannot
+    /// hold these: it rebuilds its list from the directory, so a game outside
+    /// it would appear once and be gone at the next scan. Listed after the
+    /// folder's own games, in the order they were added.
+    pub extra_roms: Vec<PathBuf>,
     /// Library sort order: `title` or `recent` (`library::SortMode`). Unknown
     /// values are preserved on a round trip and render as `title`, like
     /// `filter`/`aspect`.
@@ -246,6 +251,7 @@ impl Default for Prefs {
             resume_on_launch: true,
             save_slot: 0,
             library_dir: None,
+            extra_roms: Vec::new(),
             library_sort: "title".to_string(),
             library_tab: "library".to_string(),
             games: BTreeMap::new(),
@@ -385,6 +391,34 @@ impl Prefs {
         self.zoom_chosen = self.zoom.is_some();
         self.fast_forward_factor = self.fast_forward_factor.clamp(2, 4);
         self.save_slot = self.save_slot.min(9);
+        // A path listed twice would draw the same game twice; hand-edited files
+        // and older writes can both contain one.
+        let mut seen = Vec::with_capacity(self.extra_roms.len());
+        self.extra_roms.retain(|p| {
+            if seen.contains(p) {
+                return false;
+            }
+            seen.push(p.clone());
+            true
+        });
+    }
+
+    /// Remember a game added by hand. Returns whether the list changed: adding
+    /// the same file twice is a no-op, not a second card.
+    pub fn add_extra_rom(&mut self, path: &Path) -> bool {
+        if self.extra_roms.iter().any(|p| p == path) {
+            return false;
+        }
+        self.extra_roms.push(path.to_path_buf());
+        true
+    }
+
+    /// Drop a game added by hand. The file itself is never touched — forgetting
+    /// a game must not be a way to delete it.
+    pub fn forget_extra_rom(&mut self, path: &Path) -> bool {
+        let before = self.extra_roms.len();
+        self.extra_roms.retain(|p| p != path);
+        self.extra_roms.len() != before
     }
 }
 
@@ -663,6 +697,29 @@ mod tests {
             .expect("parse");
         assert_eq!(p.keymap.get("A"), Some(&KeyCode::Space));
         assert_eq!(p.keymap.get("B"), None);
+    }
+
+    #[test]
+    fn a_game_is_never_added_to_the_library_twice() {
+        let mut p = Prefs::default();
+        let rom = PathBuf::from("/Volumes/Sauvegardes/Chrono Trigger (U).sfc");
+        assert!(p.add_extra_rom(&rom));
+        assert!(!p.add_extra_rom(&rom), "adding the same file again must change nothing");
+        assert_eq!(p.extra_roms, vec![rom.clone()]);
+
+        assert!(p.forget_extra_rom(&rom));
+        assert!(!p.forget_extra_rom(&rom));
+        assert!(p.extra_roms.is_empty());
+    }
+
+    #[test]
+    fn a_duplicate_in_the_file_draws_one_card_not_two() {
+        // Hand-edited files and older writes can both carry a repeat.
+        let p = Prefs::from_json(
+            "{\"extra_roms\": [\"/jeux/a.sfc\", \"/jeux/b.sfc\", \"/jeux/a.sfc\"]}",
+        )
+        .expect("parse");
+        assert_eq!(p.extra_roms, vec![PathBuf::from("/jeux/a.sfc"), PathBuf::from("/jeux/b.sfc")]);
     }
 
     /// A key the application handles itself would leave the button dead: the

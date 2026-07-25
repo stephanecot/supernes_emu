@@ -46,6 +46,8 @@ pub enum Icon {
     Close,
     /// Back to the previous screen.
     ArrowLeft,
+    /// Add something to the library.
+    Plus,
 }
 
 impl Icon {
@@ -148,6 +150,10 @@ impl Icon {
             Icon::Close => {
                 painter.line_segment([p(0.20, 0.20), p(0.80, 0.80)], stroke);
                 painter.line_segment([p(0.80, 0.20), p(0.20, 0.80)], stroke);
+            }
+            Icon::Plus => {
+                painter.line_segment([p(0.50, 0.18), p(0.50, 0.82)], stroke);
+                painter.line_segment([p(0.18, 0.50), p(0.82, 0.50)], stroke);
             }
             Icon::ArrowLeft => {
                 painter.line_segment([p(0.86, 0.50), p(0.16, 0.50)], stroke);

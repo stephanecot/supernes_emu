@@ -1847,7 +1847,7 @@ mod tests {
         let prefs = Prefs::default();
         let mut state = SettingsUi { open: true, section: Section::Inputs, ..Default::default() };
         let size = egui::vec2(1280.0, 800.0);
-        let mut run = |pointer: Option<egui::Pos2>, click: bool, state: &mut SettingsUi| {
+        let run = |pointer: Option<egui::Pos2>, click: bool, state: &mut SettingsUi| {
             let mut events = Vec::new();
             if let Some(pos) = pointer {
                 events.push(egui::Event::PointerMoved(pos));
