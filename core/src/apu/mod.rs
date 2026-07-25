@@ -105,6 +105,19 @@ pub struct Apu {
     spc_trace: Option<Box<dyn FnMut(&str)>>,
 }
 
+/// SPC700 register file as an external observer (save state, `.spc` dump) sees
+/// it. `sp` is the low byte of the stack pointer; the SPC700's stack is fixed
+/// at page $01, so the high byte is implicit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpcRegisters {
+    pub pc: u16,
+    pub a: u8,
+    pub x: u8,
+    pub y: u8,
+    pub psw: u8,
+    pub sp: u8,
+}
+
 /// SPC cycles per generated stereo sample: 1.024 MHz / 32000 Hz = 32.
 const SPC_CYCLES_PER_SAMPLE: u32 = 32;
 
@@ -246,6 +259,59 @@ impl Apu {
         self.dsp.write(0x1C, 0x7F); // MVOLR
         self.dsp.write(0x6C, 0x20); // FLG: no soft-reset, no mute, echo-write off
         self.dsp.write(0x4C, 0x01); // KON voice 0
+    }
+
+    /// Read-only view of the 64 KB ARAM, as the SPC700 sees it minus the two
+    /// read overlays ($F0-$FF I/O, and the IPL ROM at $FFC0-$FFFF while
+    /// CONTROL bit7 is set): writes to those ranges always land in this array,
+    /// so it holds the true RAM everywhere.
+    pub fn aram(&self) -> &[u8; 0x10000] {
+        &self.ram
+    }
+
+    /// Snapshot of the SPC700 register file.
+    pub fn spc_registers(&self) -> SpcRegisters {
+        SpcRegisters {
+            pc: self.spc.pc,
+            a: self.spc.a,
+            x: self.spc.x,
+            y: self.spc.y,
+            psw: self.spc.psw(),
+            sp: self.spc.sp,
+        }
+    }
+
+    /// The 128 S-DSP registers ($00-$7F), read without side effects.
+    pub fn dsp_registers(&self) -> [u8; 128] {
+        let mut regs = [0u8; 128];
+        for (i, r) in regs.iter_mut().enumerate() {
+            *r = self.dsp.read(i as u8);
+        }
+        regs
+    }
+
+    /// Image of the SPC700 I/O page $F0-$FF as a memory dump records it: the
+    /// last value written to each register, plus the live 4-bit timer output
+    /// counters at $FD-$FF. Side-effect free, unlike a bus read of $FD-$FF
+    /// (which clears the counter it returns). $F4-$F7 hold the values the
+    /// S-CPU wrote, i.e. what the SPC700 would read back there.
+    pub fn io_registers(&self) -> [u8; 16] {
+        let mut regs = [0u8; 16];
+        regs[0x0] = self.test;
+        regs[0x1] = self.control;
+        regs[0x2] = self.dspaddr;
+        regs[0x3] = self.dsp.read(self.dspaddr & 0x7F);
+        regs[0x4..0x8].copy_from_slice(&self.ports_from_cpu);
+        // $F8/$F9 have no register behind them: they read and write plain ARAM.
+        regs[0x8] = self.ram[0xF8];
+        regs[0x9] = self.ram[0xF9];
+        regs[0xA] = self.timers[0].target;
+        regs[0xB] = self.timers[1].target;
+        regs[0xC] = self.timers[2].target;
+        regs[0xD] = self.timers[0].out;
+        regs[0xE] = self.timers[1].out;
+        regs[0xF] = self.timers[2].out;
+        regs
     }
 
     /// CPU read of $2140-$217F (mirrored every 4 bytes): the SPC-side outputs.

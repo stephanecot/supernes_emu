@@ -43,7 +43,14 @@ frontend/src/
   main.rs                       # boucle winit, pacing 50,007/60,0988 fps (PAL/NTSC) à deadline absolue
   video.rs                      # pixels, 256×224 BGR555→RGBA
   audio.rs                      # ring buffer SPSC + resampling à contrôle de débit dynamique
-  input.rs                      # clavier → JoypadState (Z=B, X=A, A=Y, S=X, Q=L, W=R)
+  input.rs                      # clavier → JoypadState (défaut Z=B, X=A, A=Y, S=X, Q=L, W=R),
+                                # résolution via prefs.keymap + machine à états de capture (remapping)
+  pad.rs                        # manettes gilrs → JoypadState (2 joueurs, hot-plug, OR avec le clavier,
+                                # remapping via prefs.pad_map)
+  paths.rs                      # emplacement des fichiers d'un jeu (.srm/.state/.resume) :
+                                # --save > prefs.save_dir (nommés par library::game_id, pas par
+                                # le fichier ROM) > à côté de la ROM, repli de lecture sur les
+                                # anciens emplacements (aucune sauvegarde perdue)
 ```
 
 ### Choix techniques clés

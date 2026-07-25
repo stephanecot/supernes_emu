@@ -1,12 +1,23 @@
 //! snes-frontend CLI. Contract lives in .claude/skills/snes-build-test/SKILL.md
 //! — keep the two in sync.
 
+mod atomic;
 mod audio;
+mod dialog;
+mod guide;
 mod input;
+mod library;
 mod menu;
+mod pad;
+mod paths;
 mod picker;
+mod prefs;
+mod render;
 mod save;
+mod spc;
 mod state;
+mod thumbs;
+mod ui;
 mod video;
 
 use std::cell::RefCell;
@@ -19,10 +30,17 @@ use std::rc::Rc;
 
 use snes_core::{Cartridge, JoypadState, Mapping, Region, Snes, SCREEN_HEIGHT, SCREEN_WIDTH};
 
+/// Product name: `Prisme` is the platform, `SuperNes` the emulated console.
+/// Used by `--version`, the window title and the macOS About panel.
+pub const APP_NAME: &str = "Prisme - SuperNes";
+/// Version of the `prisme` package (frontend/Cargo.toml).
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[derive(Default)]
 struct Args {
     rom: Option<PathBuf>,
     info: bool,
+    version: bool,
     disasm: bool,
     addr: Option<(u8, u16)>,
     count: u32,
@@ -45,10 +63,17 @@ struct Args {
     save: Option<PathBuf>,
     save_state_at: Option<(u32, PathBuf)>,
     load_state: Option<PathBuf>,
+    dump_spc: Option<PathBuf>,
+    /// `--ui-shot VIEW`: render that screen of the shell offscreen instead of
+    /// running anything, with the positional argument as the output PNG.
+    ui_shot: Option<ui::shot::View>,
+    ui_shot_size: (u32, u32),
 }
 
-const USAGE: &str = "usage: snes-frontend [rom.sfc|.smc|.zip] [flags]
-  <rom> omitted, windowed mode          open a native file-open dialog to pick a ROM
+const USAGE: &str = "usage: prisme [rom.sfc|.smc|.zip] [flags]
+  <rom> omitted, windowed mode          open the application on its home screen
+  <rom> omitted, --info/--disasm        open a native file-open dialog to pick a ROM
+  --version                             print the application name and version, then exit
   --info                                print header info and exit
   --disasm [--addr BB:AAAA] [--count N] disassemble and exit
   --headless --frames N                 emulate N frames without a window
@@ -63,9 +88,24 @@ const USAGE: &str = "usage: snes-frontend [rom.sfc|.smc|.zip] [flags]
   --script PATH                         input script: <frame> <button> <held>
   --dump-state DIR                      dump wram/vram/cgram/oam/apuram on exit
   --dump-audio PATH.wav                 headless: write 32kHz 16-bit stereo WAV
-  --save PATH                           battery SRAM file (default: <rom>.srm)
+  --dump-spc PATH.spc                   write the APU state as an .spc music file on exit
+  --save PATH                           battery SRAM file (default: <rom>.srm, or the
+                                        windowed save folder preference if set)
   --load-state FILE                     headless: load a save-state before frame 0
-  --save-state-at FRAME FILE            headless: write a save-state after FRAME";
+  --save-state-at FRAME FILE            headless: write a save-state after FRAME
+  --ui-shot VIEW out.png                render a screen of the interface offscreen and exit
+                                        (VIEW: library, favorites, game-sheet, empty,
+                                        library-hover, settings-display, settings-audio,
+                                        settings-emulation, settings-inputs, settings-folders,
+                                        settings-about; `settings` = settings-display.
+                                        No window, no ROM)
+  --ui-shot-size WxH                    size of that capture, in points (default 1280x800)
+
+Output paths: a relative PATH given to --trace/--trace-spc/--trace-gsu/--trace-sa1
+is rooted under target/debug-out/ (traces can reach gigabytes over a long capture).
+Every other output flag (--dump-frame, --dump-frame-every/--dump-dir, --dump-state,
+--dump-spc, --dump-audio, --save-state-at) honors PATH exactly as given, relative
+to the current directory.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -76,13 +116,20 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    // No ROM path and not --headless: pick one with a native file dialog
-    // before building anything else, so the rest of `run` sees a ROM path
-    // exactly as if it had been passed on the command line. rfd's dialog
-    // must run on the main thread on macOS; this is the main thread and no
-    // window/event loop exists yet, so the constraint is trivially met.
-    if parsed.rom.is_none() {
-        match picker::pick_rom() {
+    // `--version` answers before anything else, including the ROM picker: it
+    // must stay usable with no ROM argument and no display.
+    if parsed.version {
+        println!("{APP_NAME} {VERSION}");
+        return ExitCode::SUCCESS;
+    }
+    // No ROM path and a CLI-only flag that needs cart data (`--info`,
+    // `--disasm`): keep the previous behavior and pick one with a native file
+    // dialog. rfd's dialog must run on the main thread on macOS; this is the
+    // main thread and no window/event loop exists yet, so the constraint is
+    // trivially met. Plain `prisme` with no argument no longer goes through
+    // here at all — it opens the home screen (see `run`).
+    if parsed.rom.is_none() && (parsed.info || parsed.disasm) {
+        match picker::pick_rom(std::path::Path::new("roms")) {
             Some(path) => parsed.rom = Some(path),
             None => {
                 println!("No ROM selected; exiting.");
@@ -100,7 +147,13 @@ fn main() -> ExitCode {
 }
 
 fn parse_args(args: &[String]) -> Result<Args, String> {
-    let mut a = Args { count: 30, frames: 1, trace_end_frame: u32::MAX, ..Args::default() };
+    let mut a = Args {
+        count: 30,
+        frames: 1,
+        trace_end_frame: u32::MAX,
+        ui_shot_size: ui::shot::DEFAULT_SIZE,
+        ..Args::default()
+    };
     let mut it = args.iter().peekable();
     let value = |it: &mut std::iter::Peekable<std::slice::Iter<String>>,
                      flag: &str|
@@ -109,6 +162,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
     };
     while let Some(arg) = it.next() {
         match arg.as_str() {
+            "--version" | "-V" => a.version = true,
             "--info" => a.info = true,
             "--disasm" => a.disasm = true,
             "--addr" => a.addr = Some(parse_bus_addr(&value(&mut it, "--addr")?)?),
@@ -135,12 +189,17 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             "--script" => a.script = Some(value(&mut it, "--script")?.into()),
             "--dump-state" => a.dump_state = Some(value(&mut it, "--dump-state")?.into()),
             "--dump-audio" => a.dump_audio = Some(value(&mut it, "--dump-audio")?.into()),
+            "--dump-spc" => a.dump_spc = Some(value(&mut it, "--dump-spc")?.into()),
             "--save" => a.save = Some(value(&mut it, "--save")?.into()),
             "--load-state" => a.load_state = Some(value(&mut it, "--load-state")?.into()),
             "--save-state-at" => {
                 let frame = parse_num(&value(&mut it, "--save-state-at")?)?;
                 let file = value(&mut it, "--save-state-at")?;
                 a.save_state_at = Some((frame, file.into()));
+            }
+            "--ui-shot" => a.ui_shot = Some(ui::shot::View::parse(&value(&mut it, "--ui-shot")?)?),
+            "--ui-shot-size" => {
+                a.ui_shot_size = ui::shot::parse_size(&value(&mut it, "--ui-shot-size")?)?
             }
             "--help" | "-h" => return Err("help requested".into()),
             s if s.starts_with("--") => return Err(format!("unknown flag: {s}")),
@@ -156,8 +215,15 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
     // window to attach a file dialog to, and every headless flag needs cart
     // data to act on). In windowed mode `main` opens a file-open dialog
     // instead of failing here.
-    if a.rom.is_none() && a.headless {
+    // `--version` prints and exits before any cart is touched, so it is
+    // exempt from that requirement.
+    if a.rom.is_none() && a.headless && !a.version {
         return Err("no ROM path given".into());
+    }
+    // `--ui-shot` needs no cartridge, but it does need somewhere to write: its
+    // positional argument is the output PNG, not a ROM.
+    if a.ui_shot.is_some() && a.rom.is_none() {
+        return Err("--ui-shot requires an output PNG path".into());
     }
     Ok(a)
 }
@@ -175,16 +241,61 @@ fn parse_bus_addr(s: &str) -> Result<(u8, u16), String> {
 }
 
 fn run(args: Args) -> Result<(), String> {
-    let rom_path = args.rom.as_ref().unwrap();
+    // `--ui-shot` renders a screen of the shell to a PNG and exits: no window,
+    // no cartridge, no preferences read. Answered before anything else so its
+    // positional argument (the output file) is never taken for a ROM.
+    if let Some(view) = args.ui_shot {
+        let out = args.rom.clone().ok_or("--ui-shot requires an output PNG path")?;
+        ui::shot::capture(view, args.ui_shot_size, &out)?;
+        println!(
+            "wrote {} — {} {}x{}",
+            out.display(),
+            view.name(),
+            args.ui_shot_size.0,
+            args.ui_shot_size.1
+        );
+        return Ok(());
+    }
+    // Windowed launch with no ROM: open the application on its home screen.
+    // Unreachable with `--headless` (`parse_args` rejects it) and with
+    // `--info`/`--disasm` (`main` runs the file dialog for those first), so
+    // every CLI path below still has a cartridge to work on.
+    let Some(rom_path) = args.rom.clone() else {
+        let prefs = prefs::Prefs::load(true);
+        return video::run(None, prefs);
+    };
+    let rom_path = &rom_path;
     let bytes = load_rom_bytes(rom_path)?;
     let mut cart = Cartridge::from_bytes(bytes)?;
+
+    // Preferences take part in *no* CLI behavior: a headless run must be
+    // reproducible whatever the user's `prefs.json` says (and its warnings must
+    // not mix into `--log-mmio` output), so they are read only on the path that
+    // opens a window. `--info`/`--disasm` print and exit before that, so they
+    // are excluded too. The one preference needed this early is `save_dir`,
+    // which decides where the `.srm` loaded just below comes from.
+    let windowed = !args.headless && !args.info && !args.disasm;
+    let prefs = windowed.then(|| prefs::Prefs::load(true));
 
     // Sidecar SRAM save: loaded before Snes::new so the game's own init code
     // (which typically reads its save-flag byte early) sees restored state.
     // `sram_baseline` is the post-load snapshot; save::save_if_dirty diffs
     // against it on exit so an untouched cart is never rewritten.
-    let save_path = args.save.clone().unwrap_or_else(|| save::default_save_path(rom_path));
-    let sram_baseline = save::load_sram(&mut cart, &save_path);
+    // `--save` overrides both the folder preference and the default location.
+    // In a shared save folder the sidecars are named after the game itself
+    // (`library::game_id`), so two ROM files of the same name cannot share one
+    // save; with no folder configured (every headless/CLI run, which never
+    // reads the preferences) the id is unused and the files sit beside the ROM.
+    let game_id = library::game_id(cart.title.trim(), cart.header_checksum, &cart.rom);
+    let game_paths = paths::GamePaths::new(
+        rom_path,
+        &game_id,
+        prefs.as_ref().and_then(|p| p.save_dir.clone()),
+        args.save.clone(),
+    )
+    .with_previous_dir(prefs.as_ref().and_then(|p| p.previous_save_dir.clone()));
+    let save_path = game_paths.srm_write();
+    let sram_baseline = save::load_sram(&mut cart, &game_paths.srm_read());
 
     if args.info {
         print_info(&cart);
@@ -207,7 +318,23 @@ fn run(args: Args) -> Result<(), String> {
         if args.dump_audio.is_some() {
             eprintln!("--dump-audio requires --headless; ignoring (windowed mode plays live)");
         }
-        return video::run(rom_path.clone(), cart, save_path, sram_baseline);
+        if args.dump_spc.is_some() {
+            eprintln!("--dump-spc requires --headless; ignoring (use Fichier > Exporter la musique)");
+        }
+        // `windowed` is true on exactly this branch, so the preferences were
+        // loaded above (with `persist: true`, since this is the run that
+        // writes option changes back); the fallback keeps the load total
+        // rather than unwrapping.
+        let prefs = prefs.unwrap_or_else(|| prefs::Prefs::load(true));
+        return video::run(
+            Some(video::Launch {
+                rom_path: rom_path.clone(),
+                cart,
+                paths: game_paths,
+                sram_baseline,
+            }),
+            prefs,
+        );
     }
 
     let script = match &args.script {
@@ -217,6 +344,7 @@ fn run(args: Args) -> Result<(), String> {
 
     let cart_has_gsu = cart.superfx.is_some();
     let cart_has_sa1 = cart.sa1.is_some();
+    let cart_title = cart.title.trim().to_string();
     let mut snes = Snes::new(cart);
     if let Some(path) = &args.load_state {
         let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
@@ -233,7 +361,7 @@ fn run(args: Args) -> Result<(), String> {
         args.watch.iter().map(|&(b, a)| ((b as u32) << 16) | a as u32).collect();
 
     let mut trace_writer = match &args.trace {
-        Some(path) => Some(open_trace(path)?),
+        Some(path) => Some(open_trace(path, "65C816")?),
         None => None,
     };
 
@@ -242,7 +370,7 @@ fn run(args: Args) -> Result<(), String> {
     // frame range rather than driven per-instruction from here. A shared writer
     // lets the closure own a handle while `main` retains one to flush at the end.
     let spc_writer = match &args.trace_spc {
-        Some(path) => Some(Rc::new(RefCell::new(open_trace(path)?))),
+        Some(path) => Some(Rc::new(RefCell::new(open_trace(path, "SPC700")?))),
         None => None,
     };
     let mut spc_installed = false;
@@ -254,7 +382,7 @@ fn run(args: Args) -> Result<(), String> {
         eprintln!("--trace-gsu: no SuperFX/GSU coprocessor in this cart; skipping");
     }
     let gsu_writer = match &args.trace_gsu {
-        Some(path) if cart_has_gsu => Some(Rc::new(RefCell::new(open_trace(path)?))),
+        Some(path) if cart_has_gsu => Some(Rc::new(RefCell::new(open_trace(path, "GSU")?))),
         _ => None,
     };
     let mut gsu_installed = false;
@@ -265,7 +393,7 @@ fn run(args: Args) -> Result<(), String> {
         eprintln!("--trace-sa1: no SA-1 coprocessor in this cart; skipping");
     }
     let sa1_writer = match &args.trace_sa1 {
-        Some(path) if cart_has_sa1 => Some(Rc::new(RefCell::new(open_trace(path)?))),
+        Some(path) if cart_has_sa1 => Some(Rc::new(RefCell::new(open_trace(path, "SA-1")?))),
         _ => None,
     };
     let mut sa1_installed = false;
@@ -273,6 +401,9 @@ fn run(args: Args) -> Result<(), String> {
     let mut audio_pcm: Vec<(i16, i16)> = Vec::new();
 
     for frame in 0..args.frames {
+        if !args.watch.is_empty() || args.log_mmio {
+            eprintln!("-- frame {frame}");
+        }
         let p1 = script_state(&script, frame);
         let in_range =
             frame >= args.trace_start_frame && frame <= args.trace_end_frame;
@@ -334,8 +465,7 @@ fn run(args: Args) -> Result<(), String> {
         if let Some((at, path)) = &args.save_state_at {
             if frame == *at {
                 let bytes = snes.save_state();
-                std::fs::write(path, &bytes)
-                    .map_err(|e| format!("write {}: {e}", path.display()))?;
+                atomic::write(path, &bytes)?;
                 println!("wrote {} ({} bytes) at frame {}", path.display(), bytes.len(), at);
             }
         }
@@ -380,10 +510,19 @@ fn run(args: Args) -> Result<(), String> {
         dump_state(&snes, dir)?;
     }
 
+    // `--dump-spc`/`--dump-audio` honor `path` exactly as given (relative to
+    // the current directory), like `--dump-frame`/`--dump-state`/
+    // `--save-state-at` — see `resolve_out_path`'s doc comment for why only
+    // the trace flags redirect.
+    if let Some(path) = &args.dump_spc {
+        let bytes = spc::build(&snes, &cart_title);
+        write_new_file(path, &bytes)?;
+        println!("wrote {} ({} bytes)", path.display(), bytes.len());
+    }
+
     if let Some(path) = &args.dump_audio {
         let rate = snes.sample_rate();
-        let path = resolve_out_path(path);
-        write_wav(&path, &audio_pcm, rate)?;
+        write_wav(path, &audio_pcm, rate)?;
         println!("wrote {} ({} frames @ {} Hz)", path.display(), audio_pcm.len(), rate);
     }
     Ok(())
@@ -495,8 +634,231 @@ fn run_disasm(cart: Cartridge, args: &Args) -> Result<(), String> {
     Ok(())
 }
 
-/// Resolve a debug-output path: absolute paths are honored as-is; relative
+/// Write `data` to `path`, creating the parent directory if needed.
+pub(crate) fn write_new_file(path: &Path, data: &[u8]) -> Result<(), String> {
+    create_parent_dir(path)?;
+    std::fs::write(path, data).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+/// `mkdir -p` on a file path's parent, skipping bare file names.
+pub(crate) fn create_parent_dir(path: &Path) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create {}: {e}", parent.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Broken-down local calendar time, used to name screenshots/SPC exports and
+/// to fill the `.spc` ID666 dump date.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CalendarTime {
+    pub year: i32,
+    pub month: u8,
+    pub day: u8,
+    pub hour: u8,
+    pub minute: u8,
+    pub second: u8,
+}
+
+impl CalendarTime {
+    /// `YYYYMMDD-HHMMSS`, safe on every filesystem and sorting chronologically.
+    pub fn file_stamp(&self) -> String {
+        format!(
+            "{:04}{:02}{:02}-{:02}{:02}{:02}",
+            self.year, self.month, self.day, self.hour, self.minute, self.second
+        )
+    }
+
+    /// ID666 text-format dump date: `MM/DD/YYYY` (11 bytes with the NUL).
+    pub fn id666_date(&self) -> String {
+        format!("{:02}/{:02}/{:04}", self.month, self.day, self.year)
+    }
+}
+
+/// Current local wall-clock time. On unix the C library does the timezone/DST
+/// work (`localtime_r`); elsewhere the UTC decomposition is used, since std
+/// exposes no timezone database.
+pub(crate) fn now_local() -> CalendarTime {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    local_time(secs)
+}
+
+/// Local calendar time of a Unix timestamp (same timezone handling as
+/// `now_local`, which it backs).
+pub(crate) fn local_time(secs: i64) -> CalendarTime {
+    #[cfg(unix)]
+    {
+        // SAFETY: `localtime_r` writes into the caller-provided `tm` and takes
+        // a pointer to a live `time_t`; both live for the whole call and the
+        // _r form needs no global lock.
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        let t = secs as libc::time_t;
+        let ok = unsafe { !libc::localtime_r(&t, &mut tm).is_null() };
+        if ok {
+            return CalendarTime {
+                year: tm.tm_year + 1900,
+                month: (tm.tm_mon + 1) as u8,
+                day: tm.tm_mday as u8,
+                hour: tm.tm_hour as u8,
+                minute: tm.tm_min as u8,
+                second: tm.tm_sec as u8,
+            };
+        }
+    }
+    civil_from_unix(secs)
+}
+
+/// Proleptic-Gregorian decomposition of a Unix timestamp (UTC), after Howard
+/// Hinnant's `civil_from_days`.
+pub(crate) fn civil_from_unix(secs: i64) -> CalendarTime {
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    // Shift the era origin to 0000-03-01 so leap days land at the end of a year.
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11], March-based
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    CalendarTime {
+        year: (if m <= 2 { y + 1 } else { y }) as i32,
+        month: m as u8,
+        day: d as u8,
+        hour: (rem / 3600) as u8,
+        minute: (rem % 3600 / 60) as u8,
+        second: (rem % 60) as u8,
+    }
+}
+
+/// Characters no common filesystem accepts in a name (the union of the POSIX
+/// separator and the Windows reserved set), plus control characters.
+fn is_forbidden_in_file_name(c: char) -> bool {
+    c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+}
+
+/// Maximum length of a sanitized stem, in *bytes* (not `chars`): several
+/// filesystems cap a path component at 255 bytes, and a title's characters
+/// can be multi-byte UTF-8 (accents, CJK) — bounding by `chars().take(64)`
+/// alone could let a 64-character title produce up to 256 bytes.
+const MAX_STEM_BYTES: usize = 64;
+
+/// Windows' reserved DOS device names: a file whose *base name* (ignoring any
+/// extension) case-insensitively matches one of these cannot be created on
+/// that OS, no matter the extension.
+const WINDOWS_RESERVED_NAMES: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+fn is_windows_reserved_name(stem: &str) -> bool {
+    WINDOWS_RESERVED_NAMES.iter().any(|&r| stem.eq_ignore_ascii_case(r))
+}
+
+/// Turn a cartridge title into a portable file-name stem: forbidden characters
+/// become `_`, runs of whitespace collapse to a single `_`, trailing dots and
+/// spaces are dropped (Windows strips them silently), leading dots are
+/// dropped too (would otherwise create a hidden file on Unix), a name that
+/// collides with a Windows reserved device name gets a trailing `_` so it no
+/// longer does, the result is bounded to `MAX_STEM_BYTES` *bytes*, and an
+/// empty result falls back to `SNES` so a blank/garbage header still produces
+/// a usable name.
+pub(crate) fn sanitize_file_stem(title: &str) -> String {
+    let mut out = String::new();
+    let mut pending_sep = false;
+    for c in title.chars() {
+        if c.is_whitespace() {
+            pending_sep = !out.is_empty();
+            continue;
+        }
+        let c = if is_forbidden_in_file_name(c) { '_' } else { c };
+        let mut grown = out.len() + c.len_utf8();
+        if pending_sep {
+            grown += 1; // the separator `_` this character would follow
+        }
+        if grown > MAX_STEM_BYTES {
+            break;
+        }
+        if pending_sep {
+            out.push('_');
+            pending_sep = false;
+        }
+        out.push(c);
+    }
+    while out.ends_with('.') || out.ends_with('_') {
+        out.pop();
+    }
+    while out.starts_with('.') {
+        out.remove(0);
+    }
+    if out.is_empty() {
+        return "SNES".to_string();
+    }
+    if is_windows_reserved_name(&out) {
+        out.push('_'); // e.g. "CON" -> "CON_": no longer a reserved name
+    }
+    out
+}
+
+/// `dir/<stem>.<ext>`, with `_2`, `_3`… appended until a name is reserved, so
+/// two captures never overwrite each other. Each candidate is claimed with
+/// `File::create_new` — an atomic test-and-create — rather than a separate
+/// `exists()` check followed by a later `File::create`: the latter is a
+/// TOCTOU race (two captures started in the same instant could both pass the
+/// check, then one silently clobbers the other when they finally write). The
+/// returned path always names a file that already exists (empty, just
+/// reserved); the caller's own write fills it in immediately after.
+pub(crate) fn unique_path(dir: &Path, stem: &str, ext: &str) -> PathBuf {
+    // `n == 0` is the bare `<stem>.<ext>`; `n >= 1` appends `_<n+1>`, matching
+    // the previous naming (`_2`, `_3`, …).
+    for n in 0..1000u32 {
+        let path = if n == 0 {
+            dir.join(format!("{stem}.{ext}"))
+        } else {
+            dir.join(format!("{stem}_{}.{ext}", n + 1))
+        };
+        match File::options().write(true).create_new(true).open(&path) {
+            Ok(_) => return path,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            // Any other error (e.g. permissions): stop trying to reserve and
+            // let the caller's own write surface the real error.
+            Err(_) => return path,
+        }
+    }
+    // 1000 names already taken in `dir` (would mean 1000 captures of the same
+    // title in one session — never observed in practice, but still reserved
+    // atomically rather than trusting a bare `exists()` check).
+    let path = dir.join(format!("{stem}_{}.{ext}", std::process::id()));
+    match File::options().write(true).create_new(true).open(&path) {
+        Ok(_) => path,
+        // Even the PID-qualified name is taken: give up reserving and let the
+        // caller's write overwrite it, same as any ordinary save-over.
+        Err(_) => path,
+    }
+}
+
+/// Resolve a *trace* output path: absolute paths are honored as-is; relative
 /// paths are rooted under `target/debug-out/` (SKILL output-hygiene rule).
+///
+/// Used only by `open_trace`, i.e. `--trace`/`--trace-spc`/`--trace-gsu`/
+/// `--trace-sa1`: those can run into gigabytes over a long capture and are
+/// almost always throwaway debugging artifacts, which is what the hygiene
+/// rule (auto-root under `target/`, keep the repo root clean) is for. Every
+/// other output flag (`--dump-frame`, `--dump-frame-every`/`--dump-dir`,
+/// `--dump-state`, `--dump-spc`, `--dump-audio`, `--save-state-at`) is a
+/// single, normally small artifact the caller asked for by an explicit name —
+/// silently redirecting *that* path would be surprising (a script writing
+/// `--dump-frame out.png` and then looking for `out.png` would not find it),
+/// so those honor `path` exactly as given, relative to the current directory.
+/// This split is deliberate (review point H) and documented in `USAGE`.
 fn resolve_out_path(p: &Path) -> PathBuf {
     if p.is_absolute() {
         p.to_path_buf()
@@ -505,7 +867,7 @@ fn resolve_out_path(p: &Path) -> PathBuf {
     }
 }
 
-fn open_trace(path: &Path) -> Result<BufWriter<File>, String> {
+fn open_trace(path: &Path, cpu: &str) -> Result<BufWriter<File>, String> {
     let resolved = resolve_out_path(path);
     if let Some(parent) = resolved.parent() {
         if !parent.as_os_str().is_empty() {
@@ -514,7 +876,7 @@ fn open_trace(path: &Path) -> Result<BufWriter<File>, String> {
         }
     }
     let f = File::create(&resolved).map_err(|e| format!("create {}: {e}", resolved.display()))?;
-    eprintln!("tracing 65C816 to {}", resolved.display());
+    eprintln!("tracing {cpu} to {}", resolved.display());
     Ok(BufWriter::new(f))
 }
 
@@ -624,6 +986,193 @@ mod tests {
     use super::*;
 
     #[test]
+    fn version_flag_parses_without_a_rom() {
+        for flag in ["--version", "-V"] {
+            let args = vec![flag.to_string()];
+            let parsed = parse_args(&args).expect(flag);
+            assert!(parsed.version);
+            assert!(parsed.rom.is_none());
+        }
+        // Also accepted alongside --headless, which normally requires a ROM.
+        let args = vec!["--headless".to_string(), "--version".to_string()];
+        assert!(parse_args(&args).expect("--headless --version").version);
+    }
+
+    #[test]
+    fn version_string_is_the_package_version() {
+        assert_eq!(VERSION, env!("CARGO_PKG_VERSION"));
+        assert_eq!(APP_NAME, "Prisme - SuperNes");
+    }
+
+    #[test]
+    fn civil_from_unix_matches_known_utc_instants() {
+        let t = civil_from_unix(0);
+        assert_eq!((t.year, t.month, t.day, t.hour, t.minute, t.second), (1970, 1, 1, 0, 0, 0));
+        // 2001-09-09T01:46:40Z, the "billennium" timestamp.
+        let t = civil_from_unix(1_000_000_000);
+        assert_eq!((t.year, t.month, t.day, t.hour, t.minute, t.second), (2001, 9, 9, 1, 46, 40));
+        let t = civil_from_unix(1_700_000_000);
+        assert_eq!(
+            (t.year, t.month, t.day, t.hour, t.minute, t.second),
+            (2023, 11, 14, 22, 13, 20)
+        );
+        // Leap day of a 400-year leap year.
+        let t = civil_from_unix(951_782_400);
+        assert_eq!((t.year, t.month, t.day), (2000, 2, 29));
+        // Last second before the epoch (negative timestamp).
+        let t = civil_from_unix(-1);
+        assert_eq!((t.year, t.month, t.day, t.hour, t.minute, t.second), (1969, 12, 31, 23, 59, 59));
+    }
+
+    #[test]
+    fn calendar_time_formats_stamp_and_id666_date() {
+        let t = CalendarTime { year: 2026, month: 7, day: 4, hour: 9, minute: 5, second: 3 };
+        assert_eq!(t.file_stamp(), "20260704-090503");
+        assert_eq!(t.id666_date(), "07/04/2026");
+        assert_eq!(t.id666_date().len(), 10);
+    }
+
+    #[test]
+    fn sanitize_file_stem_produces_portable_names() {
+        assert_eq!(sanitize_file_stem("SUPER MARIOWORLD"), "SUPER_MARIOWORLD");
+        assert_eq!(sanitize_file_stem("  SECRET OF MANA   "), "SECRET_OF_MANA");
+        assert_eq!(sanitize_file_stem("A/B:C*D?E\"F<G>H|I"), "A_B_C_D_E_F_G_H_I");
+        assert_eq!(sanitize_file_stem("bad\u{7}ctrl"), "bad_ctrl");
+        assert_eq!(sanitize_file_stem("trailing..."), "trailing");
+        assert_eq!(sanitize_file_stem("   "), "SNES");
+        assert_eq!(sanitize_file_stem(""), "SNES");
+        // Long titles are bounded so the final name stays well under any
+        // filesystem's per-component limit.
+        assert!(sanitize_file_stem(&"X".repeat(200)).len() <= 64);
+    }
+
+    #[test]
+    fn sanitize_file_stem_strips_leading_dots_to_avoid_hidden_files() {
+        assert_eq!(sanitize_file_stem(".hidden game"), "hidden_game");
+        // Nothing left after stripping leading/trailing dots: falls back like
+        // any other empty result.
+        assert_eq!(sanitize_file_stem("..."), "SNES");
+    }
+
+    #[test]
+    fn sanitize_file_stem_avoids_windows_reserved_device_names() {
+        for reserved in ["CON", "con", "NUL", "PRN", "AUX", "COM1", "LPT9"] {
+            let stem = sanitize_file_stem(reserved);
+            assert_ne!(
+                stem.to_ascii_uppercase(),
+                reserved.to_ascii_uppercase(),
+                "{reserved} must not survive unchanged"
+            );
+            assert!(!is_windows_reserved_name(&stem));
+        }
+        // A reserved word as part of a longer title is untouched.
+        assert_eq!(sanitize_file_stem("CONTRA"), "CONTRA");
+    }
+
+    #[test]
+    fn sanitize_file_stem_bounds_byte_length_not_char_count() {
+        // Each 'é' is 2 bytes in UTF-8; 64 of them must not yield 128 bytes,
+        // and the result must still be valid UTF-8 (no char split mid-boundary,
+        // which would make `String::push` itself panic if it ever happened).
+        let stem = sanitize_file_stem(&"é".repeat(64));
+        assert!(stem.len() <= 64, "stem is {} bytes: {stem:?}", stem.len());
+        assert_eq!(stem.chars().count() * 2, stem.len());
+    }
+
+    #[test]
+    fn capture_file_names_are_title_then_timestamp() {
+        // Shape of the names `App::take_screenshot` / `App::export_spc` build.
+        let t = CalendarTime { year: 2026, month: 7, day: 24, hour: 21, minute: 30, second: 45 };
+        let stem = format!("{}_{}", sanitize_file_stem("Secret of MANA "), t.file_stamp());
+        assert_eq!(stem, "Secret_of_MANA_20260724-213045");
+        let stem =
+            format!("{}_{}", sanitize_file_stem("MARIO_ALLSTARS+WORLD"), t.file_stamp());
+        assert_eq!(stem, "MARIO_ALLSTARS+WORLD_20260724-213045");
+    }
+
+    #[test]
+    fn unique_path_avoids_clobbering_an_existing_file() {
+        let dir = std::env::temp_dir().join(format!("prisme_unique_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let first = unique_path(&dir, "shot", "png");
+        assert_eq!(first, dir.join("shot.png"));
+        std::fs::write(&first, b"x").expect("write");
+        let second = unique_path(&dir, "shot", "png");
+        assert_eq!(second, dir.join("shot_2.png"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unique_path_reserves_the_file_atomically() {
+        // `create_new` means the returned path is already claimed (an empty
+        // file exists at it) without the caller having written anything yet:
+        // two back-to-back calls with no intervening write must still yield
+        // two distinct, both-existing paths (review point J: the previous
+        // `exists()`-then-later-`create` sequence was a TOCTOU race).
+        let dir = std::env::temp_dir().join(format!("prisme_unique_atomic_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let first = unique_path(&dir, "shot", "png");
+        let second = unique_path(&dir, "shot", "png");
+        assert_ne!(first, second);
+        assert!(first.exists() && second.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dump_spc_flag_parses() {
+        let args = vec!["rom.sfc".to_string(), "--dump-spc".to_string(), "out.spc".to_string()];
+        let parsed = parse_args(&args).expect("parse");
+        assert_eq!(parsed.dump_spc, Some(PathBuf::from("out.spc")));
+        // A missing value is an error, not a silent default.
+        assert!(parse_args(&["--dump-spc".to_string()]).is_err());
+    }
+
+    #[test]
+    fn ui_shot_takes_a_view_a_size_and_an_output_path() {
+        let args = ["--ui-shot", "library", "shot.png"].map(String::from).to_vec();
+        let parsed = parse_args(&args).expect("parse");
+        assert_eq!(parsed.ui_shot, Some(ui::shot::View::Library));
+        // The positional argument is the *output*, not a ROM to run.
+        assert_eq!(parsed.rom, Some(PathBuf::from("shot.png")));
+        assert_eq!(parsed.ui_shot_size, ui::shot::DEFAULT_SIZE);
+
+        let args = ["--ui-shot", "settings", "--ui-shot-size", "1024x768", "s.png"]
+            .map(String::from)
+            .to_vec();
+        let parsed = parse_args(&args).expect("parse");
+        assert_eq!(
+            parsed.ui_shot,
+            Some(ui::shot::View::Settings(ui::settings::Section::Display)),
+            "`settings` names the section the panel opens on"
+        );
+        assert_eq!(parsed.ui_shot_size, (1024, 768));
+
+        // Each section of the panel is capturable on its own.
+        for (name, section) in [
+            ("settings-audio", ui::settings::Section::Audio),
+            ("settings-inputs", ui::settings::Section::Inputs),
+            ("settings-emulation", ui::settings::Section::Emulation),
+            ("settings-folders", ui::settings::Section::Folders),
+            ("settings-about", ui::settings::Section::About),
+        ] {
+            let args = ["--ui-shot", name, "s.png"].map(String::from).to_vec();
+            let parsed = parse_args(&args).expect("parse");
+            assert_eq!(parsed.ui_shot, Some(ui::shot::View::Settings(section)), "{name}");
+        }
+
+        // A view that does not exist, a missing size and a missing output path
+        // are all refused up front rather than producing an empty PNG.
+        assert!(parse_args(&["--ui-shot".into(), "grid".into(), "s.png".into()]).is_err());
+        assert!(parse_args(&["--ui-shot".into(), "library".into()]).is_err());
+        assert!(parse_args(
+            &["--ui-shot".into(), "library".into(), "--ui-shot-size".into(), "huge".into(), "s.png".into()]
+        )
+        .is_err());
+        // …and it never disturbs a plain run: no flag, no capture.
+        assert_eq!(parse_args(&["rom.sfc".into()]).expect("parse").ui_shot, None);
+    }
+
+    #[test]
     fn write_wav_header_is_canonical() {
         let samples = vec![(0i16, 0i16), (1000, -1000), (32767, -32768)];
         let rate = 32_000u32;
@@ -656,13 +1205,11 @@ mod tests {
     }
 }
 
-fn write_frame_png(snes: &Snes, path: &Path) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("create {}: {e}", parent.display()))?;
-        }
-    }
+/// Write the console's raw 256x224 framebuffer as an RGBA PNG. Reads straight
+/// from the core, so no windowed overlay/zoom/filter can ever appear in it —
+/// shared by `--dump-frame`, `--dump-frame-every` and the F12 screenshot.
+pub(crate) fn write_frame_png(snes: &Snes, path: &Path) -> Result<(), String> {
+    create_parent_dir(path)?;
     let mut rgba = vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT * 4];
     snes.framebuffer.to_rgba(&mut rgba);
     let file = File::create(path).map_err(|e| format!("create {}: {e}", path.display()))?;
@@ -673,4 +1220,19 @@ fn write_frame_png(snes: &Snes, path: &Path) -> Result<(), String> {
     let mut writer = encoder.write_header().map_err(|e| format!("png header: {e}"))?;
     writer.write_image_data(&rgba).map_err(|e| format!("png write: {e}"))?;
     Ok(())
+}
+
+/// Same 8-bit RGBA PNG as `write_frame_png`, encoded into memory instead of
+/// straight to a file — used by the library thumbnails, which are written
+/// atomically (`atomic::write` takes the finished bytes).
+pub(crate) fn encode_rgba_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut out, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().map_err(|e| format!("png header: {e}"))?;
+        writer.write_image_data(rgba).map_err(|e| format!("png write: {e}"))?;
+    }
+    Ok(out)
 }

@@ -7,6 +7,30 @@ Effort : **S** ≈ une passe courte · **M** ≈ une demi-journée d'agent · **
 
 ---
 
+## État au 25 juillet 2026
+
+**Livré :** Phases **0** (préférences JSON), **1** (version, muet/volume, captures, slots de save
+state, confirmation de sortie, accéléré, reprise instantanée, export SPC), **2** (fenêtre
+redimensionnable, plein écran, filtres, ratio), **3** (manettes gilrs 2 joueurs + remapping clavier
+et manette), **4** (répertoires configurables : ROMs, captures, sauvegardes), **7** (identité
+« Prisme - SuperNes ») et **8** (refonte de l'interface : accueil, bibliothèque, favoris, fiches de
+jeu, panneaux de réglages).
+
+**Reste :** Phases **5** (rewind), **6** (mode enfant), **9** (triches par IA),
+**10** (canal agent), **11** (enregistrement vidéo), **12** (amélioration des captures par IA).
+
+**Chiffres :** 332 tests cœur + 260 tests frontend. Émulation prouvée **inchangée** par la Phase 8
+(les 7 jeux rendent des images identiques au bit près à une baseline pré-Phase 8).
+
+**À confirmer par l'utilisateur** (non vérifiable sans écran) : « À propos », la confirmation de
+sortie sur Échap, et le sélecteur de ROM (`O`) — les trois chemins qui empruntaient les modales
+natives à l'origine du crash.
+
+**Non validé :** les builds **Windows et Linux** n'ont jamais tourné (la CI ne se déclenche que sur
+`main`, et `dev` compte 10 commits non fusionnés).
+
+---
+
 ## Constat de départ (état réel du code)
 
 | Fait | Conséquence sur le plan |
@@ -19,7 +43,7 @@ Effort : **S** ≈ une passe courte · **M** ≈ une demi-journée d'agent · **
 
 ---
 
-## Phase 0 — Socle : préférences persistées **[S/M — à faire en premier]**
+## Phase 0 — Socle : préférences persistées **[✅ FAIT]**
 
 Sans ça, chaque option suivante réinvente sa propre persistance.
 
@@ -36,7 +60,7 @@ Sans ça, chaque option suivante réinvente sa propre persistance.
 
 ---
 
-## Phase 1 — Quick wins **[S chacun]**
+## Phase 1 — Quick wins **[✅ FAIT]**
 
 Petits, indépendants, forte valeur perçue. À enchaîner dans une seule passe.
 
@@ -73,11 +97,18 @@ Petits, indépendants, forte valeur perçue. À enchaîner dans une seule passe.
 
 ---
 
-## Phase 2 — Affichage : zoom, filtres, ratio **[M]**
+## Phase 2 — Affichage : taille de fenêtre, plein écran, filtres, ratio **[✅ FAIT]**
 
 Les trois touchent la même zone (surface `pixels`) → à faire ensemble.
 
-- **Zoom ×1/×2/×3/×4** : redimensionne la fenêtre et la surface. ×1 pixel-perfect par défaut.
+- **Taille de la fenêtre** (c'est le sens premier de « zoom » ici) : la fenêtre doit être
+  **librement redimensionnable à la souris**. Les paliers ×1/×2/×3/×4 sont des raccourcis de confort
+  qui fixent une taille, pas le seul moyen d'agrandir. À toute taille, l'image est mise à l'échelle
+  **sans déformation**, avec bandes noires (letterbox/pillarbox) ; en mode pixel-perfect on retient
+  le plus grand facteur **entier** qui tienne, pour garder des pixels nets.
+- **Plein écran** : bascule fenêtré ↔ plein écran (`F11`, plus Ctrl+Cmd+F sur macOS et une entrée de
+  menu), même règle de mise à l'échelle sans déformation. `Échap` en plein écran doit **sortir du
+  plein écran**, pas quitter l'application.
 - **Filtres** (indépendant du zoom) : `Aucun` (plus proche voisin, net) / `Lissé` (bilinéaire) /
   `CRT` (scanlines + léger flou/vignettage) — c'est le « rendu dégradé rétro » souhaité.
   Implémentation : shader sur la surface `pixels` (wgpu), ou post-traitement CPU si plus simple pour
@@ -91,28 +122,44 @@ un choix explicite.
 
 ---
 
-## Phase 3 — Manette + remapping **[M/L]**
+## Phase 3 — Manette + remapping **[✅ FAIT]**
 
 Le plus gros gain d'usage réel (le clavier est frustrant pour un jeu de console).
 
-- **Manette** : ajouter `gilrs`, détecter les manettes branchées (USB/Bluetooth), mapper les boutons
-  vers `JoypadState`. Mapping par défaut sensé (croix/stick → D-pad, A/B/X/Y, L/R, Start/Select),
-  branchement/débranchement à chaud géré proprement.
-- **Remapping** : redéfinir clavier **et** manette, mémorisé (Phase 0). Interface : commencer par
-  une entrée de menu « Configurer les touches » qui capture les appuis un par un (simple), plutôt
-  qu'un éditeur complet.
-- Bonus naturel une fois la manette là : support **2 joueurs** (le cœur gère déjà 2 manettes).
+- **Manette** (`frontend/src/pad.rs`, `gilrs`) : manettes USB/Bluetooth détectées au lancement et à
+  chaud, mapping par défaut positionnel (South→B, East→A, West→Y, North→X ; croix, hat et stick
+  gauche → directions ; LB/LT et RB/RT → L/R), 2 joueurs (manette 1 OR'ée avec le clavier sur le
+  joueur 1, manette 2 sur le joueur 2).
+- **Remapping** (`frontend/src/input.rs`, section « Entrées » de `ui/settings.rs`) : les douze
+  boutons SNES sont réaffectables au clavier **et** à la manette, mémorisés dans `prefs.keymap` /
+  `prefs.pad_map` et appliqués sans redémarrage. Capture bouton par bouton (« appuyez sur une
+  touche… »), Échap pour annuler, échange automatique en cas de conflit, refus des touches déjà
+  utilisées par un raccourci de l'application, et bouton « Rétablir les entrées par défaut ».
 
 ---
 
-## Phase 4 — Répertoires configurables **[S/M]**
+## Phase 4 — Répertoires configurables **[✅ FAIT]**
 
-- Réglages « Dossier des sauvegardes » et « Dossier des captures » (sélecteur natif `rfd`), mémorisés.
-- Comportement : si défini → `<dossier>/<jeu>.srm` / `.state` ; sinon comportement actuel (à côté de
-  la ROM). Le flag CLI `--save` reste prioritaire.
-- Points d'attention : créer le dossier s'il manque, collisions de noms entre jeux homonymes,
-  et **ne pas perdre les sauvegardes existantes** (au minimum : les lire à l'ancien emplacement en
-  repli, ou proposer une migration).
+- Section « Dossiers » du panneau de réglages : **dossier des ROMs** (relance le scan de la
+  bibliothèque), **dossier des captures**, **dossier des sauvegardes** — sélecteur natif via
+  `dialog.rs` (jamais depuis un callback winit), mémorisés dans `prefs.json`.
+- Comportement (`frontend/src/paths.rs`) : si `save_dir` est défini → `<dossier>/<id du jeu>.srm`
+  et `.state`/`.stateN`/`.resume`, où l'id est celui de `library::game_id` (titre cartouche +
+  somme de contrôle d'en-tête, la clé de `prefs.games`) ; sinon à côté de la ROM. Nommer par le
+  **jeu** et non par le **fichier** est ce qui empêche deux ROMs homonymes rangées dans des dossiers
+  différents de partager un `.srm` (l'une chargeait la sauvegarde de l'autre, la jugeait invalide et
+  l'écrasait). Le flag CLI `--save` reste **prioritaire** (et un run **headless ne lit aucune
+  préférence**).
+- Non-perte : une lecture parcourt, dans l'ordre, `<dossier>/<id>.<ext>`, `<dossier>/<nom de la
+  ROM>.<ext>` (ce qu'écrivaient les versions précédentes), les mêmes noms dans `previous_save_dir`
+  (le dossier configuré juste avant), puis le fichier resté **à côté de la ROM** ; rien n'est déplacé
+  ni supprimé (migration paresseuse : la première écriture suivante atterrit dans le dossier). Sans
+  dossier configuré, une sauvegarde restée dans le dossier abandonné est relue quand elle est **plus
+  récente** que celle à côté de la ROM, pour qu'un retour à « Par défaut » ne renvoie pas
+  silencieusement une copie gelée. Le dossier manquant est créé, un dossier non inscriptible est
+  refusé et signalé dans le panneau. Le réglage est pris en compte **au chargement d'un jeu** : la
+  partie en cours garde ses fichiers, pour ne jamais écraser une sauvegarde déjà présente dans le
+  nouveau dossier.
 
 ---
 
@@ -167,7 +214,7 @@ Pistes de noms (à trancher) : **Chrono16**, **Aurora16**, **Kestrel**, **Nova16
 
 ---
 
-## Phase 8 — Refonte de l'interface : une vraie application **[L]** *(idée retenue — phase phare)*
+## Phase 8 — Refonte de l'interface : une vraie application **[✅ FAIT]**
 
 Aujourd'hui, lancer l'émulateur ouvre une boîte de dialogue de fichiers. L'objectif : **un véritable
 écran d'accueil**, complet et soigné, qui fait passer le projet d'« émulateur qui marche » à
@@ -309,13 +356,57 @@ bégaie pas ; la capture brute est disponible immédiatement, l'améliorée arri
    d'échouer.
    *(Un LLM n'est pas l'outil adapté ici : c'est un travail de modèle de vision, pas de langage.)*
 
-**Réutilisation pour la vidéo** : l'export vidéo (Phase 11) étant lui aussi **hors ligne** (rejeu
-déterministe puis encodage), il peut passer par **le même pipeline d'amélioration** image par image.
-Une seule brique sert aux deux — et là encore, la stabilité temporelle est assurée parce que le rejeu
-est déterministe.
+**Périmètre : captures d'écran uniquement.** L'amélioration par IA **ne s'applique pas aux vidéos**
+pour le moment (décision prise). Techniquement ce serait possible — l'export vidéo (Phase 11) est
+lui aussi hors ligne et pourrait réutiliser le même pipeline — mais c'est hors périmètre : le coût
+(des milliers d'images par séquence au lieu d'une) et le rendu en mouvement demandent une évaluation
+séparée. À reconsidérer seulement une fois les captures éprouvées.
 
 **Réserve assumée** : « mieux » reste subjectif (le dithering SNES était conçu pour être fondu par une
 télé cathodique). D'où le caractère **facultatif**, désactivé par défaut, avec l'original toujours conservé.
+
+---
+
+## Phase 13 — Jaquettes et métadonnées officielles **[M]** *(idée retenue)*
+
+Enrichir la bibliothèque avec la **jaquette officielle** et les **détails** de chaque jeu (année,
+éditeur, genre, nombre de joueurs, description), en complément des vignettes que l'émulateur génère
+lui-même.
+
+**SOLUTION RETENUE — appariement par empreinte, puis jaquettes sans clé.**
+
+Le défaut de `libretro-thumbnails` est l'appariement par nom ; on le supprime en passant par un DAT :
+
+1. **CRC32 de la ROM** (header copieur retiré — le chargeur le fait déjà).
+2. **Recherche dans un DAT No-Intro** (XML : CRC → nom canonique) : `Super Mario Kart (E) [!].zip`
+   devient `Super Mario Kart (Europe)` de façon **certaine**, pas par ressemblance. Le DAT est
+   téléchargé une fois à la demande et mis en cache ; il n'est pas embarqué dans l'application.
+3. **Jaquette via `libretro-thumbnails`** avec ce nom exact : simple requête HTTPS,
+   **aucun compte, aucune clé** (`.../Nintendo - Super Nintendo Entertainment System/Named_Boxarts/<nom>.png`,
+   plus `Named_Snaps` et `Named_Titles` si utile).
+
+Pourquoi ce choix plutôt que ScreenScraper seul : l'appariement devient aussi fiable (les deux
+reposent sur l'empreinte) **sans exiger d'inscription**. Une fonctionnalité qui demande de créer un
+compte avant d'afficher quoi que ce soit est une mauvaise première impression, et l'application ne
+peut pas s'inscrire à la place de l'utilisateur.
+
+**Détails (année, éditeur, genre, description)** — libretro n'en fournit pas. Deux niveaux :
+- **Par défaut, sans réseau ni compte** : ce que le cœur sait déjà lire — titre, région, mapping,
+  taille, SRAM, **coprocesseur détecté** — plus le nom canonique issu du DAT. Fiche déjà honnête.
+- **En option, avec identifiants fournis par l'utilisateur** : ScreenScraper (par hash, riche) ou
+  IGDB (par titre). Absents → on n'affiche simplement pas ces champs.
+
+**Règles de conception :**
+- **Les vignettes générées par l'émulateur restent le défaut** : elles fonctionnent toujours, sans
+  réseau. La jaquette officielle vient *en plus*, jamais *à la place*.
+- **Optionnel, désactivé par défaut** ; téléchargement **à la demande** dans un cache local
+  (invalidation par CRC). **Ne rien redistribuer** avec l'application : les jaquettes appartiennent
+  aux éditeurs.
+- **Hors ligne d'abord** : réseau absent, DAT introuvable ou jaquette manquante → repli silencieux
+  sur la vignette générée, jamais de blocage de la bibliothèque.
+- Respecter les limites de débit ; requêtes espacées et résultats mis en cache, y compris les échecs
+  (ne pas réinterroger à chaque lancement pour un jeu sans jaquette connue).
+- L'utilisateur garde la main : pouvoir forcer une de ses captures comme visuel du jeu.
 
 ---
 
@@ -342,10 +433,10 @@ Phase 0 (socle prefs JSON)                                    ← débloque 7 au
         │      ├─ Phase 3 (manette + remapping)                ← plus gros gain d'usage
         │      └─ Phase 6 (mode enfant)
         ├─ Phase 2 (zoom + filtres + ratio)
-        ├─ Phase 4 (répertoires)
+        ├─ Phase 4 (répertoires)                               ✅ FAIT
         │      ├─ Phase 5 (rewind)
         │      └─ Phase 11 (enregistrement video)          ← via rejeu deterministe
-        │             └─ Phase 12 (amelioration IA des captures/videos, option)
+        │             └─ Phase 12 (amelioration IA des CAPTURES seulement, option)
         └─ Phase 10 (canal agent : l'IA joue)                  ← socle technique de la triche
                └─ Phase 9 (triches assistées par l'IA)         (UI de la Phase 8 pour l'affichage)
 ```

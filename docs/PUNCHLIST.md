@@ -62,3 +62,68 @@ Remaining (not blocking boot): deeper Yoshi's Island gameplay past LANGUAGE SELE
 - `--trace-spc` is a no-op: expose an SPC700 trace hook in the APU core (needed for M8 debugging). DO THIS IN M8.
 - `--log-mmio` matches on low-16-bits only, so WRAM shadow writes at `$7E/$7F:21xx`/`:42xx` are logged as FAKE `$21xx/$42xx` register events — actively misleading. Fix: only log when the access is to a real mapped register bank ($00-$3F/$80-$BF). DO THIS IN M8 (audio debugging depends on trustworthy MMIO logs).
 - Frontend prepends `target/debug-out/` to `--trace`/`--dump-frame`; pass BARE filenames to avoid doubled paths.
+
+## Phase 2 — CRT/Lissé coûteux sur une très grande fenêtre (mesuré)
+Le compositing (zoom + filtre + ratio + letterbox) est fait **sur CPU** : `pixels` 0.15 impose
+`FilterMode::Nearest` sans point d'extension public, et monter un second pipeline wgpu/WGSL n'a pas
+été jugé rentable à ce stade. Coûts mesurés (Apple Silicon, release) :
+
+| Fenêtre | Filtre | Coût/image | Verdict |
+|---|---|---|---|
+| 1172x896 (zoom x4, TV) | CRT | 4,1 ms | OK |
+| 3840x2160 (4K plein écran) | Aucun (défaut) | **4,0 ms** | OK |
+| 3840x2160 (4K plein écran) | CRT + TV | **23,4 ms** | dépasse le budget de 20 ms a 50 Hz |
+
+Le défaut (`Aucun`) est sûr à toute taille ; seuls `CRT`/`Lissé` en plein écran 4K posent problème.
+**Correctif suggéré si le cas se présente** : composer l'effet CRT à une résolution intermédiaire
+(~2-3x le natif, ex. 1024x896) puis agrandir au plus proche voisin — visuellement quasi identique
+(les scanlines n'ont pas besoin de la résolution native de l'écran) pour un coût divisé par ~6.
+Alternative plus lourde : un vrai shader wgpu.
+
+## CRASH — toute modale native ouverte DEPUIS la boucle winit tue l'application
+**Symptôme signalé :** le menu « À propos » fait planter l'application (reproduit en 0.1.0 puis en
+0.2.0, donc la première correction — passer des métadonnées à `PredefinedMenuItem::about` — était
+une hypothèse fausse).
+
+**Cause racine (prouvée) :** `winit-0.30.13/src/platform_impl/macos/event_handler.rs` panique
+volontairement en cas de réentrance :
+```
+58:  unreachable!("tried to set handler while another was already set");
+64:  unreachable!("tried to set handler that is currently in use");
+135: panic!("tried to handle event while another event is currently being handled");
+```
+La pile de crash montre `EventHandler::set` juste sous `-[NSApplication run]`. Le panneau « À propos »
+d'AppKit ouvre une **boucle d'événements imbriquée** → réentrance dans le gestionnaire winit →
+panique Rust traversant les cadres Objective-C → `objc_exception_rethrow` → abort.
+
+**Portée : ce n'est pas propre à « À propos ».** Toute modale native déclenchée *depuis* un callback
+de la boucle est concernée :
+- `PredefinedMenuItem::about` (planté, confirmé) ;
+- la **confirmation de sortie** (`rfd::MessageDialog` sur Échap / Quitter) — à vérifier, même
+  mécanisme (NSAlert `runModal`) ;
+- le **sélecteur de ROM** ouvert par la touche `O` / menu Ouvrir — à vérifier. *(Celui du démarrage
+  est sûr : il s'exécute AVANT `event_loop.run_app()`.)*
+
+**Correctifs possibles, par ordre de préférence :**
+1. **Remplacer ces modales par des fenêtres in-app egui** (Phase 8, en cours) — supprime la classe de
+   bug entière : plus aucune boucle imbriquée. C'est la bonne réponse pour « À propos » et la
+   confirmation de sortie.
+2. Pour ce qui doit rester natif (sélecteur de fichiers), **différer l'ouverture hors du callback**
+   (`dispatch_async` sur la file principale) pour que la modale s'exécute sur une pile propre.
+3. À défaut, retirer l'entrée « À propos » : un menu qui plante à coup sûr est pire que pas de menu.
+
+**Leçon de méthode :** ne plus annoncer ce type de correctif comme acquis sans vérification à
+l'écran — l'environnement de développement n'a pas d'affichage, donc ces chemins ne sont testables
+que par l'utilisateur ou par une analyse de la pile de crash.
+
+**État après la Phase 8 (code, non vérifié à l'écran) :**
+- `PredefinedMenuItem::about` n'est plus installé (`menu::install`) ; l'information est dans
+  `Réglages… > À propos`, dessiné par egui.
+- La confirmation de sortie est une `egui::Modal` (`ui::confirm`) : plus de `rfd::MessageDialog`,
+  donc plus de `NSAlert runModal` depuis un callback.
+- Les sélecteurs natifs restants (ROM, dossier des ROMs, dossier des captures) passent par
+  `crate::dialog` : la demande est mise en file, puis postée sur la file principale libdispatch
+  (`dispatch_async_f`) et exécutée entre deux callbacks winit, pile propre. `about_to_wait` est
+  lui-même un callback winit, donc un simple report « à la prochaine itération » n'aurait pas suffi.
+- Garde automatisée : `dialog::tests::the_event_loop_never_calls_the_native_picker_itself` échoue si
+  `video.rs` mentionne `picker::` ou `rfd::`.

@@ -1,6 +1,6 @@
 [package]
 name = "prisme"
-version = "0.1.0"
+version = "1.2.0"
 edition = "2021"
 
 [[bin]]
@@ -11,8 +11,34 @@ path = "src/main.rs"
 snes-core = { path = "../core" }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 png = "0.17"
-winit = "0.30"
-pixels = "0.15"
+winit = { version = "0.30", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+pixels = "0.16"
 cpal = "0.15"
 rfd = "0.17"
 muda = "0.19"
+
+# Gamepads (Phase 3). Default features only: `wgi` (Windows Gaming Input) is
+# the maintained Windows backend, and force feedback is unused here.
+# On macOS gilrs runs IOKit/HID on its own thread with its own CFRunLoop and
+# hands events over a channel, so `next_event` is a non-blocking channel drain
+# and nothing re-enters winit's event loop (see `crate::dialog` for why that
+# matters).
+gilrs = "0.11"
+
+# Immediate-mode UI (home screen, panels). The wgpu version is the hard
+# constraint: `pixels` 0.16 and `egui-wgpu` 0.33 both require wgpu ^27, so both
+# see the same `wgpu::Device`/`Queue`/`TextureView` types and egui can draw into
+# the very surface `pixels` already owns (see `ui::egui_layer`). `egui-winit`
+# 0.33 targets winit ^0.30, the version already used here.
+# `egui-winit` default features (clipboard/links/x11/wayland) are off: none is
+# needed by the home screen and they pull native toolkit dependencies.
+egui = "0.33"
+egui-wgpu = "0.33"
+egui-winit = { version = "0.33", default-features = false }
+
+# Only for `localtime_r` (timezone/DST-aware timestamps in screenshot and .spc
+# file names); std has no timezone database. Already in the tree via cpal.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

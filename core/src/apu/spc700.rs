@@ -101,7 +101,8 @@ impl Spc700 {
     }
 
     // --- PSW pack/unpack ---
-    fn psw(&self) -> u8 {
+    /// PSW packed as the hardware register byte (N V P B H I Z C, bit7..bit0).
+    pub fn psw(&self) -> u8 {
         (self.n as u8) << 7
             | (self.v as u8) << 6
             | (self.p as u8) << 5
