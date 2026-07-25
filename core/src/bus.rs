@@ -910,7 +910,7 @@ impl Bus {
     fn debug_tap(&self, addr: u32, value: u8, is_write: bool) {
         if !self.watch_is_empty() {
             let full = addr & 0xFF_FFFF;
-            if self.debug.watch.iter().any(|&w| w == full) {
+            if self.debug.watch.iter().any(|&w| Self::watch_matches(w, full)) {
                 eprintln!(
                     "watch {} {:02X}:{:04X} = {:02X}",
                     if is_write { "WR" } else { "RD" },
@@ -935,6 +935,22 @@ impl Bus {
 
     fn watch_is_empty(&self) -> bool {
         self.debug.watch.is_empty()
+    }
+
+    /// Does a bus access at `addr` match the watchpoint `watch`?
+    ///
+    /// A hardware register has no single bank: the $2100-$21FF / $4200-$5FFF
+    /// windows decode identically in every system bank ($00-$3F and $80-$BF),
+    /// so a watch on one of them must fire whichever mirror the code uses —
+    /// `--watch 00:2140` has to catch the `LDA $2140` a program runs from bank
+    /// $81. Anything else (WRAM, ROM, SRAM) keeps its exact-bank meaning, since
+    /// there the bank is part of the address.
+    fn watch_matches(watch: u32, addr: u32) -> bool {
+        if Self::is_mapped_mmio(watch) {
+            Self::is_mapped_mmio(addr) && (watch & 0xFFFF) == (addr & 0xFFFF)
+        } else {
+            watch == addr
+        }
     }
 
     /// True only when `addr` decodes to a real hardware register: the $2100-$21FF
@@ -1868,5 +1884,31 @@ mod tests {
         bus.mdr = 0xA5;
         assert_eq!(bus.read_no_tick(0x00_8000), 0xA5);
         assert_eq!(bus.read_no_tick(0x70_0000), 0xA5);
+    }
+
+    #[test]
+    fn a_watch_on_a_register_catches_every_bank_it_is_mirrored_in() {
+        // Terranigma polls $2140 with DB=$81. A watch that only matched the
+        // bank it was typed in stayed silent through 300 000 reads of the very
+        // register being watched, which is worse than having no watch at all.
+        let watch = 0x00_2140;
+        for bank in [0x00u32, 0x01, 0x3F, 0x80, 0x81, 0xBF] {
+            assert!(
+                Bus::watch_matches(watch, bank << 16 | 0x2140),
+                "bank {bank:02X} mirrors $2140 and must be caught"
+            );
+        }
+        assert!(!Bus::watch_matches(watch, 0x00_2141));
+        // $7E/$7F are WRAM, not a register window, at any offset.
+        assert!(!Bus::watch_matches(watch, 0x7E_2140));
+    }
+
+    #[test]
+    fn a_watch_on_memory_still_means_that_exact_bank() {
+        // Outside the register windows the bank is part of the address: WRAM at
+        // $7E:1234 and the ROM byte at $12:1234 are different things.
+        assert!(Bus::watch_matches(0x7E_1234, 0x7E_1234));
+        assert!(!Bus::watch_matches(0x7E_1234, 0x7F_1234));
+        assert!(!Bus::watch_matches(0x12_1234, 0x13_1234));
     }
 }

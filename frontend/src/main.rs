@@ -401,6 +401,9 @@ fn run(args: Args) -> Result<(), String> {
     let mut audio_pcm: Vec<(i16, i16)> = Vec::new();
 
     for frame in 0..args.frames {
+        if !args.watch.is_empty() || args.log_mmio {
+            eprintln!("-- frame {frame}");
+        }
         let p1 = script_state(&script, frame);
         let in_range =
             frame >= args.trace_start_frame && frame <= args.trace_end_frame;
