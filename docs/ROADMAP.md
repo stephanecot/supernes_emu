@@ -350,6 +350,40 @@ télé cathodique). D'où le caractère **facultatif**, désactivé par défaut,
 
 ---
 
+## Phase 13 — Jaquettes et métadonnées officielles **[M]** *(idée retenue)*
+
+Enrichir la bibliothèque avec la **jaquette officielle** et les **détails** de chaque jeu (année,
+éditeur, genre, nombre de joueurs, description), en complément des vignettes que l'émulateur génère
+lui-même.
+
+**Sources — préférer les API aux pages HTML** (une page change, une API non ; et cela respecte les
+conditions d'utilisation) :
+
+| Source | Appariement | Remarque |
+|---|---|---|
+| **ScreenScraper.fr** | **par hash** (CRC/MD5/SHA1) | Référence des frontends rétro ; jaquettes + captures + métadonnées. Compte gratuit. |
+| **libretro-thumbnails** | par nom (convention No-Intro) | Dépôt public, pas de clé, simple HTTP. Le plus simple à intégrer. |
+| **IGDB** | par titre | Métadonnées riches, API officielle (identifiants Twitch). |
+
+**Apparier par empreinte, pas par titre.** Nos fichiers suivent la convention GoodSNES
+(`Super Mario Kart (E) [!].zip`) alors que les bases utilisent souvent No-Intro
+(`Super Mario Kart (Europe)`) : un appariement par nom échouerait ou confondrait deux versions. Or
+la **somme de contrôle de l'en-tête est déjà lue** et un CRC32 du fichier est trivial à calculer —
+cela distingue proprement PAL/NTSC et les dumps modifiés.
+
+**Règles de conception :**
+- **Les vignettes générées par l'émulateur restent le défaut** : elles fonctionnent toujours, sans
+  réseau. La jaquette officielle vient *en plus*, jamais *à la place*.
+- **Optionnel, désactivé par défaut**, source choisie dans les réglages ; téléchargement **à la
+  demande** dans un cache local. **Ne rien redistribuer** avec l'application : les jaquettes
+  appartiennent aux éditeurs.
+- **Hors ligne d'abord** : panne réseau ou jaquette absente → repli silencieux sur la vignette
+  générée, jamais de blocage de la bibliothèque.
+- Respecter les limites de débit ; requêtes groupées et mises en cache (invalidation par hash).
+- L'utilisateur garde la main : pouvoir forcer une de ses captures comme visuel du jeu.
+
+---
+
 ## Hors périmètre immédiat (à replanifier plus tard)
 
 - **Périphériques exotiques** : multitap (4 joueurs), SNES Mouse, Super Scope. **M/L chacun**
