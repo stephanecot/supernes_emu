@@ -103,6 +103,48 @@ Libellés à l'infinitif ou à l'impératif, en minuscules-capitale de phrase, s
 
 ---
 
+## Écran de réglages (défauts signalés)
+
+**« Trop petit »** — le panneau doit cesser d'être une petite fenêtre à l'étroit. Il devient une
+**vue pleine largeur**, atteinte par l'onglet `Réglages` (cohérent avec les onglets demandés) :
+- Colonne de sections à gauche (Affichage · Audio · Émulation · Entrées · Dossiers · À propos),
+  contenu à droite, avec de vraies marges et une largeur de lecture confortable.
+- Le contenu défile **verticalement** si nécessaire ; jamais de zone comprimée ni de texte tronqué.
+- Largeur minimale de fenêtre suffisante pour que rien ne se chevauche (à vérifier sur capture à
+  900 px, la largeur la plus contrainte testée).
+
+**« La config des manettes est moche »** — c'est la section qui mérite le plus de soin, parce que
+c'est celle où l'on passe du temps à cliquer.
+
+### Le dessin de la manette (demande explicite)
+
+Afficher **une manette SNES dessinée au painter egui, à côté de la liste des boutons** :
+
+- **Forme** : la silhouette caractéristique de la manette SNES (corps arrondi allongé, croix
+  directionnelle à gauche, quatre boutons en losange à droite, Start/Select au centre, gâchettes
+  L/R en haut). Trait net, à plat — pas de faux relief ni de dégradé tape-à-l'œil.
+- **Les quatre boutons faces reprennent exactement les couleurs du prisme** : X bleu (haut),
+  A rouge (droite), B jaune (bas), Y vert (gauche). C'est la disposition réelle de la manette
+  Super Famicom / SNES européenne — et cela ancre l'identité visuelle dans le sujet plutôt que de
+  la plaquer dessus.
+- **Interaction — c'est là que le dessin devient utile, pas décoratif** :
+  - survoler une ligne de la liste **met en évidence le bouton correspondant** sur le dessin ;
+  - en **mode capture**, le bouton attendu **clignote ou s'illumine** (« appuyez sur une touche pour
+    *B* ») : on sait toujours ce qu'on est en train de configurer ;
+  - un bouton **déjà affecté** se distingue d'un bouton **non affecté** (opacité ou contour).
+- **Retour en direct (si une manette est branchée)** : les boutons réellement pressés s'allument sur
+  le dessin. C'est le moyen le plus simple de vérifier qu'une manette fonctionne, sans lancer un jeu.
+- Le dessin doit rester lisible en petit et **s'adapter à la largeur** disponible (vectoriel, donc
+  aucune image à charger).
+
+### Le reste de la section Entrées
+- Deux colonnes claires : **Clavier** et **Manette**, une ligne par bouton SNES, la touche affectée
+  en **monospace** (c'est une donnée machine).
+- Boutons « Réinitialiser » (par profil) et indication du joueur (1 / 2).
+- Conflit signalé visuellement sur la ligne fautive, pas dans une boîte de dialogue.
+
+---
+
 ## Aperçu par slot de sauvegarde (demande explicite)
 
 Quand on enregistre un état (`F5` / menu / panneau), écrire **à côté du fichier d'état une capture
@@ -127,6 +169,12 @@ Points d'attention :
 
 ## Critère d'acceptation
 
-La passe n'est pas terminée tant que **les captures headless** des trois vues n'ont pas été
-regardées et jugées : cartes de taille rigoureusement identique, aucune barre de défilement
-horizontale, marque cohérente avec l'icône de l'application, hiérarchie typographique lisible.
+La passe n'est pas terminée tant que **les captures headless** des vues n'ont pas été regardées et
+jugées :
+1. cartes de taille **rigoureusement identique** ;
+2. **aucune** barre de défilement horizontale, à aucune largeur testée (900 / 1280 / 1600 px) ;
+3. marque cohérente avec l'icône de l'application (un prisme, pas quatre carrés) ;
+4. hiérarchie typographique lisible ;
+5. **écran de réglages pleine largeur**, rien de comprimé ni de tronqué ;
+6. **manette dessinée** présente dans la section Entrées, avec la mise en évidence du bouton en
+   cours de configuration.
