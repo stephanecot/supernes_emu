@@ -1148,6 +1148,13 @@ impl App {
     fn set_zoom(&mut self, zoom: u8) {
         let zoom = zoom.clamp(1, 4);
         if self.prefs.zoom == zoom {
+            // Clicking the already-active radio item still makes AppKit flip
+            // its checkmark, so re-assert the group even when nothing changed
+            // or the menu would stop showing the real state.
+            #[cfg(target_os = "macos")]
+            if let Some(menu) = &self.menu {
+                menu.sync_zoom(zoom);
+            }
             return;
         }
         self.prefs.zoom = zoom;
@@ -1166,6 +1173,11 @@ impl App {
     fn set_filter(&mut self, filter: Filter) {
         let value = filter.as_pref();
         if self.prefs.filter == value {
+            // See `set_zoom`: AppKit toggles the clicked item regardless.
+            #[cfg(target_os = "macos")]
+            if let Some(menu) = &self.menu {
+                menu.sync_filter(filter);
+            }
             return;
         }
         self.prefs.filter = value.to_string();
@@ -1190,6 +1202,11 @@ impl App {
     fn set_aspect(&mut self, aspect: Aspect) {
         let value = aspect.as_pref();
         if self.prefs.aspect == value {
+            // See `set_zoom`: AppKit toggles the clicked item regardless.
+            #[cfg(target_os = "macos")]
+            if let Some(menu) = &self.menu {
+                menu.sync_aspect(aspect);
+            }
             return;
         }
         self.prefs.aspect = value.to_string();
