@@ -5,6 +5,7 @@ mod atomic;
 mod audio;
 mod dialog;
 mod guide;
+mod i18n;
 mod input;
 mod library;
 mod menu;
