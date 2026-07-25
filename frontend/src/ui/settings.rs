@@ -1,4 +1,12 @@
-//! `Réglages` — the settings panel, reachable from both screens.
+//! `Réglages` — the settings screen, reachable from both screens.
+//!
+//! It is a **full-width view**, at the same rank as the library's own tabs and
+//! reached by the `Réglages` entry of the very same tab bar (`ui::tabs`), which
+//! keeps its spectral rule visible: a centred panel over a darkened library was
+//! both too small for the sections it holds and hid the rule that says where
+//! the player is. Sections on the left, the settings themselves on the right in
+//! a bounded reading column, and the whole thing scrolls vertically — never
+//! horizontally.
 //!
 //! This is where every user option lives now: the native macOS menu keeps the
 //! *actions* (open a ROM, reset, save/load state, screenshot, fullscreen) and
@@ -18,7 +26,7 @@
 
 use std::path::{Path, PathBuf};
 
-use egui::{Align, Layout, RichText, Vec2};
+use egui::{Align, Layout, Rect, RichText, Sense, Vec2};
 
 use crate::input::{self, Capture, Device};
 use crate::pad;
@@ -26,6 +34,7 @@ use crate::prefs::{Prefs, FAST_FORWARD_FACTORS};
 use crate::render::{Aspect, Filter};
 use crate::state::SLOT_COUNT;
 
+use super::tabs::{self, Tab};
 use super::theme;
 use super::{Action, Setting};
 
@@ -42,49 +51,62 @@ pub const FILTER_CHOICES: &[(Filter, &str)] =
 pub const ASPECT_CHOICES: &[(Aspect, &str)] =
     &[(Aspect::PixelPerfect, "Pixel-parfait (1:1)"), (Aspect::Tv, "TV authentique (8:7)")];
 
-/// Width of the panel, in points. Wide enough that a setting's controls fit on
-/// one line beside its label — at 560 the two `Ratio` choices together were
-/// wider than what was left of the row and wrapped onto a second line — and
-/// wide enough for a folder path. Narrower windows shrink it (`panel_dims`);
-/// the modal is clamped to the window by egui itself.
-const PANEL_W: f32 = 720.0;
-/// Width of the section list on the left.
-const NAV_W: f32 = 150.0;
+/// Width of the section column on the left, in points. It is a sidebar of the
+/// screen now, so it carries the longest section name ("À propos", "Émulation")
+/// on one line with room around it.
+const NAV_W: f32 = 180.0;
+/// Narrowest that column is ever drawn: below this the names wrap.
+const MIN_NAV_W: f32 = 120.0;
+/// Horizontal space between the two columns, separator included.
+const NAV_GAP: f32 = 24.0;
+/// Longest line a setting is laid out on, whatever the window width. The view
+/// is full width, but a checkbox stretched over 1200 points is unreadable and a
+/// hint line that long cannot be scanned: the controls stay inside this reading
+/// column, left-aligned, and the space beyond it is left free (it is where the
+/// `Entrées` section draws the controller).
+const READING_W: f32 = 720.0;
+/// Height of one entry of the section list.
+const NAV_ITEM_H: f32 = 32.0;
+/// Left padding of an entry's label, and the width of the accent bar marking
+/// the selected one.
+const NAV_PAD_X: f32 = 12.0;
+const NAV_BAR_W: f32 = 3.0;
 /// Width reserved for a setting's label, so the controls of a section line up.
 const LABEL_W: f32 = 190.0;
 /// Width of the button-name column of the bindings list (`Entrées`).
 const BUTTON_COL_W: f32 = 70.0;
-/// Width of its keyboard column; the controller column takes what is left,
-/// since its labels are the longest ("Gâchette L2 (LT)").
+/// Width of its keyboard column.
 const BIND_COL_W: f32 = 130.0;
+/// Width of its controller column — the widest of the three, since its labels
+/// are the longest ("Gâchette L (LB) / Gâchette L2 (LT)").
+const PAD_COL_W: f32 = 250.0;
+/// Height of one line of the bindings list. Every cell is drawn in a box of
+/// exactly this height: a horizontal layout centres each item against the row
+/// height known when it was added, so cells of unequal heights end up
+/// staggered — which is what made the button names, the keys and the controller
+/// buttons of one line sit on three different baselines, and every line 44
+/// points tall instead of 31.
+const BIND_ROW_H: f32 = 30.0;
 /// Longest folder path shown before its middle is elided.
 const PATH_MAX_CHARS: usize = 52;
-/// Narrowest the panel is ever drawn; a window narrower than this shows it
-/// clipped rather than an unreadable column of controls.
-const MIN_PANEL_W: f32 = 300.0;
 /// Narrowest the controls column is ever drawn.
 const MIN_CONTENT_W: f32 = 130.0;
-/// Height of the content area, enough for the tallest section (Dossiers, whose
-/// three folders each carry a path, two buttons and an explanation) not to
-/// scroll. Fixed rather than content-driven so the modal keeps one size when the
-/// player walks the section list.
-const CONTENT_H: f32 = 500.0;
-/// Vertical space the panel's own chrome takes outside the content area (title
-/// row, separators, frame margins), subtracted from the window height before
-/// `CONTENT_H` is clamped to it.
-const CHROME_H: f32 = 130.0;
-/// Content height below which the panel would be unreadable; a smaller window
-/// scrolls instead.
-const MIN_CONTENT_H: f32 = 120.0;
+/// Length of the volume slider, value box excluded.
+const SLIDER_W: f32 = 280.0;
+/// Keyboard line of the footer. Escape leaves the view for whatever it was
+/// opened from — the library tab that was showing, or the running game — and a
+/// change is written to `prefs.json` as soon as it is made, not on the way out.
+pub const FOOTER_HINT: &str = "Échap : revenir · chaque changement est enregistré aussitôt";
 
-/// The panel's sections, in display order.
+/// The panel's sections, in the display order the brief fixes: Affichage ·
+/// Audio · Émulation · Entrées · Dossiers · À propos.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Section {
     #[default]
     Display,
     Audio,
-    Inputs,
     Emulation,
+    Inputs,
     Folders,
     About,
 }
@@ -93,8 +115,8 @@ impl Section {
     pub const ALL: [Section; 6] = [
         Section::Display,
         Section::Audio,
-        Section::Inputs,
         Section::Emulation,
+        Section::Inputs,
         Section::Folders,
         Section::About,
     ];
@@ -103,8 +125,8 @@ impl Section {
         match self {
             Section::Display => "Affichage",
             Section::Audio => "Audio",
-            Section::Inputs => "Entrées",
             Section::Emulation => "Émulation",
+            Section::Inputs => "Entrées",
             Section::Folders => "Dossiers",
             Section::About => "À propos",
         }
@@ -202,25 +224,30 @@ pub struct SettingsModel<'a> {
     pub state: &'a mut SettingsUi,
 }
 
-/// Panel width and section-list width for a window `window_w` points wide. The
-/// section list gives ground first, since the controls are what the player
-/// came for.
-pub fn panel_dims(window_w: f32) -> (f32, f32) {
-    let panel = (window_w - 32.0).clamp(MIN_PANEL_W, PANEL_W);
-    let nav = NAV_W.min(panel * 0.34);
-    (panel, nav)
+/// Widths of the three columns the view is built from — section list, content
+/// area, reading column inside it — for a body `inner_w` points wide (the
+/// window minus the screen's own margins).
+///
+/// The section list gives ground first, since the controls are what the player
+/// came for; the reading column is the content area capped at `READING_W`, so a
+/// wide window adds free space on the right rather than stretching a checkbox
+/// across it.
+pub fn layout_dims(inner_w: f32) -> (f32, f32, f32) {
+    let nav = NAV_W.min(inner_w * 0.30).max(MIN_NAV_W.min(inner_w * 0.5));
+    let content = (inner_w - nav - NAV_GAP).max(MIN_CONTENT_W.min(inner_w.max(0.0)));
+    (nav, content, content.min(READING_W))
 }
 
-/// Whether Escape should close the panel rather than act on the screen behind
-/// it. Fullscreen keeps precedence, exactly like the game sheet on the home
-/// screen: Escape backs out of the window mode first, then out of overlays
-/// (see `ui::app_state::escape_action`).
+/// Whether Escape should leave the settings view rather than act on the screen
+/// it was opened from. Fullscreen keeps precedence, exactly like the game sheet
+/// on the home screen: Escape backs out of the window mode first, then out of
+/// the view (see `ui::app_state::escape_action`).
 pub fn escape_closes_settings(open: bool, fullscreen: bool) -> bool {
     open && !fullscreen
 }
 
-/// Draw the panel as a modal over whichever screen owns the window, and return
-/// what the player asked for.
+/// Draw the whole screen — it owns the window while it is up — and return what
+/// the player asked for.
 pub fn show(ctx: &egui::Context, model: &mut SettingsModel) -> Action {
     let mut action = Action::None;
     // While the Entrées section waits for a press, the key belongs to the
@@ -231,83 +258,113 @@ pub fn show(ctx: &egui::Context, model: &mut SettingsModel) -> Action {
     if model.state.capture.is_active() {
         ctx.input_mut(|input| input.events.retain(|e| !matches!(e, egui::Event::Key { .. })));
     }
-    let response = egui::Modal::new(egui::Id::new("prisme-settings"))
-        .backdrop_color(theme::VEIL)
+
+    // Same footer band as the home screen, so the two views are at the same
+    // rank and the content area starts and ends at the same place on both.
+    egui::TopBottomPanel::bottom("prisme-settings-footer")
         .frame(
-            egui::Frame::new()
-                .fill(theme::BG_PANEL)
-                .stroke(egui::Stroke::new(1.0, theme::STROKE))
-                .corner_radius(egui::CornerRadius::same(10))
-                .inner_margin(egui::Margin::same(18)),
+            egui::Frame::new().fill(theme::BG_DEEP).inner_margin(egui::Margin::symmetric(24, 10)),
         )
         .show(ctx, |ui| {
-            // Narrowed with the window: at ×1/×2 zoom the window is 256/512
-            // points wide, which the panel's natural width would overflow on
-            // both sides (the modal is centred).
-            let (panel_w, nav_w) = panel_dims(ctx.content_rect().width());
-            ui.set_width(panel_w);
             ui.horizontal(|ui| {
-                let (mark, _) = ui.allocate_exact_size(Vec2::splat(22.0), egui::Sense::hover());
-                theme::mark(ui.painter(), mark);
-                ui.add_space(8.0);
-                ui.label(
-                    RichText::new("Réglages")
-                        .font(theme::strong(theme::SIZE_TITLE))
-                        .color(theme::TEXT),
-                );
+                ui.label(RichText::new(FOOTER_HINT).size(theme::SIZE_SMALL).color(theme::TEXT_DIM));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if super::icons::button(ui, super::icons::Icon::Close, "Fermer (Échap)")
-                        .clicked()
-                    {
-                        action = Action::CloseSettings;
-                    }
+                    ui.label(
+                        RichText::new(format!("{} {}", model.app_name, model.version))
+                            .size(theme::SIZE_SMALL)
+                            .color(theme::TEXT_DIM),
+                    );
                 });
             });
-            ui.add_space(10.0);
-            ui.separator();
-            ui.add_space(10.0);
+        });
 
-            ui.horizontal_top(|ui| {
-                ui.allocate_ui_with_layout(
-                    Vec2::new(nav_w, 0.0),
-                    Layout::top_down(Align::Min),
-                    |ui| {
-                        for section in Section::ALL {
-                            let selected = model.state.section == section;
-                            let label = RichText::new(section.label()).font(if selected {
-                                theme::strong(theme::SIZE_BODY)
-                            } else {
-                                theme::font(theme::SIZE_BODY)
-                            });
-                            if ui.selectable_label(selected, label).clicked() {
-                                model.state.section = section;
-                                // Leaving the bindings list abandons whatever
-                                // it was waiting for: a capture left pending
-                                // would keep swallowing keys on a section that
-                                // does not show it.
-                                model.state.capture.cancel();
-                            }
-                        }
-                    },
-                );
-                ui.separator();
-                // The content area is allocated at an explicit size rather
-                // than "whatever is left": a modal is auto-sized from what it
-                // laid out on the *previous* frame, so a scroll area that
-                // claims the available height keeps re-measuring the height it
-                // already has and never grows past it (the tallest sections
-                // would stay clipped whatever the window size). Clamped to the
-                // window so a ×1 window still shows the title and the section
-                // list, and scrolls the rest.
-                let content_h =
-                    (ctx.content_rect().height() - CHROME_H).clamp(MIN_CONTENT_H, CONTENT_H);
-                let content_w = (panel_w - nav_w - 24.0).max(MIN_CONTENT_W);
-                ui.allocate_ui_with_layout(
-                    Vec2::new(content_w, content_h),
-                    Layout::top_down(Align::Min),
-                    |ui| {
-                        egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
-                            ui.set_min_width(content_w);
+    egui::CentralPanel::default()
+        .frame(
+            egui::Frame::new().fill(theme::BG_PANEL).inner_margin(egui::Margin::symmetric(24, 16)),
+        )
+        .show(ctx, |ui| {
+            if let Some(produced) = header(ui) {
+                action = produced;
+            }
+            ui.add_space(10.0);
+            // The bar is the one the home screen draws, at the same place: the
+            // spectral rule under `Réglages` is what says the settings are a
+            // view of the shell and not a window laid over it. Choosing another
+            // entry leaves for that library tab.
+            if let Some(tab) = tabs::show(ui, Tab::Settings) {
+                if tab.is_view() {
+                    model.state.capture.cancel();
+                    action = Action::ShowLibrary(tab);
+                }
+            }
+            ui.add_space(16.0);
+            let produced = body(ui, model);
+            if produced != Action::None {
+                action = produced;
+            }
+        });
+    action
+}
+
+/// Identity header, laid out exactly like the home screen's (same mark, same
+/// type, same heights) so switching between the two moves nothing but the band
+/// below the tabs.
+fn header(ui: &mut egui::Ui) -> Option<Action> {
+    let mut action = None;
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(super::home::MARK_SIDE), Sense::hover());
+        theme::mark(ui.painter(), rect);
+        ui.add_space(10.0);
+        ui.label(RichText::new("Prisme").font(theme::strong(theme::SIZE_TITLE)).color(theme::TEXT));
+        ui.add_space(8.0);
+        ui.label(
+            RichText::new("Émulateur Super Nintendo")
+                .font(theme::font(theme::SIZE_SMALL))
+                .color(theme::TEXT_DIM),
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if super::icons::button(ui, super::icons::Icon::ArrowLeft, "Retour (Échap)").clicked() {
+                action = Some(Action::CloseSettings);
+            }
+        });
+    });
+    action
+}
+
+/// The two columns: the section list, then the selected section inside a
+/// vertical scroll area. Both are allocated at an explicit width computed from
+/// the window (`layout_dims`) so neither can be squeezed by the other, and the
+/// scroll area is the only thing that ever scrolls — `ScrollArea::vertical`
+/// carries no horizontal bar, whatever the window width.
+fn body(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
+    let mut action = Action::None;
+    let (nav_w, content_w, reading_w) = layout_dims(ui.available_width());
+    let height = ui.available_height();
+    ui.horizontal_top(|ui| {
+        ui.allocate_ui_with_layout(Vec2::new(nav_w, height), Layout::top_down(Align::Min), |ui| {
+            ui.set_min_width(nav_w);
+            for section in Section::ALL {
+                if nav_item(ui, section, model.state.section == section).clicked() {
+                    model.state.section = section;
+                    // Leaving the bindings list abandons whatever it was
+                    // waiting for: a capture left pending would keep swallowing
+                    // keys on a section that does not show it.
+                    model.state.capture.cancel();
+                }
+            }
+        });
+        ui.separator();
+        ui.allocate_ui_with_layout(
+            Vec2::new(content_w, height),
+            Layout::top_down(Align::Min),
+            |ui| {
+                ui.set_min_width(content_w);
+                egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(reading_w, 0.0),
+                        Layout::top_down(Align::Min),
+                        |ui| {
+                            ui.set_min_width(reading_w);
                             let produced = match model.state.section {
                                 Section::Display => display_section(ui, model),
                                 Section::Audio => audio_section(ui, model),
@@ -319,19 +376,71 @@ pub fn show(ctx: &egui::Context, model: &mut SettingsModel) -> Action {
                             if produced != Action::None {
                                 action = produced;
                             }
-                        });
-                    },
-                );
-            });
-        });
-    // Clicking the darkened backdrop closes the panel, like any modal. Escape
-    // is *not* consumed here: it is routed by `video::App::handle_escape` so
-    // one rule decides what a press backs out of (fullscreen, panel, sheet,
-    // screen).
-    if response.backdrop_response.clicked() {
-        action = Action::CloseSettings;
-    }
+                        },
+                    );
+                });
+            },
+        );
+    });
     action
+}
+
+/// One entry of the section list: a full-width band rather than a text-sized
+/// label, so the whole column answers the pointer and the selected section
+/// reads as a place rather than as a highlighted word. The accent bar marks it;
+/// the spectral rule stays spent on the active tab alone.
+fn nav_item(ui: &mut egui::Ui, section: Section, selected: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_at_least(
+        Vec2::new(ui.available_width(), NAV_ITEM_H),
+        Sense::CLICK | Sense::FOCUSABLE,
+    );
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+    let lit = ui.ctx().animate_bool_with_time(
+        response.id.with("lit"),
+        response.hovered() || response.has_focus(),
+        tabs::TRANSITION,
+    );
+    if selected {
+        ui.painter().rect_filled(rect, 6.0, theme::BG_WIDGET);
+        ui.painter().rect_filled(
+            Rect::from_min_size(
+                egui::pos2(rect.left(), rect.center().y - NAV_ITEM_H / 4.0),
+                Vec2::new(NAV_BAR_W, NAV_ITEM_H / 2.0),
+            ),
+            1.0,
+            theme::ACCENT,
+        );
+    } else if lit > 0.0 {
+        ui.painter().rect_filled(rect, 6.0, theme::BG_WIDGET.gamma_multiply(lit));
+    }
+    let font =
+        if selected { theme::strong(theme::SIZE_BODY) } else { theme::font(theme::SIZE_BODY) };
+    let colour =
+        if selected { theme::TEXT } else { theme::TEXT_DIM.lerp_to_gamma(theme::TEXT, lit) };
+    let galley = ui.painter().layout(
+        section.label().to_owned(),
+        font,
+        colour,
+        (rect.width() - 2.0 * NAV_PAD_X).max(1.0),
+    );
+    ui.painter().galley(
+        egui::pos2(rect.left() + NAV_PAD_X, rect.center().y - galley.size().y / 2.0),
+        galley,
+        colour,
+    );
+    if response.has_focus() {
+        // Keyboard focus must be visible on its own, not only through the
+        // colour change a pointer also produces.
+        ui.painter().rect_stroke(
+            rect.shrink(1.0),
+            6.0,
+            egui::Stroke::new(1.0, theme::ACCENT),
+            egui::StrokeKind::Inside,
+        );
+    }
+    response
 }
 
 fn display_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
@@ -397,6 +506,11 @@ fn audio_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
 
     row(ui, "Volume", |ui| {
         let mut volume = prefs.volume;
+        // egui's default slider is 100 points long, which in a reading column
+        // this wide reads as a stub and gives one point of gain per point of
+        // travel; this is the only control of the panel that needs a size of
+        // its own.
+        ui.spacing_mut().slider_width = SLIDER_W.min(ui.available_width() - 60.0);
         if ui
             .add_enabled(!prefs.mute, egui::Slider::new(&mut volume, 0..=100).suffix(" %"))
             .changed()
@@ -451,25 +565,19 @@ fn inputs_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
     ui.add_space(8.0);
 
     ui.horizontal(|ui| {
-        ui.allocate_ui_with_layout(
-            Vec2::new(BUTTON_COL_W, 0.0),
-            Layout::left_to_right(Align::Min),
-            |ui| {
-                ui.label(RichText::new("Bouton").size(theme::SIZE_SMALL).color(theme::TEXT_DIM));
-            },
-        );
-        ui.allocate_ui_with_layout(
-            Vec2::new(BIND_COL_W, 0.0),
-            Layout::left_to_right(Align::Min),
-            |ui| {
-                ui.label(RichText::new("Clavier").size(theme::SIZE_SMALL).color(theme::TEXT_DIM));
-            },
-        );
-        ui.label(RichText::new("Manette").size(theme::SIZE_SMALL).color(theme::TEXT_DIM));
+        bind_cell(ui, BUTTON_COL_W, |ui| {
+            ui.label(RichText::new("Bouton").size(theme::SIZE_SMALL).color(theme::TEXT_DIM));
+        });
+        bind_cell(ui, BIND_COL_W, |ui| {
+            ui.label(RichText::new("Clavier").size(theme::SIZE_SMALL).color(theme::TEXT_DIM));
+        });
+        bind_cell(ui, PAD_COL_W, |ui| {
+            ui.label(RichText::new("Manette").size(theme::SIZE_SMALL).color(theme::TEXT_DIM));
+        });
     });
 
-    // Tighter than the panel's default spacing: twelve rows have to fit in the
-    // same content area as a five-control section.
+    // Tighter than the section's default spacing: twelve rows have to fit
+    // beside a controller drawing without pushing the last of them out of view.
     ui.spacing_mut().item_spacing.y = 2.0;
     for name in input::BUTTONS {
         // `shown_key`, not `effective_key`: a binding another button won is
@@ -482,42 +590,34 @@ fn inputs_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
         let capturing_key = model.state.capture.waiting_for(Device::Keyboard) == Some(name);
         let capturing_pad = model.state.capture.waiting_for(Device::Gamepad) == Some(name);
         ui.horizontal(|ui| {
-            ui.allocate_ui_with_layout(
-                Vec2::new(BUTTON_COL_W, 0.0),
-                Layout::left_to_right(Align::Min),
-                |ui| {
-                    ui.label(
-                        RichText::new(button_label(name))
-                            .size(theme::SIZE_BODY)
-                            .color(theme::TEXT),
-                    );
-                },
-            );
-            ui.allocate_ui_with_layout(
-                Vec2::new(BIND_COL_W, 0.0),
-                Layout::left_to_right(Align::Min),
-                |ui| {
-                    // A key name is what the hardware reports, not prose.
-                    let text = RichText::new(binding_cell(&key, capturing_key, Device::Keyboard))
-                        .font(theme::mono(theme::SIZE_MONO));
-                    let response = ui.selectable_label(capturing_key, text);
-                    if response.clicked() {
-                        model.state.capture.start(name, Device::Keyboard);
-                        // The clicked cell keeps egui's keyboard focus, where
-                        // Space and Enter count as a click: binding either of
-                        // them would immediately re-open the capture on the
-                        // same row.
-                        response.surrender_focus();
-                    }
-                },
-            );
-            let text = RichText::new(binding_cell(&pad_binding, capturing_pad, Device::Gamepad))
-                .font(theme::mono(theme::SIZE_MONO));
-            let response = ui.selectable_label(capturing_pad, text);
-            if response.clicked() {
-                model.state.capture.start(name, Device::Gamepad);
-                response.surrender_focus();
-            }
+            bind_cell(ui, BUTTON_COL_W, |ui| {
+                ui.label(
+                    RichText::new(button_label(name)).size(theme::SIZE_BODY).color(theme::TEXT),
+                );
+            });
+            bind_cell(ui, BIND_COL_W, |ui| {
+                // A key name is what the hardware reports, not prose.
+                let text = RichText::new(binding_cell(&key, capturing_key, Device::Keyboard))
+                    .font(theme::mono(theme::SIZE_MONO));
+                let response = ui.selectable_label(capturing_key, text);
+                if response.clicked() {
+                    model.state.capture.start(name, Device::Keyboard);
+                    // The clicked cell keeps egui's keyboard focus, where
+                    // Space and Enter count as a click: binding either of
+                    // them would immediately re-open the capture on the
+                    // same row.
+                    response.surrender_focus();
+                }
+            });
+            bind_cell(ui, PAD_COL_W, |ui| {
+                let text = RichText::new(binding_cell(&pad_binding, capturing_pad, Device::Gamepad))
+                    .font(theme::mono(theme::SIZE_MONO));
+                let response = ui.selectable_label(capturing_pad, text);
+                if response.clicked() {
+                    model.state.capture.start(name, Device::Gamepad);
+                    response.surrender_focus();
+                }
+            });
         });
     }
 
@@ -744,6 +844,23 @@ fn row(ui: &mut egui::Ui, label: &str, controls: impl FnOnce(&mut egui::Ui)) {
     });
 }
 
+/// One cell of the bindings list: a box of fixed width and height, its content
+/// aligned on the middle. The width is what makes the three columns start on
+/// the same vertical line whatever a row contains (`allocate_ui_with_layout`
+/// shrinks back to its content, so the column has to be claimed from inside
+/// with `set_min_size`); the height is what puts the three labels of a row on
+/// one baseline.
+fn bind_cell(ui: &mut egui::Ui, width: f32, add: impl FnOnce(&mut egui::Ui)) {
+    ui.allocate_ui_with_layout(
+        Vec2::new(width, BIND_ROW_H),
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            ui.set_min_size(Vec2::new(width, BIND_ROW_H));
+            add(ui);
+        },
+    );
+}
+
 /// Secondary line under a setting: what it does, or the limit it has.
 fn hint(ui: &mut egui::Ui, text: &str) {
     ui.label(RichText::new(text).font(theme::font(theme::SIZE_SMALL)).color(theme::TEXT_DIM));
@@ -806,27 +923,38 @@ mod tests {
 
     use super::*;
 
+    /// The view takes the whole width, but the settings themselves stay inside
+    /// a reading column: the section list keeps its width, the content area
+    /// takes everything else, and a wider window adds free space instead of
+    /// stretching a checkbox over it.
     #[test]
-    fn the_panel_narrows_with_the_window_and_never_below_its_floor() {
-        // ×3/×4 windows (768/1024 points wide): full width.
-        assert_eq!(panel_dims(1024.0), (PANEL_W, NAV_W));
-        assert_eq!(panel_dims(768.0), (PANEL_W, NAV_W));
-        // ×2 (512 points): narrowed, section list shrunk with it.
-        let (panel, nav) = panel_dims(512.0);
-        assert_eq!(panel, 480.0);
-        assert!(nav <= NAV_W && nav > 0.0, "{nav}");
-        // ×1 (256 points): floored, so the controls stay readable even though
-        // the panel is then wider than the window.
-        let (panel, nav) = panel_dims(256.0);
-        assert_eq!(panel, MIN_PANEL_W);
-        assert!(nav < NAV_W, "{nav}");
-        assert!(panel - nav - 24.0 >= MIN_CONTENT_W, "controls column too narrow");
-        // Monotonic: a wider window never yields a narrower panel.
+    fn the_view_splits_the_width_between_the_sections_and_a_reading_column() {
+        // The two widths the brief names, minus the screen's 24-point margins.
+        for window in [900.0_f32, 1280.0, 1600.0] {
+            let inner = window - 48.0;
+            let (nav, content, reading) = layout_dims(inner);
+            assert_eq!(nav, NAV_W, "at {window} the section list is {nav}");
+            assert!((nav + content + NAV_GAP - inner).abs() < 0.5, "{window}: {content}");
+            assert!(reading <= READING_W, "{window}: reading column {reading}");
+            assert!(reading >= 600.0, "{window}: reading column {reading} is too narrow");
+        }
+        // 1600 is wide enough that the reading column is capped and free space
+        // is left beside it (where `Entrées` draws the controller).
+        let (_, content, reading) = layout_dims(1600.0 - 48.0);
+        assert_eq!(reading, READING_W);
+        assert!(content - reading > 300.0, "{content} vs {reading}");
+        // A ×1 window (256 points) is still laid out rather than clamped to
+        // something wider than the window: nothing may overflow sideways.
+        let (nav, content, reading) = layout_dims(256.0 - 48.0);
+        assert!(nav >= MIN_NAV_W.min(208.0 * 0.5) && nav < NAV_W, "{nav}");
+        assert!(content > 0.0 && reading == content, "{content} {reading}");
+        assert!(nav + content + NAV_GAP <= 208.0 + MIN_CONTENT_W, "{nav} {content}");
+        // Monotonic: a wider window never yields a narrower content area.
         let mut previous = 0.0;
         for w in [200.0, 300.0, 400.0, 600.0, 900.0, 2000.0] {
-            let (panel, _) = panel_dims(w);
-            assert!(panel >= previous, "{w}: {panel} < {previous}");
-            previous = panel;
+            let (_, content, _) = layout_dims(w);
+            assert!(content >= previous, "{w}: {content} < {previous}");
+            previous = content;
         }
     }
 
@@ -851,9 +979,10 @@ mod tests {
     fn every_section_is_listed_once_with_its_own_label() {
         assert_eq!(Section::ALL.len(), 6);
         let mut labels: Vec<&str> = Section::ALL.iter().map(|s| s.label()).collect();
+        // The order the brief fixes, top to bottom in the section column.
         assert_eq!(
             labels,
-            vec!["Affichage", "Audio", "Entrées", "Émulation", "Dossiers", "À propos"]
+            vec!["Affichage", "Audio", "Émulation", "Entrées", "Dossiers", "À propos"]
         );
         labels.sort_unstable();
         labels.dedup();
@@ -931,23 +1060,41 @@ mod tests {
     }
 
     /// Draw one section on a headless `egui::Context` (no window, no GPU) and
-    /// return what it asked for plus what it painted.
+    /// return what it asked for plus what it painted, at a ×4 window
+    /// (1024x896 points).
     fn draw(section: Section, prefs: &Prefs, state: &mut SettingsUi) -> (Action, String) {
+        let (action, text, _) = draw_at(section, prefs, state, (1024.0, 896.0));
+        (action, text)
+    }
+
+    /// The same at an explicit window size, also returning the shapes: a
+    /// section that scrolls out of view is *not* painted (egui skips a widget
+    /// whose rectangle is outside the clip rectangle), which is what makes this
+    /// able to tell a complete section from a truncated one.
+    fn draw_at(
+        section: Section,
+        prefs: &Prefs,
+        state: &mut SettingsUi,
+        size: (f32, f32),
+    ) -> (Action, String, Vec<egui::Shape>) {
         let ctx = egui::Context::default();
         theme::apply(&ctx);
         state.open = true;
         state.section = section;
         let mut produced = Action::Quit; // must be overwritten by `show`
-        let mut input = egui::RawInput::default();
-        // A ×4 window (1024x896 points) — the size at which `CONTENT_H` is
-        // reached, so no section scrolls and every control is painted (shapes
-        // clipped away by a scroll area are culled and would not appear).
-        input.screen_rect =
-            Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1024.0, 896.0)));
-        // Two frames: egui sizes a modal from the previous frame's measurement,
-        // so the first one lays out and the second is the one that paints.
+        let mut input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(size.0, size.1),
+            )),
+            ..Default::default()
+        };
         let mut output = ctx.run(input.clone(), |_| {});
-        for _ in 0..5 {
+        // Several passes: a scroll area's extent and the tab bar's animations
+        // are known only from the previous one, so the last pass is the one
+        // that paints the resting state.
+        for pass in 0..5 {
+            input.time = Some(pass as f64 * 0.5);
             output = ctx.run(input.clone(), |ctx| {
                 produced = show(
                     ctx,
@@ -963,7 +1110,88 @@ mod tests {
                 );
             });
         }
-        (produced, painted_text(&output))
+        fn walk(shape: &egui::Shape, out: &mut Vec<egui::Shape>) {
+            match shape {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                other => out.push(other.clone()),
+            }
+        }
+        let mut shapes = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut shapes);
+        }
+        (produced, painted_text(&output), shapes)
+    }
+
+    /// The settings are a view of the shell, not a panel laid over it: the tab
+    /// bar is drawn, `Réglages` carries the spectral rule, and nothing paints
+    /// the modal veil that used to darken the library behind it.
+    #[test]
+    fn the_view_carries_the_tab_bar_with_the_spectral_rule_and_no_backdrop() {
+        let prefs = Prefs::default();
+        for section in Section::ALL {
+            let mut state = SettingsUi::default();
+            let (_, text, shapes) = draw_at(section, &prefs, &mut state, (1280.0, 800.0));
+            for tab in Tab::ALL {
+                assert!(text.contains(tab.label()), "tab {:?} is missing: {text}", tab.label());
+            }
+            // The rule is spent once: four segments, under the active tab.
+            let segments: Vec<egui::Color32> = shapes
+                .iter()
+                .filter_map(|s| match s {
+                    egui::Shape::Rect(r) if r.rect.height() <= theme::SPECTRAL_RULE_H => Some(r.fill),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(segments, theme::ACCENTS.to_vec(), "{:?}", section.label());
+            assert!(
+                !shapes.iter().any(|s| matches!(s, egui::Shape::Rect(r) if r.fill == theme::VEIL)),
+                "{:?} still darkens a screen behind it",
+                section.label()
+            );
+            // …and the footer names the way out.
+            assert!(text.contains("Échap"), "{text}");
+        }
+    }
+
+    /// Nothing may be cut off at either width the brief names. Each section is
+    /// asserted on its **last** line, the one a content area too short would
+    /// scroll out of sight.
+    #[test]
+    fn every_section_fits_at_900_and_at_1280_points() {
+        let prefs = Prefs::default();
+        let last: [(Section, &str); 6] = [
+            (Section::Display, "Afficher les FPS (F)"),
+            (Section::Audio, "Le son est coupé pendant l'accéléré"),
+            // The twelfth binding row, then the two closing hints.
+            (Section::Inputs, "Select"),
+            (Section::Emulation, "F5 sauvegarde et F9 recharge ce slot"),
+            (Section::Folders, "Sauvegardes de cartouche"),
+            (Section::About, "supprimables sans rien perdre"),
+        ];
+        for size in [(900.0, 700.0), (1280.0, 800.0)] {
+            for (section, tail) in last {
+                let mut state = SettingsUi::default();
+                let (_, text, _) = draw_at(section, &prefs, &mut state, size);
+                assert!(
+                    text.contains(tail),
+                    "{:?} is cut off at {size:?}, {tail:?} never painted: {text}",
+                    section.label()
+                );
+            }
+        }
+        // The bindings list is the tallest section: all twelve rows must show
+        // at both sizes, not eight of them.
+        for size in [(900.0, 700.0), (1280.0, 800.0)] {
+            let mut state = SettingsUi::default();
+            let (_, text, _) = draw_at(Section::Inputs, &prefs, &mut state, size);
+            for name in input::BUTTONS {
+                assert!(
+                    text.contains(button_label(name)),
+                    "{name} is not visible at {size:?}: {text}"
+                );
+            }
+        }
     }
 
     /// Build every section on a headless `egui::Context`: exercises the real

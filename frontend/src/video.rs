@@ -1202,6 +1202,7 @@ impl App {
             }
             Action::OpenSettings => self.open_settings(),
             Action::CloseSettings => self.close_settings(),
+            Action::ShowLibrary(tab) => self.show_library_tab(tab),
             Action::Set(setting) => self.apply_setting(setting),
             Action::ChooseScreenshotDir => {
                 let current = self
@@ -1302,6 +1303,26 @@ impl App {
         ));
         // The sheet lists this game's save states from that folder.
         self.library.sheet = SheetData::default();
+    }
+
+    /// A library tab chosen on the settings view's own tab bar: leave the
+    /// settings for that view of the library. From the game screen this steps
+    /// back to the home screen too, since that is where the library lives; the
+    /// session is only suspended, exactly as Escape would.
+    fn show_library_tab(&mut self, tab: ui::Tab) {
+        self.close_settings();
+        if tab.is_view() {
+            self.library.ui.tab = tab;
+            // The sheet belongs to the game, not to the view (same rule as the
+            // home screen's own bar).
+            self.library.ui.selected = None;
+            self.library.ui.confirm_delete = None;
+        }
+        if !self.state.is_home() {
+            self.go_home();
+        } else {
+            self.ensure_library();
+        }
     }
 
     fn close_settings(&mut self) {
@@ -1586,7 +1607,22 @@ impl App {
         };
         let LibraryState { dir, entries, ui: view, textures, thumbs, pending, sheet, .. } = library;
         let action = ui.run(&window, |ctx| {
-            let mut action = if home {
+            // One screen owns the window: the settings are a full-width view
+            // now, not a modal over the library or over the game.
+            let mut action = if settings_open {
+                crate::ui::settings::show(
+                    ctx,
+                    &mut SettingsModel {
+                        app_name: APP_NAME,
+                        version: VERSION,
+                        prefs,
+                        fullscreen,
+                        library_dir: &rom_dir,
+                        config_dir: config_dir.as_deref(),
+                        state: settings,
+                    },
+                )
+            } else if home {
                 crate::ui::home::show(
                     ctx,
                     &mut HomeModel {
@@ -1594,7 +1630,6 @@ impl App {
                         version: VERSION,
                         game_title: game_title.as_deref(),
                         rom_path: rom_path.as_deref(),
-                        settings_open,
                         library: LibraryModel {
                             entries,
                             games: &prefs.games,
@@ -1611,27 +1646,8 @@ impl App {
                 crate::ui::game::overlay(ctx, paused);
                 Action::None
             };
-            // Drawn last so the modal sits over whichever screen owns the
-            // window, and its own request wins over the screen behind it.
-            if settings_open {
-                let produced = crate::ui::settings::show(
-                    ctx,
-                    &mut SettingsModel {
-                        app_name: APP_NAME,
-                        version: VERSION,
-                        prefs,
-                        fullscreen,
-                        library_dir: &rom_dir,
-                        config_dir: config_dir.as_deref(),
-                        state: settings,
-                    },
-                );
-                if produced != Action::None {
-                    action = produced;
-                }
-            }
             // The quit confirmation sits over everything, including the
-            // settings panel: nothing else can be acted on until it is
+            // settings view: nothing else can be acted on until it is
             // answered.
             if quit_confirm {
                 let produced = crate::ui::confirm::show(ctx, APP_NAME);
@@ -1642,9 +1658,13 @@ impl App {
             action
         });
         window.pre_present_notify();
-        let clear = home.then(crate::ui::theme::clear_color);
+        // The emulated frame is only blitted when a shell screen is *not*
+        // covering the window: the settings view fills it opaquely, so scaling
+        // and presenting the last frame under it would be work nobody sees.
+        let shell = home || settings_open;
+        let clear = shell.then(crate::ui::theme::clear_color);
         if let Err(e) = pixels.render_with(|encoder, target, ctx| {
-            if !home {
+            if !shell {
                 ctx.scaling_renderer.render(encoder, target);
             }
             ui.render(encoder, target, &ctx.device, &ctx.queue, clear);

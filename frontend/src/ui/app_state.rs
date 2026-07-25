@@ -86,10 +86,15 @@ pub enum Action {
     /// Back to the default library folder (`prefs.library_dir = None`), then
     /// rescan.
     ResetLibraryDir,
-    /// Show the settings panel (`ui::settings`).
+    /// Show the settings view (`ui::settings`).
     OpenSettings,
-    /// Hide it.
+    /// Leave it for whatever it was opened from: the library tab that was
+    /// showing, or the suspended game.
     CloseSettings,
+    /// Leave it for one named library tab, chosen on the settings view's own
+    /// tab bar. From the game screen this also steps back to the home screen —
+    /// the tab bar belongs to it.
+    ShowLibrary(crate::ui::Tab),
     /// Apply and persist one option of the settings panel.
     Set(Setting),
     /// Choose the screenshot folder with the native folder dialog.

@@ -94,8 +94,11 @@ const USAGE: &str = "usage: prisme [rom.sfc|.smc|.zip] [flags]
   --load-state FILE                     headless: load a save-state before frame 0
   --save-state-at FRAME FILE            headless: write a save-state after FRAME
   --ui-shot VIEW out.png                render a screen of the interface offscreen and exit
-                                        (VIEW: library, favorites, game-sheet, settings, empty;
-                                        no window, no ROM)
+                                        (VIEW: library, favorites, game-sheet, empty,
+                                        library-hover, settings-display, settings-audio,
+                                        settings-emulation, settings-inputs, settings-folders,
+                                        settings-about; `settings` = settings-display.
+                                        No window, no ROM)
   --ui-shot-size WxH                    size of that capture, in points (default 1280x800)
 
 Output paths: a relative PATH given to --trace/--trace-spc/--trace-gsu/--trace-sa1
@@ -1134,8 +1137,25 @@ mod tests {
             .map(String::from)
             .to_vec();
         let parsed = parse_args(&args).expect("parse");
-        assert_eq!(parsed.ui_shot, Some(ui::shot::View::Settings));
+        assert_eq!(
+            parsed.ui_shot,
+            Some(ui::shot::View::Settings(ui::settings::Section::Display)),
+            "`settings` names the section the panel opens on"
+        );
         assert_eq!(parsed.ui_shot_size, (1024, 768));
+
+        // Each section of the panel is capturable on its own.
+        for (name, section) in [
+            ("settings-audio", ui::settings::Section::Audio),
+            ("settings-inputs", ui::settings::Section::Inputs),
+            ("settings-emulation", ui::settings::Section::Emulation),
+            ("settings-folders", ui::settings::Section::Folders),
+            ("settings-about", ui::settings::Section::About),
+        ] {
+            let args = ["--ui-shot", name, "s.png"].map(String::from).to_vec();
+            let parsed = parse_args(&args).expect("parse");
+            assert_eq!(parsed.ui_shot, Some(ui::shot::View::Settings(section)), "{name}");
+        }
 
         // A view that does not exist, a missing size and a missing output path
         // are all refused up front rather than producing an empty PNG.

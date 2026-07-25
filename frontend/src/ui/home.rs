@@ -24,7 +24,7 @@ use egui::{Align, Color32, Layout, RichText, Sense, Stroke, StrokeKind, Vec2};
 use super::game_sheet::{self, SheetData, SheetModel};
 use super::icons::{self, Icon};
 use super::library_view::{self, LibraryModel};
-use super::tabs::{self, Tab};
+use super::tabs;
 use super::theme;
 use super::Action;
 
@@ -37,9 +37,6 @@ pub struct HomeModel<'a> {
     pub game_title: Option<&'a str>,
     /// Path of that cartridge, shown as the session chip's tooltip.
     pub rom_path: Option<&'a Path>,
-    /// The settings panel is up: it then owns the screen, so the `Réglages`
-    /// tab is the one the spectral rule is drawn under.
-    pub settings_open: bool,
     /// The library: entries, per-game state, view state and pictures.
     pub library: LibraryModel<'a>,
     /// Files listed by the open game sheet, gathered by the shell when the
@@ -54,8 +51,10 @@ impl HomeModel<'_> {
     }
 }
 
-/// Side of the product mark in the header, in points.
-const MARK_SIDE: f32 = 30.0;
+/// Side of the product mark in the header, in points. Shared with the settings
+/// view, whose header must be exactly as tall so the tab bar sits at the same
+/// height on both.
+pub const MARK_SIDE: f32 = 30.0;
 /// Longest path rendered in full before `shorten_path` elides its middle.
 const PATH_MAX_CHARS: usize = 64;
 /// Longest game title shown on the session chip.
@@ -104,10 +103,10 @@ pub fn show(ctx: &egui::Context, model: &mut HomeModel) -> Action {
             }
             ui.add_space(10.0);
 
-            // The rule marks whatever owns the screen: the settings panel when
-            // it is up, the current library view otherwise.
-            let active = if model.settings_open { Tab::Settings } else { model.library.state.tab };
-            if let Some(tab) = tabs::show(ui, active) {
+            // The rule marks the library view being shown. `Réglages` is never
+            // active here: it is a screen of its own (`ui::settings`), which
+            // draws the same bar with the rule under its own entry.
+            if let Some(tab) = tabs::show(ui, model.library.state.tab) {
                 if tab.is_view() {
                     model.library.state.tab = tab;
                     // Switching tab leaves whatever sheet was open: the sheet
@@ -296,6 +295,7 @@ pub fn elide(text: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::tabs::Tab;
     use super::*;
     use std::path::PathBuf;
 
@@ -363,7 +363,6 @@ mod tests {
     /// every string it painted.
     fn draw(
         game_title: Option<&str>,
-        settings_open: bool,
         state: &mut super::super::library_view::LibraryUi,
         size: egui::Vec2,
     ) -> (Action, String) {
@@ -388,7 +387,6 @@ mod tests {
                     version: "0.0.0",
                     game_title,
                     rom_path: None,
-                    settings_open,
                     library: LibraryModel {
                         entries: &entries,
                         games: &games,
@@ -424,7 +422,7 @@ mod tests {
     #[test]
     fn the_home_screen_offers_the_tabs_and_the_global_actions() {
         let mut state = super::super::library_view::LibraryUi::default();
-        let (produced, text) = draw(None, false, &mut state, egui::vec2(1024.0, 896.0));
+        let (produced, text) = draw(None, &mut state, egui::vec2(1024.0, 896.0));
         assert_eq!(produced, Action::None, "drawing alone must ask for nothing");
         for tab in Tab::ALL {
             assert!(text.contains(tab.label()), "tab {:?} is missing: {text}", tab.label());
@@ -440,7 +438,7 @@ mod tests {
     #[test]
     fn a_suspended_session_is_offered_on_the_header_line() {
         let mut state = super::super::library_view::LibraryUi::default();
-        let (_, text) = draw(Some("SUPER MARIOWORLD"), false, &mut state, egui::vec2(1024.0, 896.0));
+        let (_, text) = draw(Some("SUPER MARIOWORLD"), &mut state, egui::vec2(1024.0, 896.0));
         assert!(text.contains("Reprendre · SUPER MARIOWORLD"), "{text}");
     }
 
@@ -472,7 +470,6 @@ mod tests {
             version: "0.0.0",
             game_title: None,
             rom_path: None,
-            settings_open: false,
             library: LibraryModel {
                 entries: &entries,
                 games: &games,

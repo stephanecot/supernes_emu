@@ -33,7 +33,7 @@ use crate::prefs::{GameStats, Prefs};
 use super::game_sheet::SheetData;
 use super::home::HomeModel;
 use super::library_view::{LibraryModel, LibraryUi};
-use super::settings::{SettingsModel, SettingsUi};
+use super::settings::{Section, SettingsModel, SettingsUi};
 use super::tabs::Tab;
 use super::textures::TextureStore;
 use super::theme;
@@ -48,9 +48,11 @@ pub enum View {
     Favorites,
     /// Home screen with a game's sheet open.
     GameSheet,
-    /// Home screen with the settings panel over it, as the application draws
-    /// it (the panel is a modal, never a screen of its own).
-    Settings,
+    /// The settings view, which owns the whole window as the library does,
+    /// opened on one section. One view per section: it shows a single section
+    /// at a time, so a capture of only the first one leaves the five others —
+    /// and the controller drawing of `Entrées` — impossible to look at.
+    Settings(Section),
     /// The empty screen: a library folder with no game in it, and the call to
     /// action that goes with it.
     Empty,
@@ -74,20 +76,38 @@ const CARD_TEXT_H: f32 = 60.0;
 
 impl View {
     /// Names accepted on the command line, in the order `--help` lists them.
-    pub const ALL: [(&'static str, View); 6] = [
+    /// One name per screen the shell can show, the settings panel counting one
+    /// per section since that is what it draws at a time.
+    pub const ALL: [(&'static str, View); 11] = [
         ("library", View::Library),
         ("favorites", View::Favorites),
         ("game-sheet", View::GameSheet),
-        ("settings", View::Settings),
+        ("settings-display", View::Settings(Section::Display)),
+        ("settings-audio", View::Settings(Section::Audio)),
+        ("settings-emulation", View::Settings(Section::Emulation)),
+        ("settings-inputs", View::Settings(Section::Inputs)),
+        ("settings-folders", View::Settings(Section::Folders)),
+        ("settings-about", View::Settings(Section::About)),
         ("empty", View::Empty),
         ("library-hover", View::Hover),
     ];
 
+    /// Names that are not a view of their own but another spelling of one.
+    /// `settings` predates the per-section names and is the panel's own default
+    /// section, so a command line written before them keeps working.
+    pub const ALIASES: [(&'static str, View); 1] =
+        [("settings", View::Settings(Section::Display))];
+
     pub fn parse(name: &str) -> Result<View, String> {
-        Self::ALL.iter().find(|(n, _)| *n == name).map(|(_, v)| *v).ok_or_else(|| {
-            let names: Vec<&str> = Self::ALL.iter().map(|(n, _)| *n).collect();
-            format!("unknown --ui-shot view: {name} ({})", names.join(", "))
-        })
+        Self::ALL
+            .iter()
+            .chain(Self::ALIASES.iter())
+            .find(|(n, _)| *n == name)
+            .map(|(_, v)| *v)
+            .ok_or_else(|| {
+                let names: Vec<&str> = Self::ALL.iter().map(|(n, _)| *n).collect();
+                format!("unknown --ui-shot view: {name} ({})", names.join(", "))
+            })
     }
 
     /// Where the mouse cursor is during a capture of this view, in points.
@@ -741,7 +761,14 @@ impl Fixture {
                 tab: if view == View::Favorites { Tab::Favorites } else { Tab::Library },
                 ..Default::default()
             },
-            settings_ui: SettingsUi { open: view == View::Settings, ..Default::default() },
+            settings_ui: SettingsUi {
+                open: matches!(view, View::Settings(_)),
+                section: match view {
+                    View::Settings(section) => section,
+                    _ => Section::default(),
+                },
+                ..Default::default()
+            },
             textures: TextureStore::new(),
             prefs: Prefs::default(),
             rom_dir,
@@ -750,35 +777,10 @@ impl Fixture {
     }
 
     /// One UI pass, through the application's own screens. `video::App::redraw`
-    /// composes exactly this way: the home screen first, then the settings
-    /// modal over it.
+    /// composes exactly this way: one screen owns the window, and the settings
+    /// view is one of them (a full-width view, not a panel over the library).
     pub fn build(&mut self, ctx: &egui::Context) {
-        // The empty view is the same screen with nothing to show: an empty
-        // library, not a different code path.
-        let empty = self.view == View::Empty;
-        let entries: &[GameEntry] = if empty { &[] } else { self.entries.as_slice() };
-        let pending: &HashSet<String> = if empty { &self.no_pending } else { &self.pending };
-        super::home::show(
-            ctx,
-            &mut HomeModel {
-                app_name: crate::APP_NAME,
-                version: crate::VERSION,
-                game_title: Some("SUPER MARIOWORLD"),
-                rom_path: Some(&self.entries[0].path),
-                settings_open: self.view == View::Settings,
-                library: LibraryModel {
-                    entries,
-                    games: &self.games,
-                    dir: &self.rom_dir,
-                    thumbs: &self.thumbs,
-                    pending,
-                    state: &mut self.library_ui,
-                    textures: &mut self.textures,
-                },
-                sheet: &self.sheet,
-            },
-        );
-        if self.view == View::Settings {
+        if matches!(self.view, View::Settings(_)) {
             super::settings::show(
                 ctx,
                 &mut SettingsModel {
@@ -791,7 +793,32 @@ impl Fixture {
                     state: &mut self.settings_ui,
                 },
             );
+            return;
         }
+        // The empty view is the same screen with nothing to show: an empty
+        // library, not a different code path.
+        let empty = self.view == View::Empty;
+        let entries: &[GameEntry] = if empty { &[] } else { self.entries.as_slice() };
+        let pending: &HashSet<String> = if empty { &self.no_pending } else { &self.pending };
+        super::home::show(
+            ctx,
+            &mut HomeModel {
+                app_name: crate::APP_NAME,
+                version: crate::VERSION,
+                game_title: Some("SUPER MARIOWORLD"),
+                rom_path: Some(&self.entries[0].path),
+                library: LibraryModel {
+                    entries,
+                    games: &self.games,
+                    dir: &self.rom_dir,
+                    thumbs: &self.thumbs,
+                    pending,
+                    state: &mut self.library_ui,
+                    textures: &mut self.textures,
+                },
+                sheet: &self.sheet,
+            },
+        );
     }
 }
 
@@ -845,7 +872,6 @@ mod tests {
         assert_eq!(View::parse("library"), Ok(View::Library));
         assert_eq!(View::parse("favorites"), Ok(View::Favorites));
         assert_eq!(View::parse("game-sheet"), Ok(View::GameSheet));
-        assert_eq!(View::parse("settings"), Ok(View::Settings));
         assert_eq!(View::parse("empty"), Ok(View::Empty));
         assert_eq!(View::parse("library-hover"), Ok(View::Hover));
         // Only that view carries a pointer, and it lands inside the window.
@@ -864,6 +890,27 @@ mod tests {
         for (name, view) in View::ALL {
             assert_eq!(view.name(), name);
         }
+    }
+
+    /// Every section of the settings panel has a capture of its own: the panel
+    /// draws one section at a time, so a single `settings` view could only ever
+    /// show `Affichage` and left the five others unjudged.
+    #[test]
+    fn each_settings_section_has_its_own_view() {
+        for section in Section::ALL {
+            let view = View::Settings(section);
+            let name = view.name();
+            assert!(name.starts_with("settings-"), "{name}");
+            assert_eq!(View::parse(name), Ok(view));
+        }
+        assert_eq!(
+            View::ALL.iter().filter(|(_, v)| matches!(v, View::Settings(_))).count(),
+            Section::ALL.len()
+        );
+        // The name used before the sections were split still resolves, to the
+        // section the panel opens on.
+        assert_eq!(View::parse("settings"), Ok(View::Settings(Section::default())));
+        assert_eq!(View::Settings(Section::Display).name(), "settings-display");
     }
 
     #[test]
@@ -922,8 +969,9 @@ mod tests {
             // The fixture's pictures are real PNGs on disk: they must decode
             // and reach the texture store, or the capture would show nothing
             // but placeholders. The empty view has no game and therefore no
-            // picture — that is the point of it.
-            if view != View::Empty {
+            // picture — that is the point of it — and the settings view shows
+            // no library at all.
+            if !matches!(view, View::Empty | View::Settings(_)) {
                 assert!(textures > 1, "{name} uploaded no picture ({textures} textures)");
             }
         }
