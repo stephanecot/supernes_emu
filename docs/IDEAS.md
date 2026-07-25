@@ -107,6 +107,33 @@ entièrement sérialisable** (round-trip byte-identique prouvé), **introspectio
   I/O : l'exposer comme environnement d'apprentissage par renforcement (bindings Python), à la manière
   des émulateurs NES devenus des bancs d'essai de recherche. Cohérent avec l'origine du projet. **M**
 
+## Haute fréquence d'affichage / 120 fps (analyse)
+
+Question posée : peut-on avoir un mode 120 fps ? Le terme recouvre trois choses distinctes.
+
+1. **Afficher sur un écran 120 Hz** — quasi gratuit, mais la SNES ne produit que 50/60 images par
+   seconde : chaque image est simplement montrée deux fois. Gain réel uniquement en **NTSC**
+   (120/60 = 2, cadence parfaitement régulière) ; en **PAL** (120/50 = 2,4) la cadence devient
+   inégale et peut saccader davantage. Veiller au moins à ce que le pacing s'aligne proprement sur
+   le rafraîchissement de l'écran.
+2. **Émuler à 120 fps** — c'est le mode accéléré ×2 (le jeu se déroule deux fois plus vite).
+   Ce n'est pas ce qui est recherché.
+3. **Générer des images intermédiaires** (interpolation type DLSS 3) — techniquement possible, mais :
+   ajoute **une image de latence** (il faut connaître l'image suivante avant d'afficher
+   l'intermédiaire), le pixel art s'y prête mal (sprites à déplacements discrets, HUD fixe, couches
+   de parallaxe à vitesses différentes → fantômes et texte déformé), et **la réactivité ne s'améliore
+   pas** puisque la logique du jeu reste à 50/60 Hz. Atout propre à un émulateur : on connaît les
+   **décalages de défilement exacts** et les positions OAM, donc on pourrait interpoler **par couche**
+   avec des déplacements connus plutôt qu'estimés — nettement meilleur qu'une interpolation
+   générique, mais c'est un chantier sérieux. Optionnel, à réserver aux jeux peu nerveux.
+
+- **RECOMMANDATION — mélange d'images (frame blending), bien plus rentable.** Beaucoup de jeux SNES
+  simulaient la transparence en **faisant clignoter une couche une image sur deux** : la rémanence
+  du phosphore d'un téléviseur cathodique fondait les deux images en un demi-ton, alors qu'un écran
+  LCD moderne **stroboscope**. Mélanger deux images consécutives restitue l'effet voulu : peu coûteux,
+  **aucune latence ajoutée**, et **plus fidèle** que l'affichage brut. Complément naturel du filtre
+  CRT (Phase 2). À faire avant toute tentative d'interpolation.
+
 ## Rendu amélioré par IA (exploratoire)
 
 - **Amélioration du rendu en temps réel** — question ouverte : peut-on améliorer l'image via l'IA ?
