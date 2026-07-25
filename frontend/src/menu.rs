@@ -8,17 +8,18 @@
 //! (enabled/text/checkmark) can be queried or changed later without
 //! re-querying AppKit.
 //!
-//! Layout: App / Fichier / Émulation / Audio / Affichage. Most items double a
-//! keyboard hotkey already handled in `video.rs::handle_key` (Open ROM = `O`,
-//! Pause = `P`, Save/Load State = F5/F9, Show FPS = `F`, Mute = `M`, Volume =
-//! `+`/`-`); the handful that used to be macOS-menu-only also have a
-//! cross-platform hotkey now: Reset = F6, Export SPC = F8, Slot N = digits
-//! 0-9 (F7 still cycles), Reprise instantanée = F10, Accéléré factor =
-//! `[`/`]`, Zoom ×1-×4 = F1-F4, Filtre (cycle) = `V`, Ratio (toggle) = `R`,
-//! Plein écran (toggle) = F11 (also Ctrl+Cmd+F on macOS, the platform's own
-//! fullscreen convention) — freed from `Confirmation avant de quitter`,
-//! which moved to `C` (see `video.rs::handle_key`; still cross-platform, just
-//! a different key). So the whole feature set stays reachable on platforms
+//! Layout: App / Fichier / Émulation / Affichage. **Actions only** — every
+//! *setting* moved to the egui settings panel (`ui::settings`, opened by the
+//! app menu's `Réglages…` / Cmd+, / the `,` hotkey), so an option has exactly
+//! one place to be changed and there is no second, retained copy of its state
+//! to keep in sync. What is left here either changes nothing persistent (open
+//! a ROM, pause, reset, save/load state, screenshot, SPC export, fullscreen,
+//! quit) or navigates (Accueil, Réglages).
+//!
+//! Every item doubles a keyboard hotkey handled in `video.rs::handle_key`
+//! (Accueil = Échap, Open ROM = `O`, Pause = `P`, Reset = F6, Save/Load State =
+//! F5/F9, Slot suivant = F7, Capture = F12, Export SPC = F8, Plein écran =
+//! F11, Réglages = `,`), so the whole feature set stays reachable on platforms
 //! without this menu (Windows/Linux).
 //!
 //! Only built for `target_os = "macos"`: this is a macOS-specific menu bar,
@@ -28,88 +29,39 @@
 #![cfg(target_os = "macos")]
 
 use muda::accelerator::{Accelerator, Code, Modifiers, CMD_OR_CTRL};
-use muda::{AboutMetadata, CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
+use muda::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 
-use crate::prefs::Prefs;
-use crate::render::{Aspect, Filter};
-use crate::{APP_NAME, VERSION};
+use crate::APP_NAME;
 
 /// Stable ids for the items `video.rs` dispatches on after a
-/// `MenuEvent::receiver().try_recv()`. Predefined items (About, separators)
-/// need no id here: macOS runs their native action
-/// (`orderFrontStandardAboutPanel:`) itself and never routes a click through
-/// the `MenuEvent` channel we poll.
+/// `MenuEvent::receiver().try_recv()`. Separators are the only predefined items
+/// left and need no id.
+pub const HOME_ID: &str = "prisme.home";
+pub const SETTINGS_ID: &str = "prisme.settings";
 pub const OPEN_ROM_ID: &str = "prisme.open-rom";
 pub const SCREENSHOT_ID: &str = "prisme.screenshot";
 pub const EXPORT_SPC_ID: &str = "prisme.export-spc";
 pub const NEXT_SLOT_ID: &str = "prisme.next-slot";
-pub const RESUME_ID: &str = "prisme.resume-on-launch";
 pub const PAUSE_RESUME_ID: &str = "prisme.pause-resume";
 pub const RESET_ID: &str = "prisme.reset";
 pub const SAVE_STATE_ID: &str = "prisme.save-state";
 pub const LOAD_STATE_ID: &str = "prisme.load-state";
-pub const SHOW_FPS_ID: &str = "prisme.show-fps";
-pub const MUTE_ID: &str = "prisme.mute";
-pub const VOLUME_UP_ID: &str = "prisme.volume-up";
-pub const VOLUME_DOWN_ID: &str = "prisme.volume-down";
-pub const FF_X2_ID: &str = "prisme.ff-x2";
-pub const FF_X3_ID: &str = "prisme.ff-x3";
-pub const FF_X4_ID: &str = "prisme.ff-x4";
-pub const CONFIRM_QUIT_ID: &str = "prisme.confirm-quit";
 pub const QUIT_ID: &str = "prisme.quit";
-pub const ZOOM_X1_ID: &str = "prisme.zoom-x1";
-pub const ZOOM_X2_ID: &str = "prisme.zoom-x2";
-pub const ZOOM_X3_ID: &str = "prisme.zoom-x3";
-pub const ZOOM_X4_ID: &str = "prisme.zoom-x4";
-pub const FILTER_NONE_ID: &str = "prisme.filter-none";
-pub const FILTER_SMOOTH_ID: &str = "prisme.filter-smooth";
-pub const FILTER_CRT_ID: &str = "prisme.filter-crt";
-pub const ASPECT_PIXEL_PERFECT_ID: &str = "prisme.aspect-pixel-perfect";
-pub const ASPECT_TV_ID: &str = "prisme.aspect-tv";
 pub const FULLSCREEN_ID: &str = "prisme.fullscreen";
 
-/// `Affichage > Zoom` choices, paired with their menu-item id and the zoom
-/// factor `App::set_zoom` applies on a click (F1-F4 offer the same set — see
-/// `video.rs::handle_key`).
-pub const ZOOM_FACTORS: &[(u8, &str)] =
-    &[(1, ZOOM_X1_ID), (2, ZOOM_X2_ID), (3, ZOOM_X3_ID), (4, ZOOM_X4_ID)];
-
-/// `Affichage > Filtre` choices, paired with their menu-item id. Order
-/// matches `render::Filter::next`'s cycle (the `V` hotkey).
-pub const FILTER_ITEMS: &[(Filter, &str)] =
-    &[(Filter::None, FILTER_NONE_ID), (Filter::Smooth, FILTER_SMOOTH_ID), (Filter::Crt, FILTER_CRT_ID)];
-
-/// `Affichage > Ratio` choices, paired with their menu-item id.
-pub const ASPECT_ITEMS: &[(Aspect, &str)] =
-    &[(Aspect::PixelPerfect, ASPECT_PIXEL_PERFECT_ID), (Aspect::Tv, ASPECT_TV_ID)];
-
-/// Fast-forward factors offered in `Émulation > Accéléré`, paired with the id
-/// of their menu item. `video.rs` maps a click back to the factor with this
-/// table, and `AppMenu::sync_fast_forward` re-derives the checkmarks from it.
-/// The factors themselves must stay in sync with `prefs::FAST_FORWARD_FACTORS`
-/// (the cross-platform `[`/`]` hotkeys' step list and `Prefs::sanitize`'s
-/// clamp range) — checked by `fast_forward_factors_match_the_prefs_constant`
-/// below.
-pub const FF_FACTORS: &[(u8, &str)] = &[(2, FF_X2_ID), (3, FF_X3_ID), (4, FF_X4_ID)];
-
-/// Save-state slots offered in `Émulation > Slot`, paired with their menu-item
-/// id. Slot 0 is `<rom>.state`, slot N `<rom>.stateN` (see `state::state_path`).
-pub const SLOT_IDS: &[&str] = &[
-    "prisme.slot-0",
-    "prisme.slot-1",
-    "prisme.slot-2",
-    "prisme.slot-3",
-    "prisme.slot-4",
-    "prisme.slot-5",
-    "prisme.slot-6",
-    "prisme.slot-7",
-    "prisme.slot-8",
-    "prisme.slot-9",
-];
-
 /// Live handles for the menu items `video.rs` needs after construction.
-/// Held on `App` for the run's lifetime (see module docs).
+/// Held on `App` for the run's lifetime (see module docs). Every one of them
+/// is a plain `MenuItem`: with the settings gone there is no `CheckMenuItem`
+/// left, hence no AppKit-owned checkmark to re-derive after a click.
 pub struct AppMenu {
+    /// `Fichier > Accueil` (Échap): suspends the session and shows the home
+    /// screen. No accelerator — Escape is handled directly by `video.rs`, and
+    /// a menu accelerator would make AppKit swallow it.
+    pub home: MenuItem,
+    /// App menu `Réglages…` (Cmd+,, the macOS convention): opens the egui
+    /// settings panel, which is the only place a setting can be changed by
+    /// pointer. Also bound to `,` in `video.rs`.
+    pub settings: MenuItem,
     pub open_rom: MenuItem,
     /// `Fichier > Capture d'écran`; also bound to F12 in `video.rs`.
     pub screenshot: MenuItem,
@@ -119,43 +71,14 @@ pub struct AppMenu {
     pub reset: MenuItem,
     pub save_state: MenuItem,
     pub load_state: MenuItem,
-    /// `Émulation > Slot` choices, in `SLOT_IDS` order (slot = index). Radio
-    /// group, re-derived after every click like `ff_items`.
-    pub slot_items: Vec<CheckMenuItem>,
-    /// `Émulation > Slot suivant`; also bound to F7.
+    /// `Émulation > Slot suivant`; also bound to F7. The slot *number* itself
+    /// is a setting and lives in the panel; stepping to the next one is an
+    /// action, so it stays here.
     pub next_slot: MenuItem,
-    /// `Émulation > Reprise instantanée`.
-    pub resume_on_launch: CheckMenuItem,
-    /// `Affichage > Afficher les FPS` (Cmd+F). AppKit toggles a
-    /// `CheckMenuItem`'s own checked state itself before the click reaches our
-    /// `MenuEvent` channel (see `poll_menu_events`), so `video.rs` reads
-    /// `is_checked()` after the event rather than flipping a bool — the same
-    /// item is also toggled programmatically from the `F` hotkey via
-    /// `set_checked` to keep the two in sync.
-    pub show_fps: CheckMenuItem,
-    /// `Audio > Muet` (Cmd+M); same AppKit checkmark ownership as `show_fps`.
-    pub mute: CheckMenuItem,
-    pub volume_up: MenuItem,
-    pub volume_down: MenuItem,
-    /// Disabled item whose text shows the current volume percentage; updated
-    /// through `set_volume_label`.
-    pub volume_label: MenuItem,
-    /// `Émulation > Accéléré` factor choices, in `FF_FACTORS` order. Used as a
-    /// radio group: exactly one is checked, re-derived after every click.
-    pub ff_items: Vec<CheckMenuItem>,
-    /// `Fichier > Demander confirmation avant de quitter`.
-    pub confirm_quit: CheckMenuItem,
-    /// `Affichage > Zoom` choices, in `ZOOM_FACTORS` order. Radio group, like
-    /// `ff_items`/`slot_items`.
-    pub zoom_items: Vec<CheckMenuItem>,
-    /// `Affichage > Filtre` choices, in `FILTER_ITEMS` order.
-    pub filter_items: Vec<CheckMenuItem>,
-    /// `Affichage > Ratio` choices, in `ASPECT_ITEMS` order.
-    pub aspect_items: Vec<CheckMenuItem>,
     /// `Affichage > Plein écran` (F11, also Ctrl+Cmd+F on macOS). A plain
     /// `MenuItem`, not a `CheckMenuItem`: the fullscreen/windowed state is
-    /// visually obvious (the whole screen changes), unlike e.g. mute, so
-    /// there is no checkmark to keep in sync with `Window::fullscreen()`.
+    /// visually obvious (the whole screen changes), so there is no checkmark
+    /// to keep in sync with `Window::fullscreen()`.
     pub fullscreen: MenuItem,
     /// App-menu (leftmost) Quit, Cmd+Q. A custom item rather than
     /// `PredefinedMenuItem::quit` so its click routes through our
@@ -167,58 +90,6 @@ pub struct AppMenu {
     pub quit_file: MenuItem,
 }
 
-impl AppMenu {
-    /// Re-derive the `Accéléré` radio group from `factor`. Needed after every
-    /// click there: AppKit flips only the clicked item's own checkmark, and
-    /// clicking the already-selected factor would otherwise leave the group
-    /// with nothing checked.
-    pub fn sync_fast_forward(&self, factor: u8) {
-        for (item, &(value, _)) in self.ff_items.iter().zip(FF_FACTORS) {
-            item.set_checked(value == factor);
-        }
-    }
-
-    /// Re-derive the `Slot` radio group from `slot`, for the same reason as
-    /// `sync_fast_forward`: AppKit only flips the clicked item's checkmark.
-    pub fn sync_slot(&self, slot: u8) {
-        for (i, item) in self.slot_items.iter().enumerate() {
-            item.set_checked(i as u8 == slot);
-        }
-    }
-
-    /// Show the current volume in the disabled `Audio` menu label.
-    pub fn set_volume_label(&self, volume: u8) {
-        self.volume_label.set_text(volume_label_text(volume));
-    }
-
-    /// Re-derive the `Zoom` radio group from `zoom`, for the same reason as
-    /// `sync_fast_forward`: AppKit only flips the clicked item's checkmark.
-    pub fn sync_zoom(&self, zoom: u8) {
-        for (item, &(value, _)) in self.zoom_items.iter().zip(ZOOM_FACTORS) {
-            item.set_checked(value == zoom);
-        }
-    }
-
-    /// Re-derive the `Filtre` radio group from `filter`.
-    pub fn sync_filter(&self, filter: Filter) {
-        for (item, &(value, _)) in self.filter_items.iter().zip(FILTER_ITEMS) {
-            item.set_checked(value == filter);
-        }
-    }
-
-    /// Re-derive the `Ratio` radio group from `aspect`.
-    pub fn sync_aspect(&self, aspect: Aspect) {
-        for (item, &(value, _)) in self.aspect_items.iter().zip(ASPECT_ITEMS) {
-            item.set_checked(value == aspect);
-        }
-    }
-}
-
-/// Text of the disabled volume indicator in the Audio menu.
-fn volume_label_text(volume: u8) -> String {
-    format!("Volume : {volume} %")
-}
-
 /// Builds the menu bar and installs it as the process's `NSApp` main menu.
 /// Must run after `NSApplication` exists (i.e. after the winit event loop
 /// has resumed at least once) — calling this earlier is a silent no-op on
@@ -226,17 +97,21 @@ fn volume_label_text(volume: u8) -> String {
 /// calls `init_for_nsapp` from `resumed`/`new_events` rather than before
 /// `run_app`).
 ///
-/// `prefs` supplies the restored state of every checkable item: AppKit owns a
-/// `CheckMenuItem`'s checkmark, so those values have to be passed in at
-/// construction time rather than applied afterwards.
-pub fn install(prefs: &Prefs) -> AppMenu {
+/// Takes no state: nothing here reflects a preference any more (see module
+/// docs), so there is no restored checkmark to feed in at construction time
+/// and no menu item that can fall out of step with `prefs.json`.
+pub fn install() -> AppMenu {
     let menu_bar = Menu::new();
 
     // Application (leftmost) menu: AppKit titles it after the running
     // process itself (from `CFBundleName`/argv0) — muda has no way to
-    // rename that from here. `About` is muda's `PredefinedMenuItem`, so it
-    // opens the OS's own standard about panel, fed with the app name and the
-    // package version.
+    // rename that from here.
+    //
+    // There is deliberately **no** `PredefinedMenuItem::about`: AppKit's
+    // standard about panel opens a nested run loop, which re-enters winit's
+    // event handler and aborts the process (crash confirmed in 0.1.0 and
+    // 0.2.0 — see `docs/PUNCHLIST.md` and `crate::dialog`). The same
+    // information lives in `Réglages… > À propos`, drawn in-app by egui.
     let app_menu = Submenu::new(APP_NAME, true);
     // Custom Quit (see AppMenu::quit): routes through our MenuEvent channel so
     // we can flush battery SRAM before exiting, unlike PredefinedMenuItem::quit
@@ -247,30 +122,24 @@ pub fn install(prefs: &Prefs) -> AppMenu {
         true,
         Some(Accelerator::new(Some(CMD_OR_CTRL), Code::KeyQ)),
     );
-    let about = PredefinedMenuItem::about(
-        Some(&format!("À propos de {APP_NAME}")),
-        Some(AboutMetadata {
-            name: Some(APP_NAME.to_string()),
-            version: Some(VERSION.to_string()),
-            ..Default::default()
-        }),
+    // Cmd+, is macOS's standard shortcut for an application's settings; the
+    // bare `,` hotkey in `video.rs` covers the other platforms.
+    let settings = MenuItem::with_id(
+        SETTINGS_ID,
+        "Réglages…",
+        true,
+        Some(Accelerator::new(Some(CMD_OR_CTRL), Code::Comma)),
     );
-    let _ = app_menu.append_items(&[&about, &PredefinedMenuItem::separator(), &quit]);
+    let _ = app_menu.append_items(&[&settings, &PredefinedMenuItem::separator(), &quit]);
     let _ = menu_bar.append(&app_menu);
 
     let file_menu = Submenu::new("Fichier", true);
+    let home = MenuItem::with_id(HOME_ID, "Accueil (Échap)", true, None);
     let open_rom = MenuItem::with_id(
         OPEN_ROM_ID,
         "Ouvrir une ROM…",
         true,
         Some(Accelerator::new(Some(CMD_OR_CTRL), Code::KeyO)),
-    );
-    let confirm_quit = CheckMenuItem::with_id(
-        CONFIRM_QUIT_ID,
-        "Demander confirmation avant de quitter",
-        true,
-        prefs.confirm_on_quit,
-        None,
     );
     // No accelerator on these two: F12 is handled directly by `video.rs`, and
     // a menu accelerator would make AppKit swallow the key press and route it
@@ -280,12 +149,11 @@ pub fn install(prefs: &Prefs) -> AppMenu {
         MenuItem::with_id(EXPORT_SPC_ID, "Exporter la musique (.spc)…", true, None);
     let quit_file = MenuItem::with_id(QUIT_ID, "Quitter", true, None);
     let _ = file_menu.append_items(&[
+        &home,
         &open_rom,
         &PredefinedMenuItem::separator(),
         &screenshot,
         &export_spc,
-        &PredefinedMenuItem::separator(),
-        &confirm_quit,
         &PredefinedMenuItem::separator(),
         &quit_file,
     ]);
@@ -305,7 +173,8 @@ pub fn install(prefs: &Prefs) -> AppMenu {
         Some(Accelerator::new(Some(CMD_OR_CTRL), Code::KeyR)),
     );
     // Save/Load State act on the sidecar of the *current* slot (`prefs
-    // .save_slot`), exactly like the F5/F9 hotkeys in video.rs. Cmd+S / Cmd+L.
+    // .save_slot`, chosen in the settings panel), exactly like the F5/F9
+    // hotkeys in video.rs. Cmd+S / Cmd+L.
     let save_state = MenuItem::with_id(
         SAVE_STATE_ID,
         "Sauvegarder l'état (F5)",
@@ -318,158 +187,18 @@ pub fn install(prefs: &Prefs) -> AppMenu {
         true,
         Some(Accelerator::new(Some(CMD_OR_CTRL), Code::KeyL)),
     );
-    let slot_menu = Submenu::new("Slot", true);
-    let slot_items: Vec<CheckMenuItem> = SLOT_IDS
-        .iter()
-        .enumerate()
-        .map(|(slot, &id)| {
-            CheckMenuItem::with_id(
-                id,
-                format!("Slot {slot}"),
-                true,
-                prefs.save_slot as usize == slot,
-                None,
-            )
-        })
-        .collect();
-    for item in &slot_items {
-        let _ = slot_menu.append(item);
-    }
     let next_slot = MenuItem::with_id(NEXT_SLOT_ID, "Slot suivant (F7)", true, None);
-    // Session save state, written to `<rom>.resume` on every exit path and
-    // restored at launch; never touches the manual slots above.
-    let resume_on_launch = CheckMenuItem::with_id(
-        RESUME_ID,
-        "Reprise instantanée",
-        true,
-        prefs.resume_on_launch,
-        None,
-    );
-    // Factor picker for the held Tab fast-forward; the key itself is handled
-    // in video.rs, this only selects how many frames one press runs.
-    let ff_menu = Submenu::new("Accéléré (Tab)", true);
-    let ff_items: Vec<CheckMenuItem> = FF_FACTORS
-        .iter()
-        .map(|&(factor, id)| {
-            CheckMenuItem::with_id(
-                id,
-                format!("×{factor}"),
-                true,
-                prefs.fast_forward_factor == factor,
-                None,
-            )
-        })
-        .collect();
-    for item in &ff_items {
-        let _ = ff_menu.append(item);
-    }
     let _ = emulation_menu.append_items(&[
         &pause_resume,
         &reset,
         &PredefinedMenuItem::separator(),
         &save_state,
         &load_state,
-        &slot_menu,
         &next_slot,
-        &PredefinedMenuItem::separator(),
-        &resume_on_launch,
-        &PredefinedMenuItem::separator(),
-        &ff_menu,
     ]);
     let _ = menu_bar.append(&emulation_menu);
 
-    let audio_menu = Submenu::new("Audio", true);
-    let mute = CheckMenuItem::with_id(
-        MUTE_ID,
-        "Muet",
-        true,
-        prefs.mute,
-        Some(Accelerator::new(Some(CMD_OR_CTRL), Code::KeyM)),
-    );
-    let volume_up = MenuItem::with_id(
-        VOLUME_UP_ID,
-        "Volume +",
-        true,
-        Some(Accelerator::new(Some(CMD_OR_CTRL), Code::Equal)),
-    );
-    let volume_down = MenuItem::with_id(
-        VOLUME_DOWN_ID,
-        "Volume −",
-        true,
-        Some(Accelerator::new(Some(CMD_OR_CTRL), Code::Minus)),
-    );
-    // Indicator only: disabled so it can't be clicked, its text is refreshed
-    // by `set_volume_label` on every volume change.
-    let volume_label = MenuItem::new(volume_label_text(prefs.volume), false, None);
-    let _ = audio_menu.append_items(&[
-        &mute,
-        &PredefinedMenuItem::separator(),
-        &volume_up,
-        &volume_down,
-        &volume_label,
-    ]);
-    let _ = menu_bar.append(&audio_menu);
-
     let view_menu = Submenu::new("Affichage", true);
-    // Off on a first launch (the overlay is an opt-in debug aid, not something
-    // that should appear over a game by default); afterwards it reflects the
-    // persisted `prefs.show_fps`.
-    let show_fps = CheckMenuItem::with_id(
-        SHOW_FPS_ID,
-        "Afficher les FPS",
-        true,
-        prefs.show_fps,
-        Some(Accelerator::new(Some(CMD_OR_CTRL), Code::KeyF)),
-    );
-    // Zoom radio group: F1-F4 offer the same set, see `video.rs::handle_key`.
-    let zoom_menu = Submenu::new("Zoom", true);
-    let zoom_key_hints = ["F1", "F2", "F3", "F4"];
-    let zoom_items: Vec<CheckMenuItem> = ZOOM_FACTORS
-        .iter()
-        .zip(zoom_key_hints)
-        .map(|(&(factor, id), key)| {
-            CheckMenuItem::with_id(
-                id,
-                format!("×{factor} ({key})"),
-                true,
-                prefs.zoom == factor,
-                None,
-            )
-        })
-        .collect();
-    for item in &zoom_items {
-        let _ = zoom_menu.append(item);
-    }
-    // Filter radio group: `V` cycles through the same three, see
-    // `video.rs::handle_key`.
-    let filter_menu = Submenu::new("Filtre", true);
-    let current_filter = Filter::from_pref(&prefs.filter);
-    let filter_labels = ["Aucun (V)", "Lissé", "CRT"];
-    let filter_items: Vec<CheckMenuItem> = FILTER_ITEMS
-        .iter()
-        .zip(filter_labels)
-        .map(|(&(value, id), label)| {
-            CheckMenuItem::with_id(id, label, true, value == current_filter, None)
-        })
-        .collect();
-    for item in &filter_items {
-        let _ = filter_menu.append(item);
-    }
-    // Aspect-ratio radio group: `R` toggles between the two, see
-    // `video.rs::handle_key`.
-    let aspect_menu = Submenu::new("Ratio", true);
-    let current_aspect = Aspect::from_pref(&prefs.aspect);
-    let aspect_labels = ["Pixel-parfait (1:1) (R)", "TV authentique (8:7)"];
-    let aspect_items: Vec<CheckMenuItem> = ASPECT_ITEMS
-        .iter()
-        .zip(aspect_labels)
-        .map(|(&(value, id), label)| {
-            CheckMenuItem::with_id(id, label, true, value == current_aspect, None)
-        })
-        .collect();
-    for item in &aspect_items {
-        let _ = aspect_menu.append(item);
-    }
     // Ctrl+Cmd+F: macOS's own system convention for toggling fullscreen
     // (distinct from the bare F11 the `video.rs` hotkey also answers to,
     // which some Mac keyboards/OS versions reserve for Mission Control).
@@ -479,20 +208,16 @@ pub fn install(prefs: &Prefs) -> AppMenu {
         true,
         Some(Accelerator::new(Some(Modifiers::SUPER | Modifiers::CONTROL), Code::KeyF)),
     );
-    let _ = view_menu.append_items(&[
-        &show_fps,
-        &PredefinedMenuItem::separator(),
-        &zoom_menu,
-        &filter_menu,
-        &aspect_menu,
-        &PredefinedMenuItem::separator(),
-        &fullscreen,
-    ]);
+    // Zoom, filtre, ratio and the FPS readout are settings: they live in
+    // `Réglages… > Affichage` (and on their F1-F4 / V / R / F hotkeys).
+    let _ = view_menu.append_items(&[&fullscreen]);
     let _ = menu_bar.append(&view_menu);
 
     menu_bar.init_for_nsapp();
 
     AppMenu {
+        home,
+        settings,
         open_rom,
         screenshot,
         export_spc,
@@ -500,19 +225,7 @@ pub fn install(prefs: &Prefs) -> AppMenu {
         reset,
         save_state,
         load_state,
-        slot_items,
         next_slot,
-        resume_on_launch,
-        show_fps,
-        mute,
-        volume_up,
-        volume_down,
-        volume_label,
-        ff_items,
-        confirm_quit,
-        zoom_items,
-        filter_items,
-        aspect_items,
         fullscreen,
         quit,
         quit_file,
@@ -524,64 +237,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fast_forward_factors_cover_the_documented_range() {
-        assert_eq!(FF_FACTORS.iter().map(|&(f, _)| f).collect::<Vec<_>>(), vec![2, 3, 4]);
-        // Ids must be unique, or a click would dispatch to two factors.
-        let mut ids: Vec<&str> = FF_FACTORS.iter().map(|&(_, id)| id).collect();
-        ids.sort_unstable();
-        ids.dedup();
-        assert_eq!(ids.len(), FF_FACTORS.len());
-    }
-
-    #[test]
-    fn fast_forward_factors_match_the_prefs_constant() {
-        // The menu's radio group and the cross-platform `[`/`]` hotkeys must
-        // offer exactly the same factors (review point G).
-        let menu_factors: Vec<u8> = FF_FACTORS.iter().map(|&(f, _)| f).collect();
-        assert_eq!(menu_factors, crate::prefs::FAST_FORWARD_FACTORS);
-    }
-
-    #[test]
-    fn slot_ids_cover_the_ten_slots_and_are_unique() {
-        assert_eq!(SLOT_IDS.len(), 10);
-        let mut ids: Vec<&str> = SLOT_IDS.to_vec();
-        ids.sort_unstable();
-        ids.dedup();
-        assert_eq!(ids.len(), SLOT_IDS.len());
-        // A click is mapped back to a slot by index; the ids must stay in
-        // slot order for that to hold.
-        for (slot, id) in SLOT_IDS.iter().enumerate() {
-            assert!(id.ends_with(&slot.to_string()), "{id} is not slot {slot}");
-        }
-    }
-
-    #[test]
     fn every_menu_id_is_distinct() {
         // Two items sharing an id would dispatch to both actions; the only
         // intentional duplicate is Quit (app menu + Fichier).
         let mut ids: Vec<&str> = vec![
+            HOME_ID,
+            SETTINGS_ID,
             OPEN_ROM_ID,
             SCREENSHOT_ID,
             EXPORT_SPC_ID,
             NEXT_SLOT_ID,
-            RESUME_ID,
             PAUSE_RESUME_ID,
             RESET_ID,
             SAVE_STATE_ID,
             LOAD_STATE_ID,
-            SHOW_FPS_ID,
-            MUTE_ID,
-            VOLUME_UP_ID,
-            VOLUME_DOWN_ID,
-            CONFIRM_QUIT_ID,
             QUIT_ID,
+            FULLSCREEN_ID,
         ];
-        ids.extend(FF_FACTORS.iter().map(|&(_, id)| id));
-        ids.extend(SLOT_IDS);
-        ids.extend(ZOOM_FACTORS.iter().map(|&(_, id)| id));
-        ids.extend(FILTER_ITEMS.iter().map(|&(_, id)| id));
-        ids.extend(ASPECT_ITEMS.iter().map(|&(_, id)| id));
-        ids.push(FULLSCREEN_ID);
         let count = ids.len();
         ids.sort_unstable();
         ids.dedup();
@@ -589,32 +261,29 @@ mod tests {
     }
 
     #[test]
-    fn volume_label_shows_percent() {
-        assert_eq!(volume_label_text(0), "Volume : 0 %");
-        assert_eq!(volume_label_text(100), "Volume : 100 %");
-    }
-
-    #[test]
-    fn zoom_factors_offer_one_through_four() {
-        assert_eq!(ZOOM_FACTORS.iter().map(|&(f, _)| f).collect::<Vec<_>>(), vec![1, 2, 3, 4]);
-        let mut ids: Vec<&str> = ZOOM_FACTORS.iter().map(|&(_, id)| id).collect();
-        ids.sort_unstable();
-        ids.dedup();
-        assert_eq!(ids.len(), ZOOM_FACTORS.len());
-    }
-
-    #[test]
-    fn filter_items_cover_all_three_filters_and_match_the_cycle_order() {
-        let values: Vec<Filter> = FILTER_ITEMS.iter().map(|&(f, _)| f).collect();
-        assert_eq!(values, vec![Filter::None, Filter::Smooth, Filter::Crt]);
-        // `V` steps through `Filter::next` in this same order.
-        assert_eq!(Filter::None.next(), Filter::Smooth);
-        assert_eq!(Filter::Smooth.next(), Filter::Crt);
-    }
-
-    #[test]
-    fn aspect_items_cover_both_modes() {
-        let values: Vec<Aspect> = ASPECT_ITEMS.iter().map(|&(a, _)| a).collect();
-        assert_eq!(values, vec![Aspect::PixelPerfect, Aspect::Tv]);
+    fn the_menu_carries_actions_only() {
+        // Guard for the split introduced with the settings panel: an id whose
+        // name reads as a setting would mean two places write the same
+        // preference. Settings live in `ui::settings`, which reads `prefs`
+        // directly and returns `Action::Set`.
+        for id in [
+            HOME_ID,
+            SETTINGS_ID,
+            OPEN_ROM_ID,
+            SCREENSHOT_ID,
+            EXPORT_SPC_ID,
+            NEXT_SLOT_ID,
+            PAUSE_RESUME_ID,
+            RESET_ID,
+            SAVE_STATE_ID,
+            LOAD_STATE_ID,
+            QUIT_ID,
+            FULLSCREEN_ID,
+        ] {
+            assert!(id.starts_with("prisme."), "{id}");
+            for setting in ["zoom", "filter", "aspect", "show-fps", "mute", "volume", "ff-", "slot-", "confirm-quit", "resume-on-launch"] {
+                assert!(!id.contains(setting), "{id} looks like a setting; those moved to the panel");
+            }
+        }
     }
 }

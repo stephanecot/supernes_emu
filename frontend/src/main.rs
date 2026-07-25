@@ -3,7 +3,10 @@
 
 mod atomic;
 mod audio;
+mod dialog;
+mod guide;
 mod input;
+mod library;
 mod menu;
 mod picker;
 mod prefs;
@@ -11,6 +14,8 @@ mod render;
 mod save;
 mod spc;
 mod state;
+mod thumbs;
+mod ui;
 mod video;
 
 use std::cell::RefCell;
@@ -60,7 +65,8 @@ struct Args {
 }
 
 const USAGE: &str = "usage: prisme [rom.sfc|.smc|.zip] [flags]
-  <rom> omitted, windowed mode          open a native file-open dialog to pick a ROM
+  <rom> omitted, windowed mode          open the application on its home screen
+  <rom> omitted, --info/--disasm        open a native file-open dialog to pick a ROM
   --version                             print the application name and version, then exit
   --info                                print header info and exit
   --disasm [--addr BB:AAAA] [--count N] disassemble and exit
@@ -102,13 +108,14 @@ fn main() -> ExitCode {
         println!("{APP_NAME} {VERSION}");
         return ExitCode::SUCCESS;
     }
-    // No ROM path and not --headless: pick one with a native file dialog
-    // before building anything else, so the rest of `run` sees a ROM path
-    // exactly as if it had been passed on the command line. rfd's dialog
-    // must run on the main thread on macOS; this is the main thread and no
-    // window/event loop exists yet, so the constraint is trivially met.
-    if parsed.rom.is_none() {
-        match picker::pick_rom() {
+    // No ROM path and a CLI-only flag that needs cart data (`--info`,
+    // `--disasm`): keep the previous behavior and pick one with a native file
+    // dialog. rfd's dialog must run on the main thread on macOS; this is the
+    // main thread and no window/event loop exists yet, so the constraint is
+    // trivially met. Plain `prisme` with no argument no longer goes through
+    // here at all — it opens the home screen (see `run`).
+    if parsed.rom.is_none() && (parsed.info || parsed.disasm) {
+        match picker::pick_rom(std::path::Path::new("roms")) {
             Some(path) => parsed.rom = Some(path),
             None => {
                 println!("No ROM selected; exiting.");
@@ -205,7 +212,15 @@ fn parse_bus_addr(s: &str) -> Result<(u8, u16), String> {
 }
 
 fn run(args: Args) -> Result<(), String> {
-    let rom_path = args.rom.as_ref().unwrap();
+    // Windowed launch with no ROM: open the application on its home screen.
+    // Unreachable with `--headless` (`parse_args` rejects it) and with
+    // `--info`/`--disasm` (`main` runs the file dialog for those first), so
+    // every CLI path below still has a cartridge to work on.
+    let Some(rom_path) = args.rom.clone() else {
+        let prefs = prefs::Prefs::load(true);
+        return video::run(None, prefs);
+    };
+    let rom_path = &rom_path;
     let bytes = load_rom_bytes(rom_path)?;
     let mut cart = Cartridge::from_bytes(bytes)?;
 
@@ -248,7 +263,15 @@ fn run(args: Args) -> Result<(), String> {
         // since this is exactly the windowed run that writes option changes
         // back.
         let prefs = prefs::Prefs::load(true);
-        return video::run(rom_path.clone(), cart, save_path, sram_baseline, prefs);
+        return video::run(
+            Some(video::Launch {
+                rom_path: rom_path.clone(),
+                cart,
+                save_path,
+                sram_baseline,
+            }),
+            prefs,
+        );
     }
 
     let script = match &args.script {
@@ -275,7 +298,7 @@ fn run(args: Args) -> Result<(), String> {
         args.watch.iter().map(|&(b, a)| ((b as u32) << 16) | a as u32).collect();
 
     let mut trace_writer = match &args.trace {
-        Some(path) => Some(open_trace(path)?),
+        Some(path) => Some(open_trace(path, "65C816")?),
         None => None,
     };
 
@@ -284,7 +307,7 @@ fn run(args: Args) -> Result<(), String> {
     // frame range rather than driven per-instruction from here. A shared writer
     // lets the closure own a handle while `main` retains one to flush at the end.
     let spc_writer = match &args.trace_spc {
-        Some(path) => Some(Rc::new(RefCell::new(open_trace(path)?))),
+        Some(path) => Some(Rc::new(RefCell::new(open_trace(path, "SPC700")?))),
         None => None,
     };
     let mut spc_installed = false;
@@ -296,7 +319,7 @@ fn run(args: Args) -> Result<(), String> {
         eprintln!("--trace-gsu: no SuperFX/GSU coprocessor in this cart; skipping");
     }
     let gsu_writer = match &args.trace_gsu {
-        Some(path) if cart_has_gsu => Some(Rc::new(RefCell::new(open_trace(path)?))),
+        Some(path) if cart_has_gsu => Some(Rc::new(RefCell::new(open_trace(path, "GSU")?))),
         _ => None,
     };
     let mut gsu_installed = false;
@@ -307,7 +330,7 @@ fn run(args: Args) -> Result<(), String> {
         eprintln!("--trace-sa1: no SA-1 coprocessor in this cart; skipping");
     }
     let sa1_writer = match &args.trace_sa1 {
-        Some(path) if cart_has_sa1 => Some(Rc::new(RefCell::new(open_trace(path)?))),
+        Some(path) if cart_has_sa1 => Some(Rc::new(RefCell::new(open_trace(path, "SA-1")?))),
         _ => None,
     };
     let mut sa1_installed = false;
@@ -597,6 +620,12 @@ pub(crate) fn now_local() -> CalendarTime {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
+    local_time(secs)
+}
+
+/// Local calendar time of a Unix timestamp (same timezone handling as
+/// `now_local`, which it backs).
+pub(crate) fn local_time(secs: i64) -> CalendarTime {
     #[cfg(unix)]
     {
         // SAFETY: `localtime_r` writes into the caller-provided `tm` and takes
@@ -772,7 +801,7 @@ fn resolve_out_path(p: &Path) -> PathBuf {
     }
 }
 
-fn open_trace(path: &Path) -> Result<BufWriter<File>, String> {
+fn open_trace(path: &Path, cpu: &str) -> Result<BufWriter<File>, String> {
     let resolved = resolve_out_path(path);
     if let Some(parent) = resolved.parent() {
         if !parent.as_os_str().is_empty() {
@@ -781,7 +810,7 @@ fn open_trace(path: &Path) -> Result<BufWriter<File>, String> {
         }
     }
     let f = File::create(&resolved).map_err(|e| format!("create {}: {e}", resolved.display()))?;
-    eprintln!("tracing 65C816 to {}", resolved.display());
+    eprintln!("tracing {cpu} to {}", resolved.display());
     Ok(BufWriter::new(f))
 }
 
@@ -1080,4 +1109,19 @@ pub(crate) fn write_frame_png(snes: &Snes, path: &Path) -> Result<(), String> {
     let mut writer = encoder.write_header().map_err(|e| format!("png header: {e}"))?;
     writer.write_image_data(&rgba).map_err(|e| format!("png write: {e}"))?;
     Ok(())
+}
+
+/// Same 8-bit RGBA PNG as `write_frame_png`, encoded into memory instead of
+/// straight to a file — used by the library thumbnails, which are written
+/// atomically (`atomic::write` takes the finished bytes).
+pub(crate) fn encode_rgba_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut out, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().map_err(|e| format!("png header: {e}"))?;
+        writer.write_image_data(rgba).map_err(|e| format!("png write: {e}"))?;
+    }
+    Ok(out)
 }

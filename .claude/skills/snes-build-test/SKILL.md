@@ -16,7 +16,7 @@ description: Build, test, lint and run the SNES emulator (Rust workspace) — ru
 
 `cargo run --release -p prisme -- <rom> [flags]`
 
-`<rom>` accepts `.sfc`/`.smc` raw or `.zip` (first ROM entry inside). If omitted and `--headless` is not set, a native file-open dialog (rfd, filtered to `.sfc`/`.smc`/`.zip`, starting in `roms/` if present) is shown instead — not usable from a headless/agent shell; agents must always pass `<rom>` explicitly. `--headless` still requires `<rom>` explicitly (errors otherwise). **This contract is what all agents rely on — if you change a flag, update this file in the same change.**
+`<rom>` accepts `.sfc`/`.smc` raw or `.zip` (first ROM entry inside). If omitted and `--headless` is not set, the app opens a window on its **home screen** (egui shell, Phase 8) with no cartridge loaded — not usable from a headless/agent shell; agents must always pass `<rom>` explicitly. The home screen scans a ROM folder (`library_dir` preference, else `last_rom_dir`, else `roms/`) on a background thread and generates a thumbnail per game by emulating it headless; both results are cached under the app's config directory (`…/Prisme/library.json`, `…/Prisme/Thumbnails/*.png`) and can be deleted at any time — they are derived data, never player data. The exception is `--info`/`--disasm` without `<rom>`, which still show a native file-open dialog (rfd, filtered to `.sfc`/`.smc`/`.zip`, starting in `roms/` if present). `--headless` still requires `<rom>` explicitly (errors otherwise). Every user option (display, audio, emulation, folders) lives in the windowed **settings panel** (`,` hotkey, `Réglages…`/Cmd+, in the macOS menu, `Réglages…` button on the home screen), not in the native menu, which now carries actions only; the panel reads and writes `prefs.json` exclusively, so a headless run is unaffected by it. **This contract is what all agents rely on — if you change a flag, update this file in the same change.**
 
 | Flag | Behavior |
 |---|---|
@@ -32,7 +32,7 @@ description: Build, test, lint and run the SNES emulator (Rust workspace) — ru
 | `--log-mmio` | Log named MMIO writes ($21xx/$42xx/$43xx) to stderr |
 | `--watch BB:AAAA` | Log every read/write at a bus address |
 | `--script PATH` | Headless input script; each line: `<frame> <button> <frames_held>` with buttons `A B X Y L R Start Select Up Down Left Right` |
-| `--dump-state DIR` | On exit dump `wram.bin vram.bin cgram.bin oam.bin apuram.bin` into DIR |
+| `--dump-state DIR` | On exit dump `wram.bin vram.bin cgram.bin oam.bin ppu.txt` into DIR |
 | `--dump-spc PATH.spc` | On exit write the APU state as a 66048-byte `.spc` music file (headless only) |
 | `--load-state FILE` | Headless: `Snes::load_state` from FILE before emulating frame 0 (rejects a state saved from a different ROM) |
 | `--save-state-at FRAME FILE` | Headless: write `Snes::save_state` to FILE right after emulating frame FRAME |

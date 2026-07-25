@@ -25,7 +25,8 @@
 //! migration, but not every field is read by the running emulator yet.
 //! Fields the frontend actually *acts on* today: `mute`, `volume`, `show_fps`,
 //! `fast_forward_factor`, `confirm_on_quit`, `resume_on_launch`, `save_slot`,
-//! `screenshot_dir`, `zoom`, `filter`, `aspect`. Every other field is
+//! `screenshot_dir`, `zoom`, `filter`, `aspect`, `library_dir`,
+//! `library_sort`, `games`. Every other field is
 //! annotated below with the roadmap phase that wires it up (`parental`
 //! already carries this note in its own doc comment) — a value stored there
 //! today is preserved for when that phase lands, but changing it has no
@@ -72,6 +73,30 @@ impl Default for Parental {
             day: None,
         }
     }
+}
+
+/// Per-game persisted state of the library (Phase 8): what the player pinned,
+/// how long they have played it, when they last did, and the screenshot they
+/// promoted as its thumbnail. Keyed by `library::game_id` (cartridge title +
+/// header checksum), so it follows the game rather than its file path.
+///
+/// `play_seconds` is also what the parental controls of Phase 6 will read, so
+/// it is accumulated per game from the start.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GameStats {
+    /// Pinned at the head of the library grid.
+    pub favorite: bool,
+    /// Cumulated play time, in seconds of *emulated running* wall time (the
+    /// home screen and pauses do not count).
+    pub play_seconds: u64,
+    /// Unix timestamp of the last launch, `None` if never launched from this
+    /// build. Drives the "recently played" sort order.
+    pub last_played: Option<i64>,
+    /// Screenshot promoted as this game's thumbnail, replacing the one the
+    /// emulator generated. `None` = use the generated one
+    /// (`thumbs::thumb_path`).
+    pub thumbnail: Option<PathBuf>,
 }
 
 /// All persisted options. Fields for features that are not implemented yet are
@@ -129,9 +154,13 @@ pub struct Prefs {
     /// all yet (no `gilrs` integration), so this map has nothing to feed.
     pub pad_map: BTreeMap<String, String>,
     pub parental: Parental,
-    /// Directory the ROM picker opens in; `None` = `roms/` if present. **Not
-    /// yet applied** — `picker::pick_rom` always starts in `roms/` (or the
-    /// working directory); Phase 4, same as `save_dir`.
+    /// Folder the player last picked a ROM in, written by
+    /// `video::App::pump_dialogs` after a successful choice. Read only through
+    /// `library::library_dir`, which is what both the library scan and the
+    /// in-session ROM picker (`video::App::open_rom_dialog`) resolve their
+    /// folder with, so browsing and scanning stay on the same folder. The
+    /// startup picker of `--info`/`--disasm` runs before the preferences are
+    /// read and still starts in `roms/` (documented CLI behavior).
     pub last_rom_dir: Option<PathBuf>,
     /// Speed multiplier of the fast-forward key, 2..=4 (matches the choices
     /// `menu::FF_FACTORS`/`prefs::FAST_FORWARD_FACTORS` offer; a value from
@@ -145,6 +174,16 @@ pub struct Prefs {
     pub resume_on_launch: bool,
     /// Current save-state slot, 0..=9.
     pub save_slot: u8,
+    /// Folder the library screen scans for ROMs; `None` falls back to
+    /// `last_rom_dir`, then to `roms/` (see `library::library_dir`).
+    pub library_dir: Option<PathBuf>,
+    /// Library sort order: `title` or `recent` (`library::SortMode`). Unknown
+    /// values are preserved on a round trip and render as `title`, like
+    /// `filter`/`aspect`.
+    pub library_sort: String,
+    /// Per-game library state, keyed by `library::game_id`. Games never
+    /// launched and never pinned have no entry at all, so the file stays small.
+    pub games: BTreeMap<String, GameStats>,
     /// Not serialized: false in headless/CLI runs, where `save()` must do
     /// nothing so automated runs never touch the user's file.
     #[serde(skip)]
@@ -170,6 +209,9 @@ impl Default for Prefs {
             confirm_on_quit: true,
             resume_on_launch: true,
             save_slot: 0,
+            library_dir: None,
+            library_sort: "title".to_string(),
+            games: BTreeMap::new(),
             persist: false,
         }
     }
@@ -289,8 +331,16 @@ pub fn path() -> Option<PathBuf> {
     config_dir().map(|d| d.join(FILE_NAME))
 }
 
+/// `<os config dir>/Prisme/<name>`, the same directory `prefs.json` lives in.
+/// Used by the library's metadata cache (`library.json`) and by the generated
+/// thumbnails (`Thumbnails/`), which are derived data, never player data: both
+/// can be deleted at any time and are simply rebuilt.
+pub fn data_path(name: &str) -> Option<PathBuf> {
+    config_dir().map(|d| d.join(name))
+}
+
 /// `<os config dir>/Prisme` (see module docs).
-fn config_dir() -> Option<PathBuf> {
+pub fn config_dir() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         let home = std::env::var_os("HOME")?;
@@ -337,6 +387,9 @@ mod tests {
         assert!(p.confirm_on_quit);
         assert!(p.resume_on_launch);
         assert_eq!(p.save_slot, 0);
+        assert_eq!(p.library_dir, None);
+        assert_eq!(p.library_sort, "title");
+        assert!(p.games.is_empty());
         assert!(!p.persist, "loaded prefs must opt into writing explicitly");
         assert_eq!(p.parental, Parental::default());
         assert!(!p.parental.enabled);
@@ -376,6 +429,17 @@ mod tests {
         p.confirm_on_quit = false;
         p.resume_on_launch = false;
         p.save_slot = 7;
+        p.library_dir = Some(PathBuf::from("/library"));
+        p.library_sort = "recent".to_string();
+        p.games.insert(
+            "SECRET_OF_MANA-754F".to_string(),
+            GameStats {
+                favorite: true,
+                play_seconds: 4321,
+                last_played: Some(1_700_000_000),
+                thumbnail: Some(PathBuf::from("/shots/som.png")),
+            },
+        );
 
         let json = serde_json::to_string_pretty(&p).expect("serialize");
         let back = Prefs::from_json(&json).expect("parse");
@@ -443,6 +507,22 @@ mod tests {
 
         // `{}` is a valid, fully-default file.
         assert_eq!(Prefs::from_json("{}").expect("parse"), Prefs::default());
+    }
+
+    #[test]
+    fn per_game_library_state_survives_a_partial_file() {
+        // A file written before the library existed, and one written by hand
+        // with only part of a game's state: both must read back with the
+        // documented defaults for what they don't say.
+        let p = Prefs::from_json("{\"games\": {\"A-0001\": {\"favorite\": true}}}").expect("parse");
+        let stats = &p.games["A-0001"];
+        assert!(stats.favorite);
+        assert_eq!(stats.play_seconds, 0);
+        assert_eq!(stats.last_played, None);
+        assert_eq!(stats.thumbnail, None);
+        // An unknown sort name is preserved verbatim (same rule as `filter`).
+        let p = Prefs::from_json("{\"library_sort\": \"by-colour\"}").expect("parse");
+        assert_eq!(p.library_sort, "by-colour");
     }
 
     #[test]

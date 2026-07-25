@@ -115,3 +115,15 @@ de la boucle est concernée :
 **Leçon de méthode :** ne plus annoncer ce type de correctif comme acquis sans vérification à
 l'écran — l'environnement de développement n'a pas d'affichage, donc ces chemins ne sont testables
 que par l'utilisateur ou par une analyse de la pile de crash.
+
+**État après la Phase 8 (code, non vérifié à l'écran) :**
+- `PredefinedMenuItem::about` n'est plus installé (`menu::install`) ; l'information est dans
+  `Réglages… > À propos`, dessiné par egui.
+- La confirmation de sortie est une `egui::Modal` (`ui::confirm`) : plus de `rfd::MessageDialog`,
+  donc plus de `NSAlert runModal` depuis un callback.
+- Les sélecteurs natifs restants (ROM, dossier des ROMs, dossier des captures) passent par
+  `crate::dialog` : la demande est mise en file, puis postée sur la file principale libdispatch
+  (`dispatch_async_f`) et exécutée entre deux callbacks winit, pile propre. `about_to_wait` est
+  lui-même un callback winit, donc un simple report « à la prochaine itération » n'aurait pas suffi.
+- Garde automatisée : `dialog::tests::the_event_loop_never_calls_the_native_picker_itself` échoue si
+  `video.rs` mentionne `picker::` ou `rfd::`.

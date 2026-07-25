@@ -8,6 +8,7 @@
 //! coarse — a few ms on some hosts — so a plain sleep-to-deadline would
 //! frequently overshoot).
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -23,13 +24,23 @@ use winit::window::{Window, WindowId};
 use snes_core::{Cartridge, JoypadState, Snes, SCREEN_HEIGHT, SCREEN_WIDTH};
 
 use crate::audio::{self, AudioOutput};
+use crate::dialog;
 use crate::input;
+use crate::library::{self, GameEntry, PlayClock, SortMode};
 #[cfg(target_os = "macos")]
 use crate::menu::{self, AppMenu};
-use crate::picker;
 use crate::prefs::Prefs;
 use crate::render::{self, Aspect, Filter};
 use crate::save;
+use crate::thumbs;
+use crate::ui::game_sheet::SheetData;
+use crate::ui::home::HomeModel;
+use crate::ui::library_view::LibraryModel;
+use crate::ui::settings::SettingsModel;
+use crate::ui::{
+    self, Action, AppState, EguiLayer, EscapeAction, LibraryUi, Screen, SettingsUi, Setting,
+    TextureStore,
+};
 use crate::{APP_NAME, VERSION};
 
 /// Integer upscale factor for the 256x224 native framebuffer, and the
@@ -72,32 +83,112 @@ fn mtime(path: &Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(path).ok()?.modified().ok()
 }
 
-/// Run the windowed frontend (M5): winit event loop + pixels present, paced
-/// to the cartridge region's native field rate (PAL 50.007 Hz / NTSC
+/// A cartridge to start the window on, as prepared by `main::run`.
+/// `save_path`/`sram_baseline` come from `save::load_sram` (already applied to
+/// `cart.sram` by the caller).
+pub struct Launch {
+    pub rom_path: PathBuf,
+    pub cart: Cartridge,
+    pub save_path: PathBuf,
+    pub sram_baseline: Vec<u8>,
+}
+
+/// Frame pacing used while the home screen owns the window: no cartridge means
+/// no field rate to follow, so the UI is refreshed at a plain 60 Hz.
+const HOME_FRAME_DURATION: Duration = Duration::from_nanos(16_666_667);
+
+/// How much play time may accumulate before `prefs.json` is rewritten. The
+/// counter itself is updated every second in memory; writing the file that
+/// often would be pointless I/O, and every exit path flushes it anyway
+/// (`persist_all`), so at most this many seconds of a session can be lost to a
+/// hard crash.
+const PLAY_TIME_FLUSH_SECS: u64 = 60;
+
+/// Runtime state of the game library shown on the home screen. The heavy work
+/// (folder scan, header parsing, thumbnail generation) happens on
+/// `library::Worker`'s own thread; this is only what the UI reads plus the
+/// bookkeeping needed to feed that thread.
+struct LibraryState {
+    /// Folder currently scanned (`library::library_dir`).
+    dir: PathBuf,
+    entries: Vec<GameEntry>,
+    /// `None` until the home screen is shown for the first time: launching
+    /// straight into a game must not pay for a scan nobody asked for.
+    worker: Option<library::Worker>,
+    /// Search text, sort order, open sheet (see `ui::library_view`).
+    ui: LibraryUi,
+    textures: TextureStore,
+    /// Picture to show per game id: the promoted screenshot when the player
+    /// chose one, else the generated thumbnail. Missing = placeholder.
+    thumbs: HashMap<String, PathBuf>,
+    /// Games whose thumbnail is queued on the worker.
+    pending: HashSet<String>,
+    /// Files listed by the open sheet, refreshed when the selection changes.
+    sheet: SheetData,
+}
+
+impl LibraryState {
+    fn new() -> Self {
+        Self {
+            dir: PathBuf::new(),
+            entries: Vec::new(),
+            worker: None,
+            ui: LibraryUi::default(),
+            textures: TextureStore::new(),
+            thumbs: HashMap::new(),
+            pending: HashSet::new(),
+            sheet: SheetData::default(),
+        }
+    }
+}
+
+/// Run the windowed frontend: winit event loop + pixels present + egui shell,
+/// paced to the cartridge region's native field rate (PAL 50.007 Hz / NTSC
 /// 60.0988 Hz, from `Region::frames_per_second`) via an absolute deadline.
 ///
-/// `save_path`/`sram_baseline` come from `save::load_sram` (already applied
-/// to `cart.sram` by the caller); battery SRAM is written back to
-/// `save_path` once the event loop exits, however it exits (window close,
-/// Esc, or a fatal window/surface creation error), since `app` is still
-/// owned here after `run_app` returns. The `O` hotkey can swap in a
-/// different ROM mid-session (see `App::open_rom_dialog`); `App` then owns
-/// its own current `save_path`/`sram_baseline` so the exit-time save below
-/// always targets whichever game is loaded when the window closes.
+/// `launch` is `None` when the process was started with no ROM argument: the
+/// window then opens on the home screen (`ui::Screen::Home`) instead of the
+/// native file dialog it used to show, and a cartridge is loaded later through
+/// `Action::PickRom`/`switch_rom`.
+///
+/// Battery SRAM is written back to the current `save_path` once the event loop
+/// exits, however it exits (window close, quit, or a fatal window/surface
+/// creation error), since `app` is still owned here after `run_app` returns.
+/// The `O` hotkey and the home screen can swap in a different ROM mid-session
+/// (see `App::open_rom_dialog`); `App` owns its own current
+/// `save_path`/`sram_baseline` so that exit-time save always targets whichever
+/// game is loaded when the window closes.
 ///
 /// `prefs` carries the persisted user options (loaded by `main`); it is stored
 /// on `App`, written back after every option change and once more on exit.
-pub fn run(
-    rom_path: PathBuf,
-    cart: Cartridge,
-    save_path: PathBuf,
-    sram_baseline: Vec<u8>,
-    prefs: Prefs,
-) -> Result<(), String> {
-    let title = window_title(&cart.title);
-    let region = cart.region;
-    let snes = Snes::new(cart);
-    let frame_duration = Duration::from_secs_f64(1.0 / region.frames_per_second());
+pub fn run(launch: Option<Launch>, prefs: Prefs) -> Result<(), String> {
+    let (title, snes, current_rom_path, save_path, sram_baseline, frame_duration, game_id) =
+        match launch {
+            Some(l) => {
+                let region = l.cart.region;
+                let game_id =
+                    library::game_id(l.cart.title.trim(), l.cart.header_checksum, &l.cart.rom);
+                (
+                    window_title(&l.cart.title),
+                    Some(Snes::new(l.cart)),
+                    l.rom_path,
+                    l.save_path,
+                    l.sram_baseline,
+                    Duration::from_secs_f64(1.0 / region.frames_per_second()),
+                    Some(game_id),
+                )
+            }
+            None => (
+                home_window_title(),
+                None,
+                PathBuf::new(),
+                PathBuf::new(),
+                Vec::new(),
+                HOME_FRAME_DURATION,
+                None,
+            ),
+        };
+    let app_state = AppState::new(snes.is_some());
 
     let mut event_loop_builder = EventLoop::builder();
     #[cfg(target_os = "macos")]
@@ -117,7 +208,7 @@ pub fn run(
     let mut app = App {
         title,
         snes,
-        current_rom_path: rom_path,
+        current_rom_path,
         save_path,
         sram_baseline,
         frame_duration,
@@ -136,13 +227,32 @@ pub fn run(
         fps_counter: FpsCounter::new(),
         status: None,
         prefs,
+        state: app_state,
+        ui: None,
+        settings: SettingsUi::default(),
+        library: LibraryState::new(),
+        game_id: None,
+        play_clock: PlayClock::default(),
+        play_tick: Instant::now(),
+        play_unsaved: 0,
+        dialogs: dialog::Dialogs::new(),
+        quit_confirm: false,
+        quit_saved_pause: false,
         #[cfg(target_os = "macos")]
         menu: None,
     };
     // Apply the restored mute/volume before the first sample is produced.
     app.apply_audio_gain();
     // Instant resume: pick the session state up before the first frame runs.
+    // A no-op when the window opens on the home screen (no cartridge yet).
     app.try_resume();
+    match game_id {
+        // Launched with a ROM: the play-time counter starts on frame 0.
+        Some(id) => app.start_play_session(id),
+        // Launched bare: the home screen is up, so the library is scanned
+        // right away instead of waiting for the first Escape.
+        None => app.ensure_library(),
+    }
     let result = event_loop.run_app(&mut app).map_err(|e| format!("event loop: {e}"));
     // `ApplicationHandler::exiting` has normally already flushed everything;
     // `persist_all` is idempotent and this second call covers the paths where
@@ -154,6 +264,11 @@ pub fn run(
 /// Window title: product name, version, then the cartridge's own title.
 fn window_title(cart_title: &str) -> String {
     format!("{APP_NAME} {VERSION} - {}", cart_title.trim())
+}
+
+/// Window title while the home screen owns the window (no cartridge to name).
+fn home_window_title() -> String {
+    format!("{APP_NAME} {VERSION}")
 }
 
 /// A monitor's usable logical size for `render::clamp_to_available`: its
@@ -170,9 +285,13 @@ fn logical_monitor_size(monitor: &winit::monitor::MonitorHandle) -> (u32, u32) {
 
 struct App {
     title: String,
-    snes: Snes,
+    /// The running console, or `None` while the shell has no cartridge loaded
+    /// (window opened on the home screen with no ROM argument). Every path
+    /// that needs a console guards on it rather than assuming one exists.
+    snes: Option<Snes>,
     /// Path of the currently loaded ROM (updated by `switch_rom`); used by
-    /// `Emulation > Reset` to reload the same cart.
+    /// `Emulation > Reset` to reload the same cart. Empty while `snes` is
+    /// `None`.
     current_rom_path: PathBuf,
     /// Sidecar `.srm` path for the currently loaded cart (updated by the `O`
     /// hotkey when the ROM is switched).
@@ -227,6 +346,38 @@ struct App {
     /// `confirm_on_quit`). Every change is written back immediately so a crash
     /// cannot lose it.
     prefs: Prefs,
+    /// Which screen owns the window (`Accueil` / `Jeu`) and the pause flag the
+    /// game screen must be restored to. See `ui::app_state`.
+    state: AppState,
+    /// egui shell drawn into `pixels`' own surface; created in `resumed`
+    /// alongside `pixels`, since it needs that wgpu device and surface format.
+    ui: Option<EguiLayer>,
+    /// Settings panel: whether it is up, which section is selected. The values
+    /// it shows are read from `prefs` every frame, never mirrored here (see
+    /// `ui::settings`).
+    settings: SettingsUi,
+    /// The game library of the home screen (Phase 8 step 2).
+    library: LibraryState,
+    /// `library::game_id` of the running game, the key play time and
+    /// `last_played` are recorded under. `None` with no cartridge loaded.
+    game_id: Option<String>,
+    /// Sub-second remainder of the play-time accounting.
+    play_clock: PlayClock,
+    /// Wall clock of the last `about_to_wait`, whatever the screen; the
+    /// difference is credited to the game only while it is actually running.
+    play_tick: Instant,
+    /// Seconds credited but not yet written to `prefs.json` (see
+    /// `PLAY_TIME_FLUSH_SECS`).
+    play_unsaved: u64,
+    /// Native file/folder dialogs, opened off the winit callback stack (see
+    /// `crate::dialog`: a native modal opened from a callback re-enters winit's
+    /// event handler, which panics on purpose).
+    dialogs: dialog::Dialogs,
+    /// The quit confirmation modal (`ui::confirm`) is up. It replaces the
+    /// native alert this used to show, for the same reentrancy reason.
+    quit_confirm: bool,
+    /// Pause flag to restore when the quit confirmation is dismissed.
+    quit_saved_pause: bool,
     /// Menu bar handles, installed once in `resumed` (needs `NSApp` to
     /// exist first); `None` until then.
     #[cfg(target_os = "macos")]
@@ -331,21 +482,29 @@ impl ApplicationHandler for App {
         // Frame pacing is done manually against a wall-clock deadline; vsync
         // would additionally block on the compositor's own refresh cycle.
         pixels.enable_vsync(false);
+        // egui shares `pixels`' device, queue and swap-chain view (see
+        // `ui::egui_layer` module docs) — no second wgpu surface exists.
+        let egui_layer = EguiLayer::new(
+            &window,
+            pixels.device(),
+            pixels.surface_texture_format(),
+            (phys.width, phys.height),
+            window.scale_factor() as f32,
+        );
         self.out_w = phys.width;
         self.out_h = phys.height;
         self.window = Some(window);
         self.pixels = Some(pixels);
+        self.ui = Some(egui_layer);
         self.next_deadline = Instant::now() + self.frame_duration;
 
         // NSApp only exists once winit has resumed at least once; installing
         // the menu bar any earlier is a silent no-op on macOS (see `menu`
-        // module docs).
-        // Checkable items are created with their restored state (FPS overlay,
-        // mute, confirm-on-quit, fast-forward factor), since AppKit owns the
-        // checkmark state.
+        // module docs). The menu carries actions only — every setting lives in
+        // the egui panel — so it needs no restored state.
         #[cfg(target_os = "macos")]
         {
-            self.menu = Some(menu::install(&self.prefs));
+            self.menu = Some(menu::install());
         }
     }
 
@@ -360,6 +519,20 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _window_id: WindowId, event: WindowEvent) {
+        // egui sees every window event so it can track pointer position,
+        // modifiers and focus even while the game screen owns the input. Its
+        // `consumed` verdict is only honored on the home screen and while the
+        // settings panel is up: on the game screen the emulated pad must never
+        // lose a key to an overlay.
+        if let (Some(window), Some(ui)) = (&self.window, &mut self.ui) {
+            let response = ui.on_window_event(window, &event);
+            if (self.state.is_home() || self.settings.open || self.quit_confirm)
+                && response.consumed
+                && !matches!(event, WindowEvent::CloseRequested | WindowEvent::RedrawRequested)
+            {
+                return;
+            }
+        }
         match event {
             // Routed through the same confirmation path as Esc/menu-Quit
             // (rather than a bare `event_loop.exit()`) so clicking the
@@ -377,12 +550,12 @@ impl ApplicationHandler for App {
                 self.set_fast_forward(false);
             }
             WindowEvent::RedrawRequested => {
-                if let (Some(window), Some(pixels)) = (&self.window, &self.pixels) {
-                    window.pre_present_notify();
-                    if let Err(e) = pixels.render() {
-                        eprintln!("error: pixels render: {e}");
-                    }
-                }
+                let action = self.redraw();
+                // The UI mutates its own view state in place (search text,
+                // sort order, opened sheet); those follow-ups run once the
+                // egui borrow is over, like `Action` itself.
+                self.sync_library_view();
+                self.apply_action(event_loop, action);
             }
             _ => {}
         }
@@ -394,12 +567,36 @@ impl ApplicationHandler for App {
         }
         #[cfg(target_os = "macos")]
         self.poll_menu_events(event_loop);
+        // A native dialog asked for anywhere in the shell is opened here, and
+        // its answer applied here, never from the callback that requested it
+        // (see `crate::dialog`).
+        self.pump_dialogs();
+        // Scan results and finished thumbnails arrive here, one channel drain
+        // per frame; the library thread never touches the UI itself.
+        self.poll_library();
         pace(&mut self.next_deadline, self.frame_duration);
         if self.status.as_ref().is_some_and(|(_, until)| Instant::now() >= *until) {
             self.status = None;
         }
 
-        if !self.paused || self.frame_advance {
+        // The home screen suspends emulation: no frame is run, no audio is
+        // produced, and the console keeps every byte of its state until the
+        // player comes back (`ui::AppState`). A native dialog on screen does
+        // the same: it owns the keyboard and the player is not looking at the
+        // game.
+        let running = self.state.screen() == Screen::Game
+            && self.snes.is_some()
+            && !self.dialogs.is_busy();
+        // Play time only advances while the console actually runs: the home
+        // screen and a pause stop the counter, as does an open native dialog.
+        // The settings panel deliberately does not: the game
+        // keeps running behind it so a change of filter, ratio, window size or
+        // volume is seen and heard immediately. Its keyboard is taken by the
+        // panel and the pad was released on opening, so nothing is *played*
+        // behind it.
+        self.credit_play_time(running && !self.paused);
+
+        if running && (!self.paused || self.frame_advance) {
             // Fast-forward runs `factor` emulated frames per presented frame;
             // only the last one is uploaded, so the extra frames cost no
             // presentation work. `frame_advance` always steps exactly one.
@@ -409,8 +606,11 @@ impl ApplicationHandler for App {
                 1
             };
             let mut frames_run = 0u32;
+            let pad = self.pad;
             for i in 0..factor {
-                self.snes.run_frame([self.pad, JoypadState::default()]);
+                if let Some(snes) = &mut self.snes {
+                    snes.run_frame([pad, JoypadState::default()]);
+                }
                 frames_run += 1;
                 // Silent degradation: `next_deadline` is already the *next*
                 // presentation time (advanced by `pace` above), so passing it
@@ -426,9 +626,9 @@ impl ApplicationHandler for App {
             // absorbs the emulator/host clock drift. The APU is always drained,
             // including while muted or accelerating, so it never runs against a
             // full internal buffer and unmuting resumes mid-note.
-            if let Some(audio) = &mut self.audio {
+            if let (Some(audio), Some(snes)) = (&mut self.audio, &mut self.snes) {
                 self.audio_scratch.clear();
-                self.snes.drain_audio(&mut self.audio_scratch);
+                snes.drain_audio(&mut self.audio_scratch);
                 // An accelerated pass produced `frames_run` frames' worth of
                 // samples for one frame of wall time; pushing all of them would
                 // overrun the ring, so only a real-time-rate slice goes in (at
@@ -453,8 +653,14 @@ impl ApplicationHandler for App {
         // `snes.framebuffer` itself, so headless `--dump-frame` output and
         // the F12 screenshot (which both read the core) are unaffected —
         // this whole block only ever runs on the windowed present path.
-        self.snes.framebuffer.to_rgba(&mut self.native_buf);
-        if let Some(pixels) = &mut self.pixels {
+        // Skipped entirely on the home screen, where egui owns the surface and
+        // clears it itself (`ui::egui_layer::EguiLayer::render`).
+        if running {
+            if let Some(snes) = &self.snes {
+                snes.framebuffer.to_rgba(&mut self.native_buf);
+            }
+        }
+        if let (true, Some(pixels)) = (running, &mut self.pixels) {
             let filter = Filter::from_pref(&self.prefs.filter);
             let aspect = Aspect::from_pref(&self.prefs.aspect);
             render::compose_frame(
@@ -499,6 +705,57 @@ impl ApplicationHandler for App {
 impl App {
     fn handle_key(&mut self, event_loop: &ActiveEventLoop, code: KeyCode, state: ElementState, repeat: bool) {
         let pressed = state == ElementState::Pressed;
+        // The quit confirmation is the outermost modal: nothing else reacts
+        // until it is answered.
+        if self.quit_confirm {
+            if pressed && !repeat {
+                match code {
+                    KeyCode::Escape => self.cancel_quit(),
+                    KeyCode::Enter | KeyCode::NumpadEnter => {
+                        self.quit_confirm = false;
+                        event_loop.exit();
+                    }
+                    _ => {}
+                }
+            }
+            return;
+        }
+        // The settings panel owns the keyboard while it is up, on either
+        // screen: its widgets take the keys (egui already saw the event) and
+        // the emulated pad must not move behind a modal. Escape is the way out.
+        //
+        // The window keys are the exception: at ×1/×2 the panel is wider than
+        // the window and its own size buttons can be off screen, so F1-F4 and
+        // F11 must stay live or the panel would have no way out but Escape.
+        if self.settings.open {
+            if pressed && !repeat {
+                match code {
+                    KeyCode::Escape => self.handle_escape(event_loop),
+                    KeyCode::F1 => self.set_zoom(1),
+                    KeyCode::F2 => self.set_zoom(2),
+                    KeyCode::F3 => self.set_zoom(3),
+                    KeyCode::F4 => self.set_zoom(4),
+                    KeyCode::F11 => self.set_fullscreen(!self.is_fullscreen()),
+                    _ => {}
+                }
+            }
+            return;
+        }
+        // The home screen owns the keyboard: no emulated pad, no in-game
+        // hotkey (they all act on a console that is deliberately suspended).
+        // Only the keys that are about the *window* or the shell stay live.
+        if self.state.is_home() {
+            if pressed && !repeat {
+                match code {
+                    KeyCode::Escape => self.handle_escape(event_loop),
+                    KeyCode::KeyO => self.open_rom_dialog(),
+                    KeyCode::Comma => self.open_settings(),
+                    KeyCode::F11 => self.set_fullscreen(!self.is_fullscreen()),
+                    _ => {}
+                }
+            }
+            return;
+        }
         // The turbo key is held, so it reacts to press *and* release; a
         // key-repeat press just re-asserts the state it is already in.
         if code == KeyCode::Tab {
@@ -508,17 +765,8 @@ impl App {
         // Hotkeys act on the initial press only (ignore key-repeat).
         if pressed && !repeat {
             match code {
-                // Convention: Escape first backs out of fullscreen (if
-                // active) rather than quitting straight away — matches every
-                // desktop OS's expected behavior for a fullscreen app/game.
-                // A second Escape (now windowed) falls through to the normal
-                // quit-confirmation path.
-                KeyCode::Escape if self.is_fullscreen() => {
-                    self.set_fullscreen(false);
-                    return;
-                }
                 KeyCode::Escape => {
-                    self.request_quit(event_loop);
+                    self.handle_escape(event_loop);
                     return;
                 }
                 KeyCode::KeyM => {
@@ -547,9 +795,15 @@ impl App {
                     self.open_rom_dialog();
                     return;
                 }
-                // `Affichage > Zoom > ×N` (macOS-only menu): set the window
-                // zoom directly, F1-F4 for x1-x4 — chosen over Ctrl+/- so it
-                // doesn't collide with the existing Ctrl+/- volume hotkeys.
+                // App menu `Réglages…` (Cmd+, on macOS): the settings panel,
+                // which is where every option now lives.
+                KeyCode::Comma => {
+                    self.open_settings();
+                    return;
+                }
+                // `Réglages > Affichage > Taille de la fenêtre`: set the
+                // window zoom directly, F1-F4 for x1-x4 — chosen over Ctrl+/-
+                // so it doesn't collide with the existing volume hotkeys.
                 KeyCode::F1 => {
                     self.set_zoom(1);
                     return;
@@ -586,27 +840,20 @@ impl App {
                     self.load_state();
                     return;
                 }
-                // `Émulation > Reprise instantanée` (macOS-only menu):
-                // without this, the option can only be toggled on macOS,
-                // making it silently permanent on other platforms.
+                // `Réglages > Émulation > Reprise instantanée`.
                 KeyCode::F10 => {
                     self.set_resume_on_launch(!self.prefs.resume_on_launch);
                     return;
                 }
-                // `Affichage > Plein écran` (macOS-only menu): F11 is the
-                // conventional Windows/Linux fullscreen-toggle key; macOS
-                // additionally gets Ctrl+Cmd+F as a menu accelerator (its own
-                // system convention) — see `menu::install`. This freed F11
-                // from `Demander confirmation avant de quitter`, moved to `C`
-                // below (a rare, opt-in setting; menu-only reachability was
-                // judged an acceptable trade for giving fullscreen the
-                // platform-conventional key).
+                // `Affichage > Plein écran`: F11 is the conventional
+                // Windows/Linux fullscreen-toggle key; macOS additionally gets
+                // Ctrl+Cmd+F as a menu accelerator (its own system
+                // convention) — see `menu::install`.
                 KeyCode::F11 => {
                     self.set_fullscreen(!self.is_fullscreen());
                     return;
                 }
-                // `Fichier > Demander confirmation avant de quitter`
-                // (macOS-only menu): moved off F11 (see above).
+                // `Réglages > Émulation > Confirmation` (avant de quitter).
                 KeyCode::KeyC => {
                     self.set_confirm_on_quit(!self.prefs.confirm_on_quit);
                     return;
@@ -619,20 +866,20 @@ impl App {
                     self.toggle_show_fps();
                     return;
                 }
-                // `Affichage > Filtre` (macOS-only menu): cycles Aucun ->
-                // Lissé -> CRT -> Aucun (`render::Filter::next`).
+                // `Réglages > Affichage > Filtre`: cycles Aucun -> Lissé ->
+                // CRT -> Aucun (`render::Filter::next`).
                 KeyCode::KeyV => {
                     self.cycle_filter();
                     return;
                 }
-                // `Affichage > Ratio` (macOS-only menu): toggles
-                // Pixel-parfait <-> TV authentique (`render::Aspect::toggled`).
+                // `Réglages > Affichage > Ratio`: toggles Pixel-parfait <->
+                // TV authentique (`render::Aspect::toggled`).
                 KeyCode::KeyR => {
                     self.cycle_aspect();
                     return;
                 }
-                // `Émulation > Accéléré > ×N` (macOS-only menu): steps
-                // through the offered factors one at a time.
+                // `Réglages > Émulation > Accéléré`: steps through the
+                // offered factors one at a time.
                 KeyCode::BracketLeft => {
                     self.adjust_fast_forward_factor(false);
                     return;
@@ -641,8 +888,8 @@ impl App {
                     self.adjust_fast_forward_factor(true);
                     return;
                 }
-                // `Émulation > Slot > N` (macOS-only menu): jump straight to
-                // a slot instead of cycling with F7.
+                // `Réglages > Émulation > Slot de sauvegarde`: jump straight
+                // to a slot instead of cycling with F7.
                 other => {
                     if let Some(slot) = digit_to_slot(other) {
                         self.set_slot(slot);
@@ -654,6 +901,529 @@ impl App {
         if let Some(name) = input::keycode_to_button(code) {
             let _ = input::set_button(&mut self.pad, name, pressed);
         }
+    }
+
+    /// Escape, resolved by `ui::escape_action`:
+    ///   * fullscreen (either screen) -> leave fullscreen, nothing else;
+    ///   * windowed game -> back to the home screen, emulation suspended;
+    ///   * home screen with a suspended session -> back into the game;
+    ///   * home screen with nothing loaded -> quit, still through
+    ///     `prefs.confirm_on_quit`.
+    ///
+    /// This is the one behavior change of the shell: Escape used to quit
+    /// straight from the game. Quitting from a game is still one action away —
+    /// the window close button, `Fichier > Quitter`, Cmd+Q, or a second Escape
+    /// once the home screen is up with no session.
+    fn handle_escape(&mut self, event_loop: &ActiveEventLoop) {
+        // The settings panel is the outermost overlay but the innermost thing
+        // Escape backs out of, on either screen — except in fullscreen, which
+        // keeps precedence (`ui::settings::escape_closes_settings`).
+        if ui::settings::escape_closes_settings(self.settings.open, self.is_fullscreen()) {
+            self.close_settings();
+            return;
+        }
+        // On the home screen an open game sheet is the innermost thing Escape
+        // backs out of, before the screen itself — the same "one step back per
+        // press" rule `ui::escape_action` implements for the screens.
+        if self.state.is_home() && !self.is_fullscreen() && self.library.ui.selected.is_some() {
+            self.library.ui.selected = None;
+            return;
+        }
+        match ui::escape_action(
+            self.state.screen(),
+            self.is_fullscreen(),
+            self.state.has_session(),
+        ) {
+            EscapeAction::LeaveFullscreen => self.set_fullscreen(false),
+            EscapeAction::GoHome => self.go_home(),
+            EscapeAction::ResumeGame => self.resume_game(),
+            EscapeAction::Quit => self.request_quit(event_loop),
+        }
+    }
+
+    /// Suspend the session and show the home screen. The console is left
+    /// untouched (no save-state round trip): only emulation stops. Held input
+    /// is released so nothing is stuck when the game comes back, and the audio
+    /// ring is flushed so the last frame's samples don't loop under the UI.
+    fn go_home(&mut self) {
+        if !self.state.go_home(self.paused) {
+            return;
+        }
+        self.paused = true;
+        self.frame_advance = false;
+        self.pad = JoypadState::default();
+        self.set_fast_forward(false);
+        if let Some(audio) = &self.audio {
+            audio.flush();
+        }
+        if let Some(window) = &self.window {
+            window.set_title(&home_window_title());
+        }
+        // The home screen is where an application is left open for a long time,
+        // so everything the session produced goes to disk now rather than
+        // waiting for an exit that a crash, a `kill` or a Dock quit may never
+        // reach: battery SRAM first, then the resume snapshot (same order as
+        // `persist_all` — it keeps `.resume`'s mtime >= `.srm`'s, so
+        // `try_resume`'s newer-`.srm` guard doesn't misfire), then the play
+        // time with the rest of the preferences.
+        if let Some(snes) = &self.snes {
+            save::save_if_dirty(&snes.bus.cart, &self.save_path, &self.sram_baseline);
+            self.write_resume_state();
+            self.resync_sram_baseline();
+        }
+        if self.play_unsaved > 0 {
+            self.play_unsaved = 0;
+            self.prefs.save();
+        }
+        // A game session can have added a save state or a screenshot; drop the
+        // gathered lists so an open sheet is rebuilt from disk on the way back
+        // in (`sync_library_view`).
+        self.library.sheet = SheetData::default();
+        self.ensure_library();
+    }
+
+    /// Return to the suspended session, restoring the pause flag the player
+    /// had set. Does nothing when no cartridge is loaded.
+    fn resume_game(&mut self) {
+        let Some(was_paused) = self.state.resume_game() else { return };
+        self.paused = was_paused;
+        self.pad = JoypadState::default();
+        // The home screen consumed an arbitrary amount of wall time; restart
+        // pacing from now instead of catching up frames that never ran.
+        self.next_deadline = Instant::now() + self.frame_duration;
+        if let Some(window) = &self.window {
+            window.set_title(&self.title);
+        }
+    }
+
+    /// Apply what the UI (or a hotkey) asked for, once the borrow of the egui
+    /// layer is over.
+    fn apply_action(&mut self, event_loop: &ActiveEventLoop, action: Action) {
+        match action {
+            Action::None => {}
+            Action::ResumeGame => self.resume_game(),
+            Action::PickRom => self.open_rom_dialog(),
+            Action::Quit => self.request_quit(event_loop),
+            Action::ConfirmQuit => {
+                self.quit_confirm = false;
+                event_loop.exit();
+            }
+            Action::CancelQuit => self.cancel_quit(),
+            Action::Launch(path) => {
+                if let Err(e) = self.switch_rom(&path, true) {
+                    eprintln!("error: could not load {}: {e}", path.display());
+                    self.library.ui.error =
+                        Some(format!("Impossible de charger {} : {e}", path.display()));
+                }
+            }
+            Action::ToggleFavorite(id) => {
+                let stats = self.prefs.games.entry(id).or_default();
+                stats.favorite = !stats.favorite;
+                self.prefs.save();
+            }
+            Action::SetThumbnail { id, source } => {
+                self.prefs.games.entry(id).or_default().thumbnail = Some(source.clone());
+                self.prefs.save();
+                // The promoted file may already be cached under its own path
+                // from the gallery; the picture itself has not changed, but
+                // dropping it keeps the store from pinning a stale decode if
+                // the player overwrites the capture later.
+                self.library.textures.forget(&source);
+                self.refresh_thumbnails();
+            }
+            Action::ClearThumbnail(id) => {
+                self.prefs.games.entry(id).or_default().thumbnail = None;
+                self.prefs.save();
+                self.refresh_thumbnails();
+            }
+            Action::Rescan => self.rescan_library(),
+            Action::ChooseLibraryDir => {
+                // `library.dir` is still empty when the run went straight into
+                // a game: resolve the folder the same way the scan would.
+                let current = library::library_dir(&self.prefs);
+                self.dialogs.request(dialog::Request::LibraryDir { current });
+            }
+            Action::ResetLibraryDir => {
+                self.prefs.library_dir = None;
+                self.prefs.save();
+                self.rescan_library();
+            }
+            Action::OpenSettings => self.open_settings(),
+            Action::CloseSettings => self.close_settings(),
+            Action::Set(setting) => self.apply_setting(setting),
+            Action::ChooseScreenshotDir => {
+                let current = self
+                    .prefs
+                    .screenshot_dir
+                    .clone()
+                    .unwrap_or_else(|| sibling_dir(&self.current_rom_path, "Screenshots"));
+                self.dialogs.request(dialog::Request::ScreenshotDir { current });
+            }
+            Action::ResetScreenshotDir => {
+                self.prefs.screenshot_dir = None;
+                self.prefs.save();
+                self.library.sheet = SheetData::default();
+            }
+            Action::OpenGuide => self.open_guide(),
+        }
+    }
+
+    /// Apply one option of the settings panel. Every arm goes through the same
+    /// `set_*` method the corresponding hotkey uses, so the panel can never
+    /// write a value a hotkey could not, nor skip a side effect (window resize,
+    /// audio gain, persistence).
+    fn apply_setting(&mut self, setting: Setting) {
+        match setting {
+            Setting::Zoom(zoom) => self.set_zoom(zoom),
+            Setting::Filter(filter) => self.set_filter(filter),
+            Setting::Aspect(aspect) => self.set_aspect(aspect),
+            Setting::Fullscreen(on) => self.set_fullscreen(on),
+            Setting::ShowFps(on) => self.set_show_fps(on),
+            Setting::Mute(on) => self.set_mute(on),
+            Setting::Volume(volume) => self.set_volume(volume),
+            Setting::FastForward(factor) => self.set_fast_forward_factor(factor),
+            Setting::ResumeOnLaunch(on) => self.set_resume_on_launch(on),
+            Setting::ConfirmOnQuit(on) => self.set_confirm_on_quit(on),
+            Setting::Slot(slot) => self.set_slot(slot),
+        }
+    }
+
+    /// `,` hotkey / app menu `Réglages…` (Cmd+,) / the home screen's button.
+    /// Held input is released: the panel takes the keyboard, so a key held
+    /// when it opened would otherwise stay pressed on the emulated pad.
+    fn open_settings(&mut self) {
+        if self.settings.open {
+            return;
+        }
+        self.settings.open = true;
+        self.settings.notice = None;
+        // Resolved once per opening rather than per frame: this touches the
+        // file system (`is_file`) and the answer cannot change mid-panel.
+        self.settings.guide = crate::guide::find();
+        self.pad = JoypadState::default();
+        self.set_fast_forward(false);
+    }
+
+    fn close_settings(&mut self) {
+        self.settings.open = false;
+        self.settings.notice = None;
+        self.pad = JoypadState::default();
+    }
+
+    /// `Réglages > À propos > Ouvrir le PDF`: hand the pedagogical guide to
+    /// the platform's document reader. A failure is reported in the panel
+    /// itself rather than only on stderr, which nobody reading the panel sees.
+    fn open_guide(&mut self) {
+        let Some(path) = self.settings.guide.clone() else {
+            self.settings.notice = Some("Le guide n'a pas été trouvé.".to_string());
+            return;
+        };
+        match crate::guide::open(&path) {
+            Ok(()) => self.settings.notice = None,
+            Err(e) => {
+                eprintln!("guide: {e}");
+                self.settings.notice = Some(format!("Ouverture impossible : {e}"));
+            }
+        }
+    }
+
+    /// Spawn the library thread and run a first scan, once. Called the first
+    /// time the home screen is shown (`go_home`, or startup with no ROM).
+    fn ensure_library(&mut self) {
+        if self.library.worker.is_some() {
+            return;
+        }
+        self.library.ui.sort = SortMode::from_pref(&self.prefs.library_sort);
+        match library::Worker::spawn() {
+            Some(worker) => {
+                self.library.worker = Some(worker);
+                self.rescan_library();
+            }
+            // The OS refused a thread: the grid says so instead of the shell
+            // dying, and the next visit to the home screen tries again.
+            None => {
+                self.library.ui.scanning = false;
+                self.library.ui.error =
+                    Some("La bibliothèque n'a pas pu démarrer (thread indisponible).".to_string());
+            }
+        }
+    }
+
+    /// Ask the library thread for a fresh scan of the configured folder. The
+    /// thumbnails still queued are dropped by the worker (they belong to the
+    /// folder being replaced), so `pending` is cleared here to match: the grid
+    /// would otherwise keep counting generations that will never be answered.
+    fn rescan_library(&mut self) {
+        let dir = library::library_dir(&self.prefs);
+        self.library.dir = dir.clone();
+        let Some(worker) = &self.library.worker else {
+            // Without a worker nothing will ever answer; leaving `scanning` set
+            // would pin "Analyse du dossier…" on screen forever.
+            self.library.ui.scanning = false;
+            return;
+        };
+        self.library.ui.scanning = true;
+        self.library.ui.error = None;
+        self.library.pending.clear();
+        worker.submit(library::Job::Scan(dir));
+    }
+
+    /// Drain the library thread's updates: scan results and finished
+    /// thumbnails. Cheap enough to call every frame (a `try_recv` loop on an
+    /// empty channel), and never blocks the event loop.
+    fn poll_library(&mut self) {
+        let Some(worker) = &self.library.worker else { return };
+        let updates = worker.poll();
+        if updates.is_empty() {
+            return;
+        }
+        let mut rescanned = false;
+        for update in updates {
+            match update {
+                library::Update::Scanned { dir, entries, error } => {
+                    self.library.dir = dir;
+                    self.library.entries = entries;
+                    self.library.ui.scanning = false;
+                    self.library.ui.error = error.map(|e| format!("Dossier illisible : {e}"));
+                    rescanned = true;
+                }
+                library::Update::Thumb { id, path } => {
+                    self.library.pending.remove(&id);
+                    if let Some(path) = &path {
+                        // The store may hold a memoized "missing file" for
+                        // this path from before the picture existed.
+                        self.library.textures.forget(path);
+                    }
+                }
+            }
+        }
+        if rescanned {
+            self.request_thumbnails();
+        }
+        self.refresh_thumbnails();
+    }
+
+    /// Queue a thumbnail for every game that has none yet, in the order the
+    /// grid shows them, so the pictures fill in from the top. Games with a
+    /// promoted screenshot or an already-generated file are skipped, which
+    /// makes this incremental across runs: only genuinely new games cost an
+    /// emulation run.
+    fn request_thumbnails(&mut self) {
+        let Some(worker) = &self.library.worker else { return };
+        let order = library::arrange(
+            &self.library.entries,
+            "",
+            self.library.ui.sort,
+            &self.prefs.games,
+        );
+        let mut queued = Vec::new();
+        for entry in order {
+            if self.library.pending.contains(&entry.id) {
+                continue;
+            }
+            if picture_for(&self.prefs, &entry.id).is_some() {
+                continue; // already has a picture, generated or promoted
+            }
+            queued.push(entry.id.clone());
+            worker.submit(library::Job::Thumb { id: entry.id.clone(), rom: entry.path.clone() });
+        }
+        self.library.pending.extend(queued);
+    }
+
+    /// Re-resolve the picture of every game: the promoted screenshot when the
+    /// player chose one and it still exists, else the generated thumbnail when
+    /// it has been produced.
+    fn refresh_thumbnails(&mut self) {
+        let mut map = HashMap::with_capacity(self.library.entries.len());
+        for entry in &self.library.entries {
+            if let Some(picture) = picture_for(&self.prefs, &entry.id) {
+                map.insert(entry.id.clone(), picture);
+            }
+        }
+        self.library.thumbs = map;
+    }
+
+    /// Follow-ups of the view state the UI mutated in place: persist a changed
+    /// sort order and re-gather the sheet's file lists when another game was
+    /// selected.
+    fn sync_library_view(&mut self) {
+        if self.library.worker.is_none() {
+            // The library has never been opened, so its view state is still
+            // the default one — writing that back would clobber the stored
+            // sort order of a player who launched straight into a game.
+            return;
+        }
+        let sort = self.library.ui.sort.as_pref();
+        if self.prefs.library_sort != sort {
+            self.prefs.library_sort = sort.to_string();
+            self.prefs.save();
+        }
+        let selected = self.library.ui.selected.clone();
+        match selected {
+            Some(id) if self.library.sheet.id != id => {
+                let entry = self.library.entries.iter().find(|e| e.id == id).cloned();
+                self.library.sheet = match entry {
+                    Some(entry) => SheetData {
+                        id,
+                        states: library::save_states(&entry.path),
+                        screenshots: library::screenshots(
+                            &library::screenshot_dir(&entry.path, &self.prefs),
+                            &entry.title,
+                        ),
+                    },
+                    None => SheetData::default(),
+                };
+            }
+            None if !self.library.sheet.id.is_empty() => {
+                self.library.sheet = SheetData::default();
+            }
+            _ => {}
+        }
+    }
+
+    /// Start counting play time for `id`, and record the launch instant that
+    /// drives the "recently played" sort order.
+    fn start_play_session(&mut self, id: String) {
+        self.play_clock.reset();
+        self.play_tick = Instant::now();
+        self.play_unsaved = 0;
+        let stats = self.prefs.games.entry(id.clone()).or_default();
+        stats.last_played = Some(library::now_unix());
+        self.game_id = Some(id);
+        self.prefs.save();
+    }
+
+    /// Credit the wall time since the previous pass to the running game.
+    /// `running` false only advances the reference instant, so suspended time
+    /// (home screen, pause, modal dialog) is never counted.
+    fn credit_play_time(&mut self, running: bool) {
+        let now = Instant::now();
+        let dt = now.saturating_duration_since(self.play_tick);
+        self.play_tick = now;
+        if !running {
+            self.play_clock.reset();
+            return;
+        }
+        let seconds = self.play_clock.add(dt);
+        if seconds == 0 {
+            return;
+        }
+        let Some(id) = self.game_id.clone() else { return };
+        self.prefs.games.entry(id).or_default().play_seconds += seconds;
+        self.play_unsaved += seconds;
+        if self.play_unsaved >= PLAY_TIME_FLUSH_SECS {
+            self.play_unsaved = 0;
+            self.prefs.save();
+        }
+    }
+
+    /// Build one UI frame and present it. Returns what the UI asked for; the
+    /// caller applies it once the egui layer is no longer borrowed.
+    ///
+    /// Presentation order on the game screen: `pixels`' scaling renderer
+    /// blits the already-composed frame, then egui's pass draws over it
+    /// (`LoadOp::Load`). On the home screen the scaling renderer is skipped
+    /// and egui's pass clears the surface itself, so a stale emulated frame
+    /// can never show through.
+    fn redraw(&mut self) -> Action {
+        let Some(window) = self.window.clone() else { return Action::None };
+        let home = self.state.is_home();
+        let paused = self.paused;
+        // Only the home screen names the suspended session; cloning these two
+        // on the game screen would allocate on every presented frame for
+        // nothing.
+        let (game_title, rom_path) = if home {
+            (
+                self.snes.as_ref().map(|s| s.bus.cart.title.trim().to_string()),
+                (!self.current_rom_path.as_os_str().is_empty())
+                    .then(|| self.current_rom_path.clone()),
+            )
+        } else {
+            (None, None)
+        };
+        // Resolved for the settings panel only, and only while it is up: the
+        // library's own `dir` is still empty when a run went straight into a
+        // game without ever showing the home screen.
+        let settings_open = self.settings.open;
+        let quit_confirm = self.quit_confirm;
+        let fullscreen = self.is_fullscreen();
+        let (rom_dir, config_dir) = if settings_open {
+            (library::library_dir(&self.prefs), crate::prefs::config_dir())
+        } else {
+            (PathBuf::new(), None)
+        };
+        let Self { ui, pixels, library, prefs, settings, .. } = self;
+        let (Some(ui), Some(pixels)) = (ui.as_mut(), pixels.as_ref()) else {
+            return Action::None;
+        };
+        let LibraryState { dir, entries, ui: view, textures, thumbs, pending, sheet, .. } = library;
+        let action = ui.run(&window, |ctx| {
+            let mut action = if home {
+                crate::ui::home::show(
+                    ctx,
+                    &mut HomeModel {
+                        app_name: APP_NAME,
+                        version: VERSION,
+                        game_title: game_title.as_deref(),
+                        rom_path: rom_path.as_deref(),
+                        library: LibraryModel {
+                            entries,
+                            games: &prefs.games,
+                            dir,
+                            thumbs,
+                            pending,
+                            state: &mut *view,
+                            textures: &mut *textures,
+                        },
+                        sheet,
+                    },
+                )
+            } else {
+                crate::ui::game::overlay(ctx, paused);
+                Action::None
+            };
+            // Drawn last so the modal sits over whichever screen owns the
+            // window, and its own request wins over the screen behind it.
+            if settings_open {
+                let produced = crate::ui::settings::show(
+                    ctx,
+                    &mut SettingsModel {
+                        app_name: APP_NAME,
+                        version: VERSION,
+                        prefs,
+                        fullscreen,
+                        library_dir: &rom_dir,
+                        config_dir: config_dir.as_deref(),
+                        state: settings,
+                    },
+                );
+                if produced != Action::None {
+                    action = produced;
+                }
+            }
+            // The quit confirmation sits over everything, including the
+            // settings panel: nothing else can be acted on until it is
+            // answered.
+            if quit_confirm {
+                let produced = crate::ui::confirm::show(ctx, APP_NAME);
+                if produced != Action::None {
+                    action = produced;
+                }
+            }
+            action
+        });
+        window.pre_present_notify();
+        let clear = home.then(crate::ui::theme::clear_color);
+        if let Err(e) = pixels.render_with(|encoder, target, ctx| {
+            if !home {
+                ctx.scaling_renderer.render(encoder, target);
+            }
+            ui.render(encoder, target, &ctx.device, &ctx.queue, clear);
+            Ok(())
+        }) {
+            eprintln!("error: pixels render: {e}");
+        }
+        action
     }
 
     /// `[`/`]` hotkeys: step `prefs.fast_forward_factor` through
@@ -682,10 +1452,18 @@ impl App {
     /// means `.resume`'s mtime is always >= `.srm`'s in the normal case, so
     /// that guard only ever trips for the genuine out-of-band edit it exists
     /// to catch.
+    ///
+    /// With no cartridge loaded (home screen, nothing ever started) there is
+    /// no SRAM and no session to snapshot: only the preferences are written.
     fn persist_all(&mut self) {
-        save::save_if_dirty(&self.snes.bus.cart, &self.save_path, &self.sram_baseline);
-        self.write_resume_state();
-        self.resync_sram_baseline();
+        if let Some(snes) = &self.snes {
+            save::save_if_dirty(&snes.bus.cart, &self.save_path, &self.sram_baseline);
+            self.write_resume_state();
+            self.resync_sram_baseline();
+        }
+        // Whatever play time was credited since the last flush goes out with
+        // the rest of the preferences.
+        self.play_unsaved = 0;
         self.prefs.save();
     }
 
@@ -701,52 +1479,45 @@ impl App {
     /// be older than the `.srm` already on disk (see `try_resume`'s
     /// newer-`.srm` guard for the case that matters most).
     fn resync_sram_baseline(&mut self) {
-        self.sram_baseline = self.snes.bus.cart.sram.as_bytes().to_vec();
-    }
-
-    /// Esc / `Fichier > Quitter` / app-menu Quit (Cmd+Q): confirm first when
-    /// `prefs.confirm_on_quit` is set, then leave through `event_loop.exit()`
-    /// so the `exiting` hook's SRAM flush runs.
-    fn request_quit(&mut self, event_loop: &ActiveEventLoop) {
-        if !self.prefs.confirm_on_quit || self.confirm_quit_dialog() {
-            event_loop.exit();
+        if let Some(snes) = &self.snes {
+            self.sram_baseline = snes.bus.cart.sram.as_bytes().to_vec();
         }
     }
 
-    /// Modal quit confirmation. Emulation is paused for the dialog's whole
-    /// lifetime: `MessageDialog::show` blocks this thread, and `paused` also
-    /// keeps `about_to_wait` from advancing the console should the platform
-    /// pump our loop from inside the modal session. Answering "Non" restores
-    /// the previous pause state and returns to the game.
+    /// Esc / `Fichier > Quitter` / app-menu Quit (Cmd+Q) / the window's close
+    /// button: leave through `event_loop.exit()` so the `exiting` hook's SRAM
+    /// flush runs, after the confirmation when `prefs.confirm_on_quit` is set.
     ///
-    /// Key releases are delivered to the dialog, not to the window, so the pad
-    /// and the held turbo key are cleared on the way out to avoid stuck input.
-    fn confirm_quit_dialog(&mut self) -> bool {
-        let was_paused = self.paused;
+    /// The confirmation is an in-app egui modal (`ui::confirm`), not a native
+    /// `NSAlert`: a native modal opened from this callback re-enters winit's
+    /// event handler, which panics on purpose (see `crate::dialog` and
+    /// `docs/PUNCHLIST.md`). Emulation is paused while it is up, and the
+    /// previous pause state restored if the player answers no.
+    fn request_quit(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.prefs.confirm_on_quit {
+            event_loop.exit();
+            return;
+        }
+        if self.quit_confirm {
+            return;
+        }
+        self.quit_confirm = true;
+        self.quit_saved_pause = self.paused;
         self.paused = true;
-        let answer = rfd::MessageDialog::new()
-            .set_level(rfd::MessageLevel::Warning)
-            .set_title(format!("Quitter {APP_NAME} ?"))
-            .set_description("La sauvegarde de la cartouche sera écrite avant de quitter.")
-            .set_buttons(rfd::MessageButtons::OkCancelCustom(
-                "Oui".to_owned(),
-                "Non".to_owned(),
-            ))
-            .show();
-        // The custom buttons come back as `Custom(label)`; `Yes`/`Ok` are
-        // accepted too so a backend that ignores custom labels still works.
-        let quit = match &answer {
-            rfd::MessageDialogResult::Custom(label) => label == "Oui",
-            rfd::MessageDialogResult::Yes | rfd::MessageDialogResult::Ok => true,
-            _ => false,
-        };
-        self.paused = was_paused;
         self.pad = JoypadState::default();
         self.set_fast_forward(false);
-        // The dialog consumed an arbitrary amount of wall time; restart pacing
-        // from now instead of catching up frames that were never emulated.
+    }
+
+    /// The quit confirmation was answered no (or dismissed): back to where the
+    /// player was, with the pause flag they had set.
+    fn cancel_quit(&mut self) {
+        if !self.quit_confirm {
+            return;
+        }
+        self.quit_confirm = false;
+        self.paused = self.quit_saved_pause;
+        self.pad = JoypadState::default();
         self.next_deadline = Instant::now() + self.frame_duration;
-        quit
     }
 
     /// Push the current mute/volume (and the fast-forward silence) to the
@@ -764,32 +1535,34 @@ impl App {
         }
     }
 
-    /// `M` hotkey / `Audio > Muet` (Cmd+M).
+    /// `M` hotkey / `Réglages > Audio > Muet`.
     fn set_mute(&mut self, on: bool) {
         self.prefs.mute = on;
         self.prefs.save();
         self.apply_audio_gain();
-        #[cfg(target_os = "macos")]
-        if let Some(menu) = &self.menu {
-            menu.mute.set_checked(on);
-        }
     }
 
-    /// `+`/`-` hotkeys / `Audio > Volume +` / `Volume −`: one 10-point step,
-    /// clamped to 0..=100 and persisted.
+    /// `+`/`-` hotkeys: one 10-point step, clamped to 0..=100 and persisted.
     fn adjust_volume(&mut self, up: bool) {
         let volume = audio::step_volume(self.prefs.volume, up);
         if volume == self.prefs.volume {
             return; // already at 0 % or 100 %
         }
+        self.set_volume(volume);
+        eprintln!("audio: volume {volume} %");
+    }
+
+    /// `Réglages > Audio > Volume`: absolute setting, 0..=100 percent. The
+    /// `+`/`-` hotkeys go through this too, so both write the same clamped
+    /// value and push the same gain to the output stage.
+    fn set_volume(&mut self, volume: u8) {
+        let volume = volume.min(100);
+        if self.prefs.volume == volume {
+            return;
+        }
         self.prefs.volume = volume;
         self.prefs.save();
         self.apply_audio_gain();
-        #[cfg(target_os = "macos")]
-        if let Some(menu) = &self.menu {
-            menu.set_volume_label(volume);
-        }
-        eprintln!("audio: volume {volume} %");
     }
 
     /// Tab pressed/released. Audio is silenced while accelerating (decided
@@ -819,26 +1592,18 @@ impl App {
         self.next_deadline = Instant::now() + self.frame_duration;
     }
 
-    /// `[`/`]` hotkeys / `Émulation > Accéléré > ×N`: how many frames one
+    /// `[`/`]` hotkeys / `Réglages > Émulation > Accéléré`: how many frames one
     /// Tab-held presentation runs. Clamped to the range the preferences file
     /// documents.
     fn set_fast_forward_factor(&mut self, factor: u8) {
         self.prefs.fast_forward_factor = factor.clamp(2, 4);
         self.prefs.save();
-        #[cfg(target_os = "macos")]
-        if let Some(menu) = &self.menu {
-            menu.sync_fast_forward(self.prefs.fast_forward_factor);
-        }
     }
 
-    /// `F11` hotkey / `Fichier > Demander confirmation avant de quitter`.
+    /// `C` hotkey / `Réglages > Émulation > Confirmation`.
     fn set_confirm_on_quit(&mut self, on: bool) {
         self.prefs.confirm_on_quit = on;
         self.prefs.save();
-        #[cfg(target_os = "macos")]
-        if let Some(menu) = &self.menu {
-            menu.confirm_quit.set_checked(on);
-        }
     }
 
     /// Whether the window is currently fullscreen (queried from winit itself
@@ -874,17 +1639,60 @@ impl App {
         }
     }
 
-    /// `O` hotkey: open the native ROM picker and, if a file was chosen,
-    /// tear down the running game (saving its SRAM first) and start the
-    /// picked one. Cancelling the dialog or a load error leaves the current
-    /// game running untouched.
+    /// `O` hotkey / `Fichier > Ouvrir une ROM…` / the home screen's button:
+    /// ask for the native ROM picker. It opens in the folder the library scans,
+    /// so the two notions of "my ROM folder" agree. The dialog itself is shown
+    /// by `pump_dialogs`, off this callback's stack (see `crate::dialog`).
     fn open_rom_dialog(&mut self) {
-        let Some(path) = picker::pick_rom() else {
-            return; // Cancelled: keep playing the current game.
-        };
-        if let Err(e) = self.switch_rom(&path, true) {
-            eprintln!("error: could not load {}: {e}", path.display());
+        let start = library::library_dir(&self.prefs);
+        self.dialogs.request(dialog::Request::Rom { start });
+    }
+
+    /// Apply the answer of a finished native dialog, then open the next queued
+    /// one. Called once per `about_to_wait` — never from `window_event`, whose
+    /// stack a native modal must not be opened on.
+    ///
+    /// Cancelling a dialog or a load error leaves the current game untouched.
+    fn pump_dialogs(&mut self) {
+        while let Some(answer) = self.dialogs.poll() {
+            // The panel held the screen for an arbitrary amount of wall time
+            // and swallowed the key releases; drop held input and restart
+            // pacing from now instead of catching up frames nobody ran.
+            self.pad = JoypadState::default();
+            self.set_fast_forward(false);
+            self.next_deadline = Instant::now() + self.frame_duration;
+            match answer {
+                dialog::Answer::Rom(path) => {
+                    // Remember where the player browses: it is the library's
+                    // own fallback folder (`library::library_dir`).
+                    if let Some(parent) =
+                        path.parent().filter(|p| !p.as_os_str().is_empty())
+                    {
+                        self.prefs.last_rom_dir = Some(parent.to_path_buf());
+                        self.prefs.save();
+                    }
+                    if let Err(e) = self.switch_rom(&path, true) {
+                        eprintln!("error: could not load {}: {e}", path.display());
+                        self.library.ui.error =
+                            Some(format!("Impossible de charger {} : {e}", path.display()));
+                    }
+                }
+                dialog::Answer::LibraryDir(dir) => {
+                    self.prefs.library_dir = Some(dir);
+                    self.prefs.save();
+                    self.rescan_library();
+                }
+                dialog::Answer::ScreenshotDir(dir) => {
+                    self.prefs.screenshot_dir = Some(dir);
+                    self.prefs.save();
+                    // The sheet's gallery reads that folder; rebuild it on the
+                    // next frame instead of showing the old one's captures.
+                    self.library.sheet = SheetData::default();
+                }
+                dialog::Answer::Cancelled => {}
+            }
         }
+        self.dialogs.pump();
     }
 
     /// F5 / `Émulation > Sauvegarder l'état` (Cmd+S): snapshot the whole
@@ -894,7 +1702,7 @@ impl App {
     fn save_state(&mut self) {
         let slot = self.prefs.save_slot;
         let path = crate::state::state_path(&self.current_rom_path, slot);
-        let bytes = self.snes.save_state();
+        let Some(bytes) = self.snes.as_mut().map(|s| s.save_state()) else { return };
         // Atomic (temp file + rename): a crash or power loss mid-write must
         // never leave a truncated `.state`/`.stateN`, which `Snes::load_state`
         // would then reject as a corrupt body, costing the whole slot instead
@@ -917,6 +1725,9 @@ impl App {
     /// from a different game. Any error (missing file, wrong ROM, corrupt
     /// blob) is reported and the running game is left untouched.
     fn load_state(&mut self) {
+        if self.snes.is_none() {
+            return;
+        }
         let slot = self.prefs.save_slot;
         let path = crate::state::state_path(&self.current_rom_path, slot);
         let bytes = match std::fs::read(&path) {
@@ -932,7 +1743,7 @@ impl App {
                 return;
             }
         };
-        match self.snes.load_state(&bytes) {
+        match self.snes.as_mut().map(|s| s.load_state(&bytes)).unwrap_or(Ok(())) {
             Ok(()) => {
                 eprintln!("state: loaded {}", path.display());
                 // The slot's snapshot replaced `cart.sram` wholesale; see
@@ -958,24 +1769,16 @@ impl App {
         self.prefs.save_slot = slot.min(crate::state::SLOT_COUNT - 1);
         self.prefs.save();
         let slot = self.prefs.save_slot;
-        #[cfg(target_os = "macos")]
-        if let Some(menu) = &self.menu {
-            menu.sync_slot(slot);
-        }
         self.set_status(format!("SLOT {slot}"));
     }
 
-    /// `F10` hotkey / `Émulation > Reprise instantanée`: whether
+    /// `F10` hotkey / `Réglages > Émulation > Reprise instantanée`: whether
     /// `<rom>.resume` is restored at launch. The session state is written on
     /// exit either way, so turning the option back on resumes from the last
     /// session.
     fn set_resume_on_launch(&mut self, on: bool) {
         self.prefs.resume_on_launch = on;
         self.prefs.save();
-        #[cfg(target_os = "macos")]
-        if let Some(menu) = &self.menu {
-            menu.resume_on_launch.set_checked(on);
-        }
     }
 
     /// Write the automatic session state to `<rom>.resume`, a file outside the
@@ -983,7 +1786,7 @@ impl App {
     /// on every exit path (see `persist_all`) and before a ROM switch.
     fn write_resume_state(&mut self) {
         let path = crate::state::resume_path(&self.current_rom_path);
-        let bytes = self.snes.save_state();
+        let Some(bytes) = self.snes.as_mut().map(|s| s.save_state()) else { return };
         // Atomic (temp file + rename): this runs unconditionally on every
         // exit path, so a crash or power loss mid-write must never corrupt
         // `.resume` — a truncated blob would make the *next* launch's
@@ -1016,7 +1819,7 @@ impl App {
     /// from it (`sram_baseline`, captured by `save::load_sram` right before
     /// `Snes::new`) is re-applied over the resumed cart's SRAM.
     fn try_resume(&mut self) {
-        if !self.prefs.resume_on_launch {
+        if !self.prefs.resume_on_launch || self.snes.is_none() {
             return;
         }
         let path = crate::state::resume_path(&self.current_rom_path);
@@ -1031,14 +1834,16 @@ impl App {
         let srm_is_newer = mtime(&self.save_path)
             .zip(mtime(&path))
             .is_some_and(|(srm, resume)| srm > resume);
-        match self.snes.load_state(&bytes) {
+        match self.snes.as_mut().map(|s| s.load_state(&bytes)).unwrap_or(Ok(())) {
             Ok(()) => {
                 eprintln!("resume: restored {}", path.display());
                 if srm_is_newer {
                     // `sram_baseline` is exactly `cart.sram.len()` bytes for
                     // this ROM (captured from the same cart, same session),
                     // so re-applying it here can never mis-size.
-                    self.snes.bus.cart.sram.load(&self.sram_baseline);
+                    if let Some(snes) = &mut self.snes {
+                        snes.bus.cart.sram.load(&self.sram_baseline);
+                    }
                     eprintln!(
                         "resume: {} is newer than {}; keeping its SRAM instead of the resumed snapshot's",
                         self.save_path.display(),
@@ -1060,6 +1865,9 @@ impl App {
     /// `prefs.screenshot_dir` if set, else a `Screenshots` folder beside the
     /// ROM; the directory is created on demand.
     fn take_screenshot(&mut self) {
+        let Some(cart_title) = self.snes.as_ref().map(|s| s.bus.cart.title.clone()) else {
+            return; // No cartridge loaded: nothing to capture.
+        };
         let dir = self
             .prefs
             .screenshot_dir
@@ -1067,7 +1875,7 @@ impl App {
             .unwrap_or_else(|| sibling_dir(&self.current_rom_path, "Screenshots"));
         let stem = format!(
             "{}_{}",
-            crate::sanitize_file_stem(&self.snes.bus.cart.title),
+            crate::sanitize_file_stem(&cart_title),
             crate::now_local().file_stamp()
         );
         if let Err(e) = std::fs::create_dir_all(&dir) {
@@ -1076,7 +1884,11 @@ impl App {
             return;
         }
         let path = crate::unique_path(&dir, &stem, "png");
-        match crate::write_frame_png(&self.snes, &path) {
+        let result = match &self.snes {
+            Some(snes) => crate::write_frame_png(snes, &path),
+            None => return,
+        };
+        match result {
             Ok(()) => {
                 eprintln!("screenshot: wrote {}", path.display());
                 self.set_status("CAPTURE ECRAN");
@@ -1091,8 +1903,10 @@ impl App {
     /// `Fichier > Exporter la musique (.spc)`: dump the current APU state as a
     /// standard `.spc` file in an `SPC` folder beside the ROM.
     fn export_spc(&mut self) {
+        let Some(title) = self.snes.as_ref().map(|s| s.bus.cart.title.trim().to_string()) else {
+            return; // No cartridge loaded: no APU state to export.
+        };
         let dir = sibling_dir(&self.current_rom_path, "SPC");
-        let title = self.snes.bus.cart.title.trim().to_string();
         let stem =
             format!("{}_{}", crate::sanitize_file_stem(&title), crate::now_local().file_stamp());
         if let Err(e) = std::fs::create_dir_all(&dir) {
@@ -1101,7 +1915,11 @@ impl App {
             return;
         }
         let path = crate::unique_path(&dir, &stem, "spc");
-        match crate::spc::write(&self.snes, &path, &title) {
+        let result = match &self.snes {
+            Some(snes) => crate::spc::write(snes, &path, &title),
+            None => return,
+        };
+        match result {
             Ok(()) => {
                 eprintln!("spc: wrote {} ({} bytes)", path.display(), crate::spc::FILE_SIZE);
                 self.set_status("MUSIQUE SPC EXPORTEE");
@@ -1120,11 +1938,8 @@ impl App {
         self.status = Some((text.into(), Instant::now() + STATUS_DURATION));
     }
 
-    /// `F` hotkey / `View > Show FPS` (Cmd+F): toggles the on-screen FPS
-    /// overlay (see `draw_overlay_text`). Also keeps the macOS menu's
-    /// checkbox in sync when triggered from the keyboard, since AppKit only
-    /// updates the checkmark itself when the *menu* item is clicked (see
-    /// `poll_menu_events`, which does the reverse sync).
+    /// `F` hotkey / `Réglages > Affichage > Afficher les FPS`: toggles the
+    /// on-screen FPS overlay (see `draw_overlay_text`).
     fn toggle_show_fps(&mut self) {
         self.set_show_fps(!self.prefs.show_fps);
     }
@@ -1134,58 +1949,33 @@ impl App {
     fn set_show_fps(&mut self, on: bool) {
         self.prefs.show_fps = on;
         self.prefs.save();
-        #[cfg(target_os = "macos")]
-        if let Some(menu) = &self.menu {
-            menu.show_fps.set_checked(on);
-        }
     }
 
-    /// F1-F4 hotkeys / `Affichage > Zoom > ×N` (macOS-only menu): sets the
+    /// F1-F4 hotkeys / `Réglages > Affichage > Taille de la fenêtre`: sets the
     /// window's integer upscale factor and resizes the window to match.
-    /// Clamped to 1..=4 (the range the menu/hotkeys offer; `Prefs::sanitize`
+    /// Clamped to 1..=4 (the range the panel/hotkeys offer; `Prefs::sanitize`
     /// separately allows up to 8 for a hand-edited file, which this cannot
     /// reach through the UI).
     fn set_zoom(&mut self, zoom: u8) {
         let zoom = zoom.clamp(1, 4);
         if self.prefs.zoom == zoom {
-            // Clicking the already-active radio item still makes AppKit flip
-            // its checkmark, so re-assert the group even when nothing changed
-            // or the menu would stop showing the real state.
-            #[cfg(target_os = "macos")]
-            if let Some(menu) = &self.menu {
-                menu.sync_zoom(zoom);
-            }
             return;
         }
         self.prefs.zoom = zoom;
         self.prefs.save();
         self.resize_window_for_display_prefs();
-        #[cfg(target_os = "macos")]
-        if let Some(menu) = &self.menu {
-            menu.sync_zoom(zoom);
-        }
     }
 
-    /// `V` hotkey / `Affichage > Filtre` (macOS-only menu): applies and
-    /// persists the presentation filter. Purely a rendering setting — no
-    /// resize needed, `render::compose_frame` reads it every presented
-    /// frame.
+    /// `V` hotkey / `Réglages > Affichage > Filtre`: applies and persists the
+    /// presentation filter. Purely a rendering setting — no resize needed,
+    /// `render::compose_frame` reads it every presented frame.
     fn set_filter(&mut self, filter: Filter) {
         let value = filter.as_pref();
         if self.prefs.filter == value {
-            // See `set_zoom`: AppKit toggles the clicked item regardless.
-            #[cfg(target_os = "macos")]
-            if let Some(menu) = &self.menu {
-                menu.sync_filter(filter);
-            }
             return;
         }
         self.prefs.filter = value.to_string();
         self.prefs.save();
-        #[cfg(target_os = "macos")]
-        if let Some(menu) = &self.menu {
-            menu.sync_filter(filter);
-        }
     }
 
     /// `V` hotkey: steps `Aucun -> Lissé -> CRT -> Aucun`
@@ -1195,27 +1985,18 @@ impl App {
         self.set_filter(current.next());
     }
 
-    /// `R` hotkey / `Affichage > Ratio` (macOS-only menu): applies and
-    /// persists the pixel-aspect-ratio mode, then resizes the window since
-    /// the content's native (pre-zoom) size depends on it (`Aspect::Tv`
-    /// stretches the width — see `render::content_dims`).
+    /// `R` hotkey / `Réglages > Affichage > Ratio`: applies and persists the
+    /// pixel-aspect-ratio mode, then resizes the window since the content's
+    /// native (pre-zoom) size depends on it (`Aspect::Tv` stretches the width
+    /// — see `render::content_dims`).
     fn set_aspect(&mut self, aspect: Aspect) {
         let value = aspect.as_pref();
         if self.prefs.aspect == value {
-            // See `set_zoom`: AppKit toggles the clicked item regardless.
-            #[cfg(target_os = "macos")]
-            if let Some(menu) = &self.menu {
-                menu.sync_aspect(aspect);
-            }
             return;
         }
         self.prefs.aspect = value.to_string();
         self.prefs.save();
         self.resize_window_for_display_prefs();
-        #[cfg(target_os = "macos")]
-        if let Some(menu) = &self.menu {
-            menu.sync_aspect(aspect);
-        }
     }
 
     /// `R` hotkey: toggles Pixel-parfait <-> TV authentique
@@ -1270,6 +2051,9 @@ impl App {
                 return;
             }
         }
+        if let Some(ui) = &mut self.ui {
+            ui.resize(size.width, size.height);
+        }
         self.out_w = size.width;
         self.out_h = size.height;
     }
@@ -1283,6 +2067,9 @@ impl App {
     /// `resume` asks for the new game's session state to be restored once it is
     /// loaded; `reset` passes false, since restoring the state it just wrote
     /// would undo the reset.
+    ///
+    /// This is also the path the home screen takes to start the *first* game
+    /// of a run, in which case there is no outgoing console to flush.
     fn switch_rom(&mut self, path: &Path, resume: bool) -> Result<(), String> {
         // Leaving a game is an exit for that game: its session state and
         // battery SRAM are written before the console is replaced. SRAM
@@ -1290,17 +2077,26 @@ impl App {
         // (review point A: keeps `.resume`'s mtime >= `.srm`'s in the
         // ordinary case, so `try_resume`'s newer-`.srm` guard doesn't misfire
         // next time this ROM is loaded).
-        save::save_if_dirty(&self.snes.bus.cart, &self.save_path, &self.sram_baseline);
-        self.write_resume_state();
+        if let Some(snes) = &self.snes {
+            save::save_if_dirty(&snes.bus.cart, &self.save_path, &self.sram_baseline);
+            self.write_resume_state();
+        }
+
+        // The outgoing game's play time is final at this point.
+        if self.play_unsaved > 0 {
+            self.play_unsaved = 0;
+            self.prefs.save();
+        }
 
         let bytes = crate::load_rom_bytes(path)?;
         let mut cart = Cartridge::from_bytes(bytes)?;
         let save_path = save::default_save_path(path);
         let sram_baseline = save::load_sram(&mut cart, &save_path);
 
+        let game_id = library::game_id(cart.title.trim(), cart.header_checksum, &cart.rom);
         self.title = window_title(&cart.title);
         self.frame_duration = Duration::from_secs_f64(1.0 / cart.region.frames_per_second());
-        self.snes = Snes::new(cart);
+        self.snes = Some(Snes::new(cart));
         self.save_path = save_path;
         self.sram_baseline = sram_baseline;
         self.pad = JoypadState::default();
@@ -1313,6 +2109,10 @@ impl App {
             window.set_title(&self.title);
         }
         self.current_rom_path = path.to_path_buf();
+        // A loaded cartridge always takes the window: this is what turns the
+        // home screen into the game screen.
+        self.state.start_session();
+        self.start_play_session(game_id);
         if resume {
             self.try_resume();
         }
@@ -1329,6 +2129,9 @@ impl App {
     /// the SNES's physical reset button, which restarts execution but never
     /// erases cartridge SRAM.
     fn reset(&mut self) {
+        if self.snes.is_none() {
+            return;
+        }
         let path = self.current_rom_path.clone();
         if let Err(e) = self.switch_rom(&path, false) {
             eprintln!("error: reset failed to reload {}: {e}", path.display());
@@ -1340,9 +2143,10 @@ impl App {
     /// by its accelerator) and dispatches each click. Called once per
     /// `about_to_wait` so a menu action lands before that iteration's
     /// pacing/frame-run, the same way keyboard hotkeys are handled
-    /// synchronously in `window_event`. `About` is a muda `PredefinedMenuItem`
-    /// that AppKit runs itself (standard about panel) and never appears on this
-    /// channel. `Quit` is a *custom* item (not `PredefinedMenuItem::quit`) so
+    /// synchronously in `window_event`. The menu carries no predefined item but
+    /// separators — AppKit's own about panel opens a nested run loop that
+    /// crashes winit, so it was removed (`menu::install`).
+    /// `Quit` is a *custom* item (not `PredefinedMenuItem::quit`) so
     /// it routes here and we exit the winit loop the same way `Esc`/window-close
     /// do, which triggers the exit-time battery-SRAM flush in `run` — AppKit's
     /// `terminate:` would kill the process before that save could run.
@@ -1350,99 +2154,49 @@ impl App {
     fn poll_menu_events(&mut self, event_loop: &ActiveEventLoop) {
         while let Ok(event) = muda::MenuEvent::receiver().try_recv() {
             let Some(menu) = &self.menu else { continue };
-            // Resolved up front: the `menu` borrow must not still be live when
-            // a branch below calls back into `&mut self`.
-            let ff_click: Option<u8> = menu
-                .ff_items
-                .iter()
-                .zip(menu::FF_FACTORS)
-                .find(|(item, _)| event.id == *item.id())
-                .map(|(_, &(factor, _))| factor);
-            let slot_click: Option<u8> = menu
-                .slot_items
-                .iter()
-                .position(|item| event.id == *item.id())
-                .map(|i| i as u8);
-            let zoom_click: Option<u8> = menu
-                .zoom_items
-                .iter()
-                .zip(menu::ZOOM_FACTORS)
-                .find(|(item, _)| event.id == *item.id())
-                .map(|(_, &(factor, _))| factor);
-            let filter_click: Option<Filter> = menu
-                .filter_items
-                .iter()
-                .zip(menu::FILTER_ITEMS)
-                .find(|(item, _)| event.id == *item.id())
-                .map(|(_, &(value, _))| value);
-            let aspect_click: Option<Aspect> = menu
-                .aspect_items
-                .iter()
-                .zip(menu::ASPECT_ITEMS)
-                .find(|(item, _)| event.id == *item.id())
-                .map(|(_, &(value, _))| value);
+            // Actions only — the menu holds no setting any more, so no branch
+            // here reads back a checkmark AppKit flipped on its own, and no
+            // menu state has to be re-derived afterwards. Every option is
+            // changed through `ui::settings` -> `Action::Set` -> the same
+            // `set_*` methods the hotkeys call.
+            let id = event.id.clone();
             // Quit shares one id across the app-menu and File-menu items; it
             // goes through the same confirmation as Esc.
-            if event.id == menu.quit.id() || event.id == menu.quit_file.id() {
+            if id == menu.quit.id() || id == menu.quit_file.id() {
                 self.request_quit(event_loop);
-            } else if event.id == menu.mute.id() {
-                // AppKit already flipped the CheckMenuItem before sending the
-                // click (muda macOS impl); mirror it rather than toggling again.
-                let checked = menu.mute.is_checked();
-                self.set_mute(checked);
-            } else if event.id == menu.volume_up.id() {
-                self.adjust_volume(true);
-            } else if event.id == menu.volume_down.id() {
-                self.adjust_volume(false);
-            } else if event.id == menu.confirm_quit.id() {
-                let checked = menu.confirm_quit.is_checked();
-                self.set_confirm_on_quit(checked);
-            } else if let Some(factor) = ff_click {
-                // Radio group: `set_fast_forward_factor` re-derives every
-                // checkmark, since AppKit only flipped the clicked one (and
-                // would have *un*checked an already-selected factor).
-                self.set_fast_forward_factor(factor);
-            } else if event.id == menu.open_rom.id() {
+            } else if id == menu.home.id() {
+                self.go_home();
+            } else if id == menu.settings.id() {
+                self.open_settings();
+            } else if id == menu.open_rom.id() {
                 self.open_rom_dialog();
-            } else if event.id == menu.pause_resume.id() {
+            } else if id == menu.pause_resume.id() {
                 self.paused = !self.paused;
-            } else if event.id == menu.reset.id() {
+            } else if id == menu.reset.id() {
                 self.reset();
-            } else if event.id == menu.save_state.id() {
+            } else if id == menu.save_state.id() {
                 self.save_state();
-            } else if event.id == menu.load_state.id() {
+            } else if id == menu.load_state.id() {
                 self.load_state();
-            } else if let Some(slot) = slot_click {
-                // Radio group, like the fast-forward factors: `set_slot`
-                // re-derives every checkmark.
-                self.set_slot(slot);
-            } else if event.id == menu.next_slot.id() {
+            } else if id == menu.next_slot.id() {
                 self.next_slot();
-            } else if event.id == menu.resume_on_launch.id() {
-                let checked = menu.resume_on_launch.is_checked();
-                self.set_resume_on_launch(checked);
-            } else if event.id == menu.screenshot.id() {
+            } else if id == menu.screenshot.id() {
                 self.take_screenshot();
-            } else if event.id == menu.export_spc.id() {
+            } else if id == menu.export_spc.id() {
                 self.export_spc();
-            } else if event.id == menu.show_fps.id() {
-                // AppKit already flipped the CheckMenuItem's own checked
-                // state before sending this click event (muda macOS impl);
-                // mirror it rather than toggling again.
-                let checked = menu.show_fps.is_checked();
-                self.set_show_fps(checked);
-            } else if let Some(zoom) = zoom_click {
-                // Radio group, like the fast-forward factors and slots.
-                self.set_zoom(zoom);
-            } else if let Some(filter) = filter_click {
-                self.set_filter(filter);
-            } else if let Some(aspect) = aspect_click {
-                self.set_aspect(aspect);
-            } else if event.id == menu.fullscreen.id() {
+            } else if id == menu.fullscreen.id() {
                 self.set_fullscreen(!self.is_fullscreen());
             }
         }
     }
+}
+
+/// Picture to show for `id`, or `None` when the game still needs one (see
+/// `library::resolve_picture`). Both the display map and the generation queue
+/// go through this, so they can never disagree.
+fn picture_for(prefs: &Prefs, id: &str) -> Option<PathBuf> {
+    let custom = prefs.games.get(id).and_then(|s| s.thumbnail.clone());
+    library::resolve_picture(custom.as_deref(), thumbs::thumb_path(id).as_deref())
 }
 
 /// Top-row digit key -> save-state slot number (`Digit0` = slot 0 ... `Digit9`
@@ -1837,6 +2591,25 @@ mod path_tests {
         assert_eq!(digit_to_slot(KeyCode::Numpad5), None);
         assert_eq!(digit_to_slot(KeyCode::F5), None);
         assert_eq!(digit_to_slot(KeyCode::KeyA), None);
+    }
+
+    #[test]
+    fn the_home_screen_titles_the_window_with_the_product_only() {
+        let home = home_window_title();
+        assert_eq!(home, format!("{APP_NAME} {VERSION}"));
+        // A cartridge title is appended after a separator, so the two forms
+        // can never be confused.
+        let game = window_title("  MARIO_ALLSTARS+WORLD  ");
+        assert_eq!(game, format!("{home} - MARIO_ALLSTARS+WORLD"));
+        assert_ne!(home, game);
+    }
+
+    #[test]
+    fn the_home_screen_is_paced_at_60_hz() {
+        // No cartridge means no field rate to follow; the UI refresh rate is
+        // a plain 60 Hz, within a microsecond of 1/60 s.
+        let hz = 1.0 / HOME_FRAME_DURATION.as_secs_f64();
+        assert!((hz - 60.0).abs() < 1e-3, "{hz}");
     }
 
     #[test]
