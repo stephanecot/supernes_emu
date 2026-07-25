@@ -330,7 +330,35 @@ Enregistrer des séquences de jeu, rangées avec le jeu concerné comme les capt
 
 ---
 
-## Phase 12 — Amélioration des captures par IA **[M]** *(option, idée retenue)*
+## Phase 12 — Amélioration des captures par IA **[ABANDONNÉE — testée sur pièces]**
+
+**Décision : abandon**, prise après un essai réel et non sur intuition.
+
+Real-ESRGAN (variante *anime*, 18 Mo) a été exécuté localement sur `docs/screenshots/smb1_gameplay.png`,
+sur le GPU du Mac, en **0,48 s** — la faisabilité technique n'est donc pas en cause.
+
+Ce que le modèle fait très bien : les décors. Le tramage en damier du ciel devient un vrai dégradé
+continu, les nuages ont des contours propres, briques et buissons sont nets.
+
+Ce qu'il casse : **tout ce qui est petit et porteur de sens**. Mario, seize pixels de haut, devient
+une masse illisible ; la pièce du bandeau devient un œuf ; `TIME 388` devient des glyphes inventés.
+La cause est structurelle et non corrigeable par réglage : le réseau a été entraîné sur des
+illustrations où un visage occupe des centaines de pixels, il n'a pas l'information nécessaire ici,
+alors il invente. Et le tramage, qu'il efface si heureusement sur le ciel, il l'efface aussi sur les
+sprites.
+
+Un **hybride a été prototypé et fonctionne** (modèle sur le fond, agrandisseur préservant les formes
+sur les sprites et le bandeau) : Mario redevient reconnaissable sans rien perdre du ciel. Et
+l'émulateur aurait un avantage décisif pour le généraliser — les rectangles des sprites sont dans
+l'OAM, le bandeau est un calque tenu par une fenêtre matérielle, informations qu'aucun outil recevant
+un PNG ne possède.
+
+Piste laissée ouverte, mais **l'utilisateur a choisi de ne pas la poursuivre**. Les images de l'essai
+sont reproductibles avec le script conservé dans les notes de session.
+
+---
+
+## Phase 12 (spécification d'origine, conservée pour mémoire)
 
 **Pourquoi c'est ici que l'IA a du sens.** Les trois objections à un upscaling neuronal en temps réel
 (voir `IDEAS.md`) **tombent toutes** sur une capture : pas de scintillement temporel puisqu'il n'y a
