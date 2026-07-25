@@ -356,30 +356,39 @@ Enrichir la bibliothèque avec la **jaquette officielle** et les **détails** de
 éditeur, genre, nombre de joueurs, description), en complément des vignettes que l'émulateur génère
 lui-même.
 
-**Sources — préférer les API aux pages HTML** (une page change, une API non ; et cela respecte les
-conditions d'utilisation) :
+**SOLUTION RETENUE — appariement par empreinte, puis jaquettes sans clé.**
 
-| Source | Appariement | Remarque |
-|---|---|---|
-| **ScreenScraper.fr** | **par hash** (CRC/MD5/SHA1) | Référence des frontends rétro ; jaquettes + captures + métadonnées. Compte gratuit. |
-| **libretro-thumbnails** | par nom (convention No-Intro) | Dépôt public, pas de clé, simple HTTP. Le plus simple à intégrer. |
-| **IGDB** | par titre | Métadonnées riches, API officielle (identifiants Twitch). |
+Le défaut de `libretro-thumbnails` est l'appariement par nom ; on le supprime en passant par un DAT :
 
-**Apparier par empreinte, pas par titre.** Nos fichiers suivent la convention GoodSNES
-(`Super Mario Kart (E) [!].zip`) alors que les bases utilisent souvent No-Intro
-(`Super Mario Kart (Europe)`) : un appariement par nom échouerait ou confondrait deux versions. Or
-la **somme de contrôle de l'en-tête est déjà lue** et un CRC32 du fichier est trivial à calculer —
-cela distingue proprement PAL/NTSC et les dumps modifiés.
+1. **CRC32 de la ROM** (header copieur retiré — le chargeur le fait déjà).
+2. **Recherche dans un DAT No-Intro** (XML : CRC → nom canonique) : `Super Mario Kart (E) [!].zip`
+   devient `Super Mario Kart (Europe)` de façon **certaine**, pas par ressemblance. Le DAT est
+   téléchargé une fois à la demande et mis en cache ; il n'est pas embarqué dans l'application.
+3. **Jaquette via `libretro-thumbnails`** avec ce nom exact : simple requête HTTPS,
+   **aucun compte, aucune clé** (`.../Nintendo - Super Nintendo Entertainment System/Named_Boxarts/<nom>.png`,
+   plus `Named_Snaps` et `Named_Titles` si utile).
+
+Pourquoi ce choix plutôt que ScreenScraper seul : l'appariement devient aussi fiable (les deux
+reposent sur l'empreinte) **sans exiger d'inscription**. Une fonctionnalité qui demande de créer un
+compte avant d'afficher quoi que ce soit est une mauvaise première impression, et l'application ne
+peut pas s'inscrire à la place de l'utilisateur.
+
+**Détails (année, éditeur, genre, description)** — libretro n'en fournit pas. Deux niveaux :
+- **Par défaut, sans réseau ni compte** : ce que le cœur sait déjà lire — titre, région, mapping,
+  taille, SRAM, **coprocesseur détecté** — plus le nom canonique issu du DAT. Fiche déjà honnête.
+- **En option, avec identifiants fournis par l'utilisateur** : ScreenScraper (par hash, riche) ou
+  IGDB (par titre). Absents → on n'affiche simplement pas ces champs.
 
 **Règles de conception :**
 - **Les vignettes générées par l'émulateur restent le défaut** : elles fonctionnent toujours, sans
   réseau. La jaquette officielle vient *en plus*, jamais *à la place*.
-- **Optionnel, désactivé par défaut**, source choisie dans les réglages ; téléchargement **à la
-  demande** dans un cache local. **Ne rien redistribuer** avec l'application : les jaquettes
-  appartiennent aux éditeurs.
-- **Hors ligne d'abord** : panne réseau ou jaquette absente → repli silencieux sur la vignette
-  générée, jamais de blocage de la bibliothèque.
-- Respecter les limites de débit ; requêtes groupées et mises en cache (invalidation par hash).
+- **Optionnel, désactivé par défaut** ; téléchargement **à la demande** dans un cache local
+  (invalidation par CRC). **Ne rien redistribuer** avec l'application : les jaquettes appartiennent
+  aux éditeurs.
+- **Hors ligne d'abord** : réseau absent, DAT introuvable ou jaquette manquante → repli silencieux
+  sur la vignette générée, jamais de blocage de la bibliothèque.
+- Respecter les limites de débit ; requêtes espacées et résultats mis en cache, y compris les échecs
+  (ne pas réinterroger à chaque lancement pour un jeu sans jaquette connue).
 - L'utilisateur garde la main : pouvoir forcer une de ses captures comme visuel du jeu.
 
 ---
