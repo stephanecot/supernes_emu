@@ -219,7 +219,6 @@ mod main_queue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     #[test]
     fn a_second_request_is_dropped_while_one_is_pending() {
@@ -260,6 +259,7 @@ mod tests {
         // request and answer is what the event loop dispatches on.
         let answers = [
             Answer::Rom(PathBuf::from("/roms/a.sfc")),
+            Answer::AddRom { path: PathBuf::from("/ailleurs/b.zip"), replacing: None },
             Answer::LibraryDir(PathBuf::from("/roms")),
             Answer::ScreenshotDir(PathBuf::from("/shots")),
             Answer::SaveDir(PathBuf::from("/saves")),
@@ -267,12 +267,21 @@ mod tests {
         ];
         let mut seen = 0;
         for answer in &answers {
+            // The exhaustive match is the test: a new variant cannot be added
+            // without deciding here which of the two shapes it carries.
             match answer {
+                // A cartridge is a file, so it is named with an extension…
                 Answer::Rom(p) | Answer::AddRom { path: p, .. } => {
-                    assert!(p.extension().is_some())
+                    assert!(p.extension().is_some(), "{p:?}");
                 }
+                // …and a folder is not. `is_absolute` would have been the
+                // obvious check and is worthless here: these are literals the
+                // test writes itself, and on Windows `/roms` is not absolute at
+                // all — a drive prefix is required — so it only ever asserted
+                // that the test runs on Unix.
                 Answer::LibraryDir(p) | Answer::ScreenshotDir(p) | Answer::SaveDir(p) => {
-                    assert!(p.is_absolute() || p == Path::new("roms"));
+                    assert!(p.extension().is_none(), "{p:?}");
+                    assert!(p.file_name().is_some(), "{p:?}");
                 }
                 Answer::Cancelled => {}
             }
