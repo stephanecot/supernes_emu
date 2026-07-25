@@ -7,6 +7,29 @@ Effort : **S** ≈ une passe courte · **M** ≈ une demi-journée d'agent · **
 
 ---
 
+## État au 25 juillet 2026
+
+**Livré :** Phases **0** (préférences JSON), **1** (version, muet/volume, captures, slots de save
+state, confirmation de sortie, accéléré, reprise instantanée, export SPC), **2** (fenêtre
+redimensionnable, plein écran, filtres, ratio), **7** (identité « Prisme - SuperNes ») et **8**
+(refonte de l'interface : accueil, bibliothèque, favoris, fiches de jeu, panneaux de réglages).
+
+**Reste :** Phases **3** (manette + remapping), **4** (répertoires), **5** (rewind), **6** (mode
+enfant), **9** (triches par IA), **10** (canal agent), **11** (enregistrement vidéo), **12**
+(amélioration des captures par IA).
+
+**Chiffres :** 332 tests cœur + 196 tests frontend. Émulation prouvée **inchangée** par la Phase 8
+(les 7 jeux rendent des images identiques au bit près à une baseline pré-Phase 8).
+
+**À confirmer par l'utilisateur** (non vérifiable sans écran) : « À propos », la confirmation de
+sortie sur Échap, et le sélecteur de ROM (`O`) — les trois chemins qui empruntaient les modales
+natives à l'origine du crash.
+
+**Non validé :** les builds **Windows et Linux** n'ont jamais tourné (la CI ne se déclenche que sur
+`main`, et `dev` compte 10 commits non fusionnés).
+
+---
+
 ## Constat de départ (état réel du code)
 
 | Fait | Conséquence sur le plan |
@@ -19,7 +42,7 @@ Effort : **S** ≈ une passe courte · **M** ≈ une demi-journée d'agent · **
 
 ---
 
-## Phase 0 — Socle : préférences persistées **[S/M — à faire en premier]**
+## Phase 0 — Socle : préférences persistées **[✅ FAIT]**
 
 Sans ça, chaque option suivante réinvente sa propre persistance.
 
@@ -36,7 +59,7 @@ Sans ça, chaque option suivante réinvente sa propre persistance.
 
 ---
 
-## Phase 1 — Quick wins **[S chacun]**
+## Phase 1 — Quick wins **[✅ FAIT]**
 
 Petits, indépendants, forte valeur perçue. À enchaîner dans une seule passe.
 
@@ -73,7 +96,7 @@ Petits, indépendants, forte valeur perçue. À enchaîner dans une seule passe.
 
 ---
 
-## Phase 2 — Affichage : zoom, filtres, ratio **[M]**
+## Phase 2 — Affichage : taille de fenêtre, plein écran, filtres, ratio **[✅ FAIT]**
 
 Les trois touchent la même zone (surface `pixels`) → à faire ensemble.
 
@@ -174,7 +197,7 @@ Pistes de noms (à trancher) : **Chrono16**, **Aurora16**, **Kestrel**, **Nova16
 
 ---
 
-## Phase 8 — Refonte de l'interface : une vraie application **[L]** *(idée retenue — phase phare)*
+## Phase 8 — Refonte de l'interface : une vraie application **[✅ FAIT]**
 
 Aujourd'hui, lancer l'émulateur ouvre une boîte de dialogue de fichiers. L'objectif : **un véritable
 écran d'accueil**, complet et soigné, qui fait passer le projet d'« émulateur qui marche » à
