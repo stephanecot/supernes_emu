@@ -79,3 +79,39 @@ Le défaut (`Aucun`) est sûr à toute taille ; seuls `CRT`/`Lissé` en plein é
 (~2-3x le natif, ex. 1024x896) puis agrandir au plus proche voisin — visuellement quasi identique
 (les scanlines n'ont pas besoin de la résolution native de l'écran) pour un coût divisé par ~6.
 Alternative plus lourde : un vrai shader wgpu.
+
+## CRASH — toute modale native ouverte DEPUIS la boucle winit tue l'application
+**Symptôme signalé :** le menu « À propos » fait planter l'application (reproduit en 0.1.0 puis en
+0.2.0, donc la première correction — passer des métadonnées à `PredefinedMenuItem::about` — était
+une hypothèse fausse).
+
+**Cause racine (prouvée) :** `winit-0.30.13/src/platform_impl/macos/event_handler.rs` panique
+volontairement en cas de réentrance :
+```
+58:  unreachable!("tried to set handler while another was already set");
+64:  unreachable!("tried to set handler that is currently in use");
+135: panic!("tried to handle event while another event is currently being handled");
+```
+La pile de crash montre `EventHandler::set` juste sous `-[NSApplication run]`. Le panneau « À propos »
+d'AppKit ouvre une **boucle d'événements imbriquée** → réentrance dans le gestionnaire winit →
+panique Rust traversant les cadres Objective-C → `objc_exception_rethrow` → abort.
+
+**Portée : ce n'est pas propre à « À propos ».** Toute modale native déclenchée *depuis* un callback
+de la boucle est concernée :
+- `PredefinedMenuItem::about` (planté, confirmé) ;
+- la **confirmation de sortie** (`rfd::MessageDialog` sur Échap / Quitter) — à vérifier, même
+  mécanisme (NSAlert `runModal`) ;
+- le **sélecteur de ROM** ouvert par la touche `O` / menu Ouvrir — à vérifier. *(Celui du démarrage
+  est sûr : il s'exécute AVANT `event_loop.run_app()`.)*
+
+**Correctifs possibles, par ordre de préférence :**
+1. **Remplacer ces modales par des fenêtres in-app egui** (Phase 8, en cours) — supprime la classe de
+   bug entière : plus aucune boucle imbriquée. C'est la bonne réponse pour « À propos » et la
+   confirmation de sortie.
+2. Pour ce qui doit rester natif (sélecteur de fichiers), **différer l'ouverture hors du callback**
+   (`dispatch_async` sur la file principale) pour que la modale s'exécute sur une pile propre.
+3. À défaut, retirer l'entrée « À propos » : un menu qui plante à coup sûr est pire que pas de menu.
+
+**Leçon de méthode :** ne plus annoncer ce type de correctif comme acquis sans vérification à
+l'écran — l'environnement de développement n'a pas d'affichage, donc ces chemins ne sont testables
+que par l'utilisateur ou par une analyse de la pile de crash.
