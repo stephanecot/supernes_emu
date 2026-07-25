@@ -23,7 +23,7 @@ Playable rendering and audio for LoROM/HiROM games (NTSC and PAL), plus SuperFX 
 | DMA | GDMA + HDMA (indirect, per-line) |
 | Timing / IRQ | NMI, H/V IRQ ($4207–$420A), FastROM ($420D), open-bus (MDR) |
 | Cartridge | LoROM / HiROM / SuperFX detection, region detection, battery SRAM |
-| Frontend | winit + pixels window, cpal audio, native macOS menu bar, ROM picker, save states, FPS overlay, headless PNG/WAV/trace dumps |
+| Frontend | winit + pixels window (resizable, fullscreen, zoom/filter/aspect-ratio), cpal audio, native macOS menu bar, ROM picker, save states, FPS overlay, headless PNG/WAV/trace dumps |
 
 332 core unit tests pass. Verified end-to-end on eight commercial games: backgrounds, sprites,
 color-math menus, real in-game music (WAV-analysed), input-driven gameplay (Mario runs, jumps and
@@ -81,20 +81,60 @@ ROM (native file dialog; saves the current game's SRAM first, cancelling
 keeps the current game running), `F5` save state, `F9` load state, `F7` next
 save-state slot, `0`-`9` jump straight to that slot, `F6` reset (power-on
 reset, keeps battery SRAM), `F8` export the current music as `.spc`, `F10`
-toggle instant-resume-on-launch, `F11` toggle the quit confirmation, `[`/`]`
-step the fast-forward factor (2/3/4×, held with `Tab`), `F` toggle the FPS
-overlay, `M` mute, `+`/`-` volume, `F12` screenshot, `Esc` quit (asks for
-confirmation unless disabled with `F11`).
+toggle instant-resume-on-launch, `[`/`]` step the fast-forward factor (2/3/4×,
+held with `Tab`), `F` toggle the FPS overlay, `M` mute, `+`/`-` volume, `F12`
+screenshot, `F1`-`F4` set the window zoom to ×1-×4, `V` cycle the display
+filter (Aucun/Lissé/CRT), `R` toggle the pixel-aspect-ratio mode
+(pixel-perfect/TV authentique), `F11` toggle fullscreen (also Ctrl+Cmd+F on
+macOS, that platform's own convention), `C` toggle the quit confirmation,
+`Esc` exits fullscreen first if active, otherwise quits (asks for
+confirmation unless disabled with `C`).
+
+**Display: zoom, filter, aspect ratio (Phase 2).** The window is freely
+resizable by dragging an edge/corner — `F1`-`F4` are convenience shortcuts
+that jump straight to a given size, not the only way to resize. At any window
+size the emulated picture is scaled without deformation: black letterbox/
+pillarbox bars fill whatever the aspect ratio doesn't cover.
+- **Ratio** (`R`, `Affichage > Ratio`): `Pixel-perfect (1:1)` snaps to the
+  largest *whole-number* zoom that fits the window, so pixels stay perfectly
+  sharp under the `Aucun` filter; `TV authentique (8:7)` stretches the
+  picture to the SNES's actual non-square-pixel geometry (each native pixel
+  is 8:7 wide:tall — a period CRT stretched this into the ~4:3 picture
+  people remember) and fills the window continuously, not snapped to a whole
+  factor.
+- **Filter** (`V`, `Affichage > Filtre`), independent of zoom/ratio: `Aucun`
+  (nearest-neighbor, sharp — the default), `Lissé` (bilinear), `CRT`
+  (bilinear plus darkened alternating scanlines, for an "old TV" look).
+  Implemented as a CPU post-processing pass over the RGBA output buffer
+  (`frontend/src/render.rs`) rather than a custom wgpu shader — `pixels`
+  0.15's built-in scaling renderer hard-codes nearest-neighbor sampling with
+  no public option to switch it, and a full custom-shader integration was
+  judged more surface than three filters need. Measured cost (Apple Silicon,
+  `--release`): ~4ms/frame for the most expensive combination (CRT, zoom x4)
+  at typical window sizes, well inside a 50-60fps budget; a window
+  maximized on a 4K display with `CRT`/`Lissé` can exceed that budget (the
+  default `Aucun` stays cheap at any size) — see
+  `frontend/src/render.rs`'s `compose_frame_cost_*` tests for the numbers.
+- **Fullscreen** (`F11` / Ctrl+Cmd+F on macOS): borderless fullscreen on the
+  window's current monitor, same no-deformation scaling as windowed. Not
+  persisted — the app always starts windowed. `Esc` exits fullscreen before
+  it does anything else.
+- All three (zoom, filter, ratio) are memorized in the preferences file;
+  fullscreen is not.
 
 The FPS overlay (off by default) draws the measured display frame rate in the
-top-right corner, e.g. `FPS60/50` (frames actually presented per wall-second,
-averaged over a rolling ~0.5s window, versus the cartridge region's native
-field rate — 60.0988 Hz NTSC / 50.007 Hz PAL). The number is green while the
-emulator keeps up with the target rate and red if it falls behind. It's drawn
-directly onto the presented `pixels` frame buffer (a tiny built-in 3x5 bitmap
-font, no font asset), never into the core's own framebuffer, so it never
-appears in `--dump-frame`/`--dump-frame-every` PNGs or any other headless
-output.
+top-right corner, e.g. `FPS 60/50` (frames actually presented per
+wall-second, averaged over a rolling ~0.5s window, versus the cartridge
+region's native field rate — 60.0988 Hz NTSC / 50.007 Hz PAL). The number is
+green while the emulator keeps up with the target rate and red if it falls
+behind. It's drawn directly onto the presented `pixels` frame buffer (a tiny
+built-in 3x5 bitmap font, no font asset) — and drawn *after* zoom/filter/PAR
+scaling, at a fixed 1 output pixel per glyph pixel, so its on-screen size
+stays small and constant regardless of window size instead of growing with
+zoom/fullscreen. It never touches the core's own framebuffer, so it never
+appears in `--dump-frame`/`--dump-frame-every` PNGs, the F12 screenshot, or
+any other headless output. The transient bottom-left status messages (slot
+saved, screenshot taken…) follow the same after-scaling, constant-size rule.
 
 On macOS the windowed build also installs a native menu bar (top of screen).
 Every item there also has a plain-keyboard equivalent (listed above) that
@@ -106,7 +146,7 @@ exist:
 | File | Open ROM… | Cmd+O | `O` |
 | File | Capture d'écran | — | `F12` |
 | File | Exporter la musique (.spc)… | — | `F8` |
-| File | Demander confirmation avant de quitter | — | `F11` |
+| File | Demander confirmation avant de quitter | — | `C` |
 | File | Quit | Cmd+Q | `Esc` |
 | Emulation | Pause / Resume | Cmd+P | `P` |
 | Emulation | Reset | Cmd+R | `F6` |
@@ -118,11 +158,16 @@ exist:
 | Emulation | Accéléré > ×N | — | `[`/`]` (with `Tab` held) |
 | Audio | Muet | Cmd+M | `M` |
 | Audio | Volume +/− | Cmd+=/Cmd+- | `+`/`-` |
-| View | Show FPS | Cmd+F | `F` |
+| Affichage | Show FPS | Cmd+F | `F` |
+| Affichage | Zoom > ×N | — | `F1`-`F4` |
+| Affichage | Filtre > Aucun/Lissé/CRT | — | `V` (cycles) |
+| Affichage | Ratio > Pixel-parfait/TV authentique | — | `R` (toggles) |
+| Affichage | Plein écran | Ctrl+Cmd+F | `F11` |
 
 Keyboard hotkeys keep working alongside the menu; the checkable items
-(mute, confirm-on-quit, show FPS, resume-on-launch, the slot and
-fast-forward-factor radio groups) stay in sync whichever path is used.
+(mute, confirm-on-quit, show FPS, resume-on-launch, the slot,
+fast-forward-factor, zoom, filter and ratio radio groups) stay in sync
+whichever path is used.
 
 Save states snapshot the whole console (CPU/PPU/APU/DSP/DMA and all RAM) to a
 `.state` sidecar next to the ROM (e.g. `game.sfc` -> `game.state`; for a
@@ -173,7 +218,7 @@ Launched from Finder with no arguments, the app opens the ROM picker.
 
 - `core/` — `snes-core`, the pure emulation library (no I/O), fully testable headless.
   - `cpu/`, `ppu/`, `apu/`, `bus.rs`, `scheduler.rs`, `dma.rs`, `cartridge/`, `coprocessor/` (SuperFX/GSU), `debug/`
-- `frontend/` — `prisme`, the winit/pixels/cpal binary and CLI (picker, menu bar, save states, FPS overlay).
+- `frontend/` — `prisme`, the winit/pixels/cpal binary and CLI (picker, menu bar, save states, FPS overlay, `render.rs` zoom/filter/aspect compositing).
 - `scripts/` — `make-app.sh` (macOS `.app` bundler); `packaging/` — app icon assets.
 - `docs/` — architecture, the pedagogical PDF, `PUNCHLIST.md` (known accuracy gaps), `IDEAS.md` (planned features).
 - `.claude/` — development tooling: subagent definitions and a condensed, source-verified SNES hardware reference (`skills/snes-refs/references/`).

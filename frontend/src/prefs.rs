@@ -25,10 +25,11 @@
 //! migration, but not every field is read by the running emulator yet.
 //! Fields the frontend actually *acts on* today: `mute`, `volume`, `show_fps`,
 //! `fast_forward_factor`, `confirm_on_quit`, `resume_on_launch`, `save_slot`,
-//! `screenshot_dir`. Every other field is annotated below with the roadmap
-//! phase that wires it up (`parental` already carries this note in its own
-//! doc comment) — a value stored there today is preserved for when that phase
-//! lands, but changing it has no effect yet.
+//! `screenshot_dir`, `zoom`, `filter`, `aspect`. Every other field is
+//! annotated below with the roadmap phase that wires it up (`parental`
+//! already carries this note in its own doc comment) — a value stored there
+//! today is preserved for when that phase lands, but changing it has no
+//! effect yet.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -84,19 +85,27 @@ pub struct Prefs {
     pub volume: u8,
     /// On-screen FPS overlay (`F` hotkey / `View > Show FPS`).
     pub show_fps: bool,
-    /// Integer window upscale factor, 1..=8. **Not yet applied** — the window
-    /// is always created at `video::WINDOW_SCALE`; wiring this in is
-    /// `docs/ROADMAP.md` Phase 2 (Affichage: zoom, filtres, ratio).
+    /// Integer window-size shortcut, 1..=8 (`F1`-`F4`/`Affichage > Zoom` only
+    /// ever set 1..=4; a hand-edited file can go higher, clamped by
+    /// `sanitize`). This picks the *starting* window size
+    /// (`render::zoomed_dims`, clamped to fit the monitor) — the window is
+    /// then freely resizable by dragging, independent of this value (see
+    /// `App::apply_resize`/`render::letterbox`); resizing by hand does not
+    /// write a new `zoom` back.
     pub zoom: u8,
     /// Display filter name: `none` (sharp nearest-neighbour, the default),
-    /// `smooth`, `crt`. Unknown names are preserved as written so a file from
-    /// a newer build survives a round trip through an older one. **Not yet
-    /// applied** — every present path renders with plain nearest-neighbour
-    /// upscaling regardless of this value; Phase 2, same as `zoom`.
+    /// `smooth` (bilinear), `crt` (bilinear + darkened alternating source
+    /// scanlines). Unknown names are preserved as written so a file from a
+    /// newer build survives a round trip through an older one, but render as
+    /// `none` (`render::Filter::from_pref`). Applied by
+    /// `render::compose_frame`, independent of `zoom`/`aspect`.
     pub filter: String,
-    /// Aspect handling: `pixel-perfect` (1:1) or `tv` (8:7 PAR, ~4:3). **Not
-    /// yet applied** — the window is always 1:1 pixel-perfect; Phase 2, same
-    /// as `zoom`.
+    /// Aspect handling: `pixel-perfect` (1:1, snapped to the largest whole
+    /// zoom that fits the current window) or `tv` (8:7 PAR, ~4:3, continuous
+    /// scale). Unknown values render as `pixel-perfect`
+    /// (`render::Aspect::from_pref`). Applied by `render::letterbox`/
+    /// `render::compose_frame`; letterboxed/pillarboxed with black bars
+    /// rather than stretched at any window size.
     pub aspect: String,
     /// Directory for `.srm`/`.state` sidecars; `None` = next to the ROM.
     /// **Not yet applied** — saves and states always sit next to the ROM

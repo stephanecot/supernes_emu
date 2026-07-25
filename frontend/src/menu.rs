@@ -14,8 +14,12 @@
 //! `+`/`-`); the handful that used to be macOS-menu-only also have a
 //! cross-platform hotkey now: Reset = F6, Export SPC = F8, Slot N = digits
 //! 0-9 (F7 still cycles), Reprise instantanée = F10, Accéléré factor =
-//! `[`/`]`, Confirmation avant de quitter = F11. So the whole feature set
-//! stays reachable on platforms without this menu (Windows/Linux).
+//! `[`/`]`, Zoom ×1-×4 = F1-F4, Filtre (cycle) = `V`, Ratio (toggle) = `R`,
+//! Plein écran (toggle) = F11 (also Ctrl+Cmd+F on macOS, the platform's own
+//! fullscreen convention) — freed from `Confirmation avant de quitter`,
+//! which moved to `C` (see `video.rs::handle_key`; still cross-platform, just
+//! a different key). So the whole feature set stays reachable on platforms
+//! without this menu (Windows/Linux).
 //!
 //! Only built for `target_os = "macos"`: this is a macOS-specific menu bar,
 //! not a cross-platform one (Windows/Linux would need `init_for_hwnd`/GTK
@@ -23,10 +27,11 @@
 
 #![cfg(target_os = "macos")]
 
-use muda::accelerator::{Accelerator, Code, CMD_OR_CTRL};
+use muda::accelerator::{Accelerator, Code, Modifiers, CMD_OR_CTRL};
 use muda::{AboutMetadata, CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
 use crate::prefs::Prefs;
+use crate::render::{Aspect, Filter};
 use crate::{APP_NAME, VERSION};
 
 /// Stable ids for the items `video.rs` dispatches on after a
@@ -52,6 +57,31 @@ pub const FF_X3_ID: &str = "prisme.ff-x3";
 pub const FF_X4_ID: &str = "prisme.ff-x4";
 pub const CONFIRM_QUIT_ID: &str = "prisme.confirm-quit";
 pub const QUIT_ID: &str = "prisme.quit";
+pub const ZOOM_X1_ID: &str = "prisme.zoom-x1";
+pub const ZOOM_X2_ID: &str = "prisme.zoom-x2";
+pub const ZOOM_X3_ID: &str = "prisme.zoom-x3";
+pub const ZOOM_X4_ID: &str = "prisme.zoom-x4";
+pub const FILTER_NONE_ID: &str = "prisme.filter-none";
+pub const FILTER_SMOOTH_ID: &str = "prisme.filter-smooth";
+pub const FILTER_CRT_ID: &str = "prisme.filter-crt";
+pub const ASPECT_PIXEL_PERFECT_ID: &str = "prisme.aspect-pixel-perfect";
+pub const ASPECT_TV_ID: &str = "prisme.aspect-tv";
+pub const FULLSCREEN_ID: &str = "prisme.fullscreen";
+
+/// `Affichage > Zoom` choices, paired with their menu-item id and the zoom
+/// factor `App::set_zoom` applies on a click (F1-F4 offer the same set — see
+/// `video.rs::handle_key`).
+pub const ZOOM_FACTORS: &[(u8, &str)] =
+    &[(1, ZOOM_X1_ID), (2, ZOOM_X2_ID), (3, ZOOM_X3_ID), (4, ZOOM_X4_ID)];
+
+/// `Affichage > Filtre` choices, paired with their menu-item id. Order
+/// matches `render::Filter::next`'s cycle (the `V` hotkey).
+pub const FILTER_ITEMS: &[(Filter, &str)] =
+    &[(Filter::None, FILTER_NONE_ID), (Filter::Smooth, FILTER_SMOOTH_ID), (Filter::Crt, FILTER_CRT_ID)];
+
+/// `Affichage > Ratio` choices, paired with their menu-item id.
+pub const ASPECT_ITEMS: &[(Aspect, &str)] =
+    &[(Aspect::PixelPerfect, ASPECT_PIXEL_PERFECT_ID), (Aspect::Tv, ASPECT_TV_ID)];
 
 /// Fast-forward factors offered in `Émulation > Accéléré`, paired with the id
 /// of their menu item. `video.rs` maps a click back to the factor with this
@@ -115,6 +145,18 @@ pub struct AppMenu {
     pub ff_items: Vec<CheckMenuItem>,
     /// `Fichier > Demander confirmation avant de quitter`.
     pub confirm_quit: CheckMenuItem,
+    /// `Affichage > Zoom` choices, in `ZOOM_FACTORS` order. Radio group, like
+    /// `ff_items`/`slot_items`.
+    pub zoom_items: Vec<CheckMenuItem>,
+    /// `Affichage > Filtre` choices, in `FILTER_ITEMS` order.
+    pub filter_items: Vec<CheckMenuItem>,
+    /// `Affichage > Ratio` choices, in `ASPECT_ITEMS` order.
+    pub aspect_items: Vec<CheckMenuItem>,
+    /// `Affichage > Plein écran` (F11, also Ctrl+Cmd+F on macOS). A plain
+    /// `MenuItem`, not a `CheckMenuItem`: the fullscreen/windowed state is
+    /// visually obvious (the whole screen changes), unlike e.g. mute, so
+    /// there is no checkmark to keep in sync with `Window::fullscreen()`.
+    pub fullscreen: MenuItem,
     /// App-menu (leftmost) Quit, Cmd+Q. A custom item rather than
     /// `PredefinedMenuItem::quit` so its click routes through our
     /// `MenuEvent` channel and we exit the winit loop cleanly (which flushes
@@ -147,6 +189,28 @@ impl AppMenu {
     /// Show the current volume in the disabled `Audio` menu label.
     pub fn set_volume_label(&self, volume: u8) {
         self.volume_label.set_text(volume_label_text(volume));
+    }
+
+    /// Re-derive the `Zoom` radio group from `zoom`, for the same reason as
+    /// `sync_fast_forward`: AppKit only flips the clicked item's checkmark.
+    pub fn sync_zoom(&self, zoom: u8) {
+        for (item, &(value, _)) in self.zoom_items.iter().zip(ZOOM_FACTORS) {
+            item.set_checked(value == zoom);
+        }
+    }
+
+    /// Re-derive the `Filtre` radio group from `filter`.
+    pub fn sync_filter(&self, filter: Filter) {
+        for (item, &(value, _)) in self.filter_items.iter().zip(FILTER_ITEMS) {
+            item.set_checked(value == filter);
+        }
+    }
+
+    /// Re-derive the `Ratio` radio group from `aspect`.
+    pub fn sync_aspect(&self, aspect: Aspect) {
+        for (item, &(value, _)) in self.aspect_items.iter().zip(ASPECT_ITEMS) {
+            item.set_checked(value == aspect);
+        }
     }
 }
 
@@ -357,7 +421,73 @@ pub fn install(prefs: &Prefs) -> AppMenu {
         prefs.show_fps,
         Some(Accelerator::new(Some(CMD_OR_CTRL), Code::KeyF)),
     );
-    let _ = view_menu.append_items(&[&show_fps]);
+    // Zoom radio group: F1-F4 offer the same set, see `video.rs::handle_key`.
+    let zoom_menu = Submenu::new("Zoom", true);
+    let zoom_key_hints = ["F1", "F2", "F3", "F4"];
+    let zoom_items: Vec<CheckMenuItem> = ZOOM_FACTORS
+        .iter()
+        .zip(zoom_key_hints)
+        .map(|(&(factor, id), key)| {
+            CheckMenuItem::with_id(
+                id,
+                format!("×{factor} ({key})"),
+                true,
+                prefs.zoom == factor,
+                None,
+            )
+        })
+        .collect();
+    for item in &zoom_items {
+        let _ = zoom_menu.append(item);
+    }
+    // Filter radio group: `V` cycles through the same three, see
+    // `video.rs::handle_key`.
+    let filter_menu = Submenu::new("Filtre", true);
+    let current_filter = Filter::from_pref(&prefs.filter);
+    let filter_labels = ["Aucun (V)", "Lissé", "CRT"];
+    let filter_items: Vec<CheckMenuItem> = FILTER_ITEMS
+        .iter()
+        .zip(filter_labels)
+        .map(|(&(value, id), label)| {
+            CheckMenuItem::with_id(id, label, true, value == current_filter, None)
+        })
+        .collect();
+    for item in &filter_items {
+        let _ = filter_menu.append(item);
+    }
+    // Aspect-ratio radio group: `R` toggles between the two, see
+    // `video.rs::handle_key`.
+    let aspect_menu = Submenu::new("Ratio", true);
+    let current_aspect = Aspect::from_pref(&prefs.aspect);
+    let aspect_labels = ["Pixel-parfait (1:1) (R)", "TV authentique (8:7)"];
+    let aspect_items: Vec<CheckMenuItem> = ASPECT_ITEMS
+        .iter()
+        .zip(aspect_labels)
+        .map(|(&(value, id), label)| {
+            CheckMenuItem::with_id(id, label, true, value == current_aspect, None)
+        })
+        .collect();
+    for item in &aspect_items {
+        let _ = aspect_menu.append(item);
+    }
+    // Ctrl+Cmd+F: macOS's own system convention for toggling fullscreen
+    // (distinct from the bare F11 the `video.rs` hotkey also answers to,
+    // which some Mac keyboards/OS versions reserve for Mission Control).
+    let fullscreen = MenuItem::with_id(
+        FULLSCREEN_ID,
+        "Plein écran (F11)",
+        true,
+        Some(Accelerator::new(Some(Modifiers::SUPER | Modifiers::CONTROL), Code::KeyF)),
+    );
+    let _ = view_menu.append_items(&[
+        &show_fps,
+        &PredefinedMenuItem::separator(),
+        &zoom_menu,
+        &filter_menu,
+        &aspect_menu,
+        &PredefinedMenuItem::separator(),
+        &fullscreen,
+    ]);
     let _ = menu_bar.append(&view_menu);
 
     menu_bar.init_for_nsapp();
@@ -380,6 +510,10 @@ pub fn install(prefs: &Prefs) -> AppMenu {
         volume_label,
         ff_items,
         confirm_quit,
+        zoom_items,
+        filter_items,
+        aspect_items,
+        fullscreen,
         quit,
         quit_file,
     }
@@ -444,6 +578,10 @@ mod tests {
         ];
         ids.extend(FF_FACTORS.iter().map(|&(_, id)| id));
         ids.extend(SLOT_IDS);
+        ids.extend(ZOOM_FACTORS.iter().map(|&(_, id)| id));
+        ids.extend(FILTER_ITEMS.iter().map(|&(_, id)| id));
+        ids.extend(ASPECT_ITEMS.iter().map(|&(_, id)| id));
+        ids.push(FULLSCREEN_ID);
         let count = ids.len();
         ids.sort_unstable();
         ids.dedup();
@@ -454,5 +592,29 @@ mod tests {
     fn volume_label_shows_percent() {
         assert_eq!(volume_label_text(0), "Volume : 0 %");
         assert_eq!(volume_label_text(100), "Volume : 100 %");
+    }
+
+    #[test]
+    fn zoom_factors_offer_one_through_four() {
+        assert_eq!(ZOOM_FACTORS.iter().map(|&(f, _)| f).collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+        let mut ids: Vec<&str> = ZOOM_FACTORS.iter().map(|&(_, id)| id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), ZOOM_FACTORS.len());
+    }
+
+    #[test]
+    fn filter_items_cover_all_three_filters_and_match_the_cycle_order() {
+        let values: Vec<Filter> = FILTER_ITEMS.iter().map(|&(f, _)| f).collect();
+        assert_eq!(values, vec![Filter::None, Filter::Smooth, Filter::Crt]);
+        // `V` steps through `Filter::next` in this same order.
+        assert_eq!(Filter::None.next(), Filter::Smooth);
+        assert_eq!(Filter::Smooth.next(), Filter::Crt);
+    }
+
+    #[test]
+    fn aspect_items_cover_both_modes() {
+        let values: Vec<Aspect> = ASPECT_ITEMS.iter().map(|&(a, _)| a).collect();
+        assert_eq!(values, vec![Aspect::PixelPerfect, Aspect::Tv]);
     }
 }

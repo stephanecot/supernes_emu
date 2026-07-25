@@ -28,11 +28,22 @@ use crate::input;
 use crate::menu::{self, AppMenu};
 use crate::picker;
 use crate::prefs::Prefs;
+use crate::render::{self, Aspect, Filter};
 use crate::save;
 use crate::{APP_NAME, VERSION};
 
-/// Integer upscale factor for the 256x224 native framebuffer.
+/// Integer upscale factor for the 256x224 native framebuffer, and the
+/// `zoom` preference's default value (see `prefs::Prefs::default`). The
+/// window's *actual* size at any given moment is computed from
+/// `prefs.zoom`/`prefs.aspect` (see `render::zoomed_dims`), clamped to fit
+/// the screen (`render::clamp_to_available`) — this constant only fixes what
+/// a fresh preferences file starts at.
 pub const WINDOW_SCALE: u32 = 3;
+
+/// Shrinks the target window size requested from the primary/current monitor
+/// so it never asks for the literal full screen — leaves headroom for the
+/// menu bar, Dock and window chrome the OS reserves around it.
+const MONITOR_FIT_MARGIN: f64 = 0.92;
 
 /// Wall-clock slack reserved for the spin-wait tail of each frame's pacing
 /// deadline (see module docs).
@@ -113,6 +124,9 @@ pub fn run(
         next_deadline: Instant::now() + frame_duration,
         window: None,
         pixels: None,
+        out_w: 0,
+        out_h: 0,
+        native_buf: vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT * 4],
         pad: JoypadState::default(),
         paused: false,
         frame_advance: false,
@@ -142,6 +156,18 @@ fn window_title(cart_title: &str) -> String {
     format!("{APP_NAME} {VERSION} - {}", cart_title.trim())
 }
 
+/// A monitor's usable logical size for `render::clamp_to_available`: its
+/// physical size converted through its own scale factor, shrunk by
+/// `MONITOR_FIT_MARGIN` so the computed window target never asks for the
+/// literal full screen (menu bar/Dock/window chrome need room too).
+fn logical_monitor_size(monitor: &winit::monitor::MonitorHandle) -> (u32, u32) {
+    let logical: LogicalSize<u32> = monitor.size().to_logical(monitor.scale_factor());
+    (
+        (logical.width as f64 * MONITOR_FIT_MARGIN) as u32,
+        (logical.height as f64 * MONITOR_FIT_MARGIN) as u32,
+    )
+}
+
 struct App {
     title: String,
     snes: Snes,
@@ -158,7 +184,25 @@ struct App {
     /// Absolute wall-clock time the next emulated frame should be presented at.
     next_deadline: Instant,
     window: Option<Arc<Window>>,
+    /// `pixels`' buffer and surface are always the same size — the window's
+    /// current physical size — so its own (nearest-neighbor-only) scaling
+    /// pass is a 1:1 copy; `render::compose_frame` does all zoom/filter/PAR
+    /// work in `about_to_wait` before that copy (see `render` module docs).
     pixels: Option<Pixels<'static>>,
+    /// Current `pixels` buffer/surface size in physical pixels, tracked
+    /// alongside `pixels` itself since `Pixels` exposes no getter for it;
+    /// updated by `apply_resize`.
+    out_w: u32,
+    out_h: u32,
+    /// Reused native `SCREEN_WIDTH`x`SCREEN_HEIGHT` RGBA8 scratch buffer:
+    /// `Snes::framebuffer` converted to RGBA, composed into `pixels`' frame
+    /// by `render::compose_frame` every presented frame. The FPS/status
+    /// overlays are drawn separately, *after* that composition, straight onto
+    /// `pixels`' own (already-scaled) frame — see the "FPS overlay" module
+    /// comment near `draw_overlay_text` for why. Never touched by the
+    /// headless dump paths or the F12 screenshot, which both read
+    /// `snes.framebuffer` directly.
+    native_buf: Vec<u8>,
     /// Player-1 pad state accumulated from keyboard events; player 2 is
     /// unconnected (frontend has no multi-controller UI yet).
     pad: JoypadState,
@@ -243,11 +287,25 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return; // Already initialized; e.g. a redundant resume on some platforms.
         }
-        let size = LogicalSize::new(
-            SCREEN_WIDTH as u32 * WINDOW_SCALE,
-            SCREEN_HEIGHT as u32 * WINDOW_SCALE,
-        );
-        let attrs = Window::default_attributes().with_title(self.title.clone()).with_inner_size(size);
+        let aspect = Aspect::from_pref(&self.prefs.aspect);
+        let target = render::zoomed_dims(self.prefs.zoom, aspect);
+        // Bound the initial window to the primary monitor so a large restored
+        // `zoom` (or a screen smaller than the one the preference was saved
+        // on) can never request an unusable, off-screen-sized window.
+        let max = event_loop.primary_monitor().map(|m| logical_monitor_size(&m));
+        let (w, h) = match max {
+            Some(max) => render::clamp_to_available(target, max),
+            None => target,
+        };
+        let size = LogicalSize::new(w, h);
+        // `with_resizable(true)` is winit's own default; set explicitly since
+        // free mouse-drag resizing is a functional requirement here (the
+        // window is *not* fixed to the zoom presets — see `render` module
+        // docs and `WindowEvent::Resized` -> `apply_resize`).
+        let attrs = Window::default_attributes()
+            .with_title(self.title.clone())
+            .with_inner_size(size)
+            .with_resizable(true);
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -258,18 +316,23 @@ impl ApplicationHandler for App {
         };
         let phys = window.inner_size();
         let surface_texture = SurfaceTexture::new(phys.width, phys.height, Arc::clone(&window));
-        let mut pixels =
-            match Pixels::new(SCREEN_WIDTH as u32, SCREEN_HEIGHT as u32, surface_texture) {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("error: create pixels surface: {e}");
-                    event_loop.exit();
-                    return;
-                }
-            };
+        // Buffer size == surface size (both the window's physical size): see
+        // the `pixels` field doc and `render` module docs for why all
+        // zoom/filter/aspect scaling is done by this crate's own CPU code
+        // instead of `pixels`' built-in (nearest-neighbor-only) scaler.
+        let mut pixels = match Pixels::new(phys.width, phys.height, surface_texture) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("error: create pixels surface: {e}");
+                event_loop.exit();
+                return;
+            }
+        };
         // Frame pacing is done manually against a wall-clock deadline; vsync
         // would additionally block on the compositor's own refresh cycle.
         pixels.enable_vsync(false);
+        self.out_w = phys.width;
+        self.out_h = phys.height;
         self.window = Some(window);
         self.pixels = Some(pixels);
         self.next_deadline = Instant::now() + self.frame_duration;
@@ -302,15 +365,7 @@ impl ApplicationHandler for App {
             // (rather than a bare `event_loop.exit()`) so clicking the
             // window's close button can't skip `prefs.confirm_on_quit`.
             WindowEvent::CloseRequested => self.request_quit(event_loop),
-            WindowEvent::Resized(size) => {
-                if size.width > 0 && size.height > 0 {
-                    if let Some(pixels) = &mut self.pixels {
-                        // pixels' scaling renderer keeps the 256x224 buffer at
-                        // the nearest integer scale, letterboxing any remainder.
-                        let _ = pixels.resize_surface(size.width, size.height);
-                    }
-                }
-            }
+            WindowEvent::Resized(size) => self.apply_resize(size),
             WindowEvent::KeyboardInput {
                 event: KeyEvent { physical_key: PhysicalKey::Code(code), state, repeat, .. },
                 ..
@@ -387,13 +442,31 @@ impl ApplicationHandler for App {
         // message triggered from a pause (save/load state, screenshot) is
         // still shown and then disappears on expiry. Only the FPS counter is
         // gated on an emulated frame, since it measures emulation rate.
+        // Native 256x224 conversion happens on `native_buf`, not on `pixels`'
+        // own frame buffer, which is sized to the window instead (see the
+        // `pixels`/`native_buf` field docs). `render::compose_frame` then
+        // does the zoom/filter/PAR scaling into `pixels`' actual frame; the
+        // FPS/status overlays are drawn *after* that, straight onto the
+        // scaled output, so their on-screen size stays constant regardless of
+        // zoom/window size instead of growing with it (see the "FPS overlay"
+        // module comment near `draw_overlay_text`). None of this touches
+        // `snes.framebuffer` itself, so headless `--dump-frame` output and
+        // the F12 screenshot (which both read the core) are unaffected —
+        // this whole block only ever runs on the windowed present path.
+        self.snes.framebuffer.to_rgba(&mut self.native_buf);
         if let Some(pixels) = &mut self.pixels {
+            let filter = Filter::from_pref(&self.prefs.filter);
+            let aspect = Aspect::from_pref(&self.prefs.aspect);
+            render::compose_frame(
+                &self.native_buf,
+                pixels.frame_mut(),
+                self.out_w,
+                self.out_h,
+                filter,
+                aspect,
+            );
+            let (buf_w, buf_h) = (self.out_w as usize, self.out_h as usize);
             let frame = pixels.frame_mut();
-            self.snes.framebuffer.to_rgba(frame);
-            // Overlays are drawn only on the windowed present path, after the
-            // core's own (pure) RGBA conversion — they never touch
-            // `snes.framebuffer` itself, so headless `--dump-frame` output and
-            // the F12 screenshot (which both read the core) are unaffected.
             if self.prefs.show_fps {
                 let measured = self.fps_counter.fps();
                 let target = 1.0 / self.frame_duration.as_secs_f64();
@@ -405,11 +478,13 @@ impl ApplicationHandler for App {
                 } else {
                     [255, 70, 70, 255]
                 };
-                let text = format!("FPS{:.0}/{:.0}", measured, target);
-                draw_overlay_text(frame, &text, color);
+                // Space between the "FPS" label and the numbers so the
+                // readout doesn't read as one run-together token.
+                let text = format!("FPS {:.0}/{:.0}", measured, target);
+                draw_overlay_text(frame, buf_w, buf_h, &text, color);
             }
             if let Some((text, _)) = &self.status {
-                draw_status_text(frame, text, STATUS_COLOR);
+                draw_status_text(frame, buf_w, buf_h, text, STATUS_COLOR);
             }
         }
         // Always request a redraw, even while paused, so the compositor keeps
@@ -433,6 +508,15 @@ impl App {
         // Hotkeys act on the initial press only (ignore key-repeat).
         if pressed && !repeat {
             match code {
+                // Convention: Escape first backs out of fullscreen (if
+                // active) rather than quitting straight away — matches every
+                // desktop OS's expected behavior for a fullscreen app/game.
+                // A second Escape (now windowed) falls through to the normal
+                // quit-confirmation path.
+                KeyCode::Escape if self.is_fullscreen() => {
+                    self.set_fullscreen(false);
+                    return;
+                }
                 KeyCode::Escape => {
                     self.request_quit(event_loop);
                     return;
@@ -463,6 +547,25 @@ impl App {
                     self.open_rom_dialog();
                     return;
                 }
+                // `Affichage > Zoom > ×N` (macOS-only menu): set the window
+                // zoom directly, F1-F4 for x1-x4 — chosen over Ctrl+/- so it
+                // doesn't collide with the existing Ctrl+/- volume hotkeys.
+                KeyCode::F1 => {
+                    self.set_zoom(1);
+                    return;
+                }
+                KeyCode::F2 => {
+                    self.set_zoom(2);
+                    return;
+                }
+                KeyCode::F3 => {
+                    self.set_zoom(3);
+                    return;
+                }
+                KeyCode::F4 => {
+                    self.set_zoom(4);
+                    return;
+                }
                 KeyCode::F5 => {
                     self.save_state();
                     return;
@@ -490,9 +593,21 @@ impl App {
                     self.set_resume_on_launch(!self.prefs.resume_on_launch);
                     return;
                 }
-                // `Fichier > Demander confirmation avant de quitter`
-                // (macOS-only menu): same reachability gap as F10.
+                // `Affichage > Plein écran` (macOS-only menu): F11 is the
+                // conventional Windows/Linux fullscreen-toggle key; macOS
+                // additionally gets Ctrl+Cmd+F as a menu accelerator (its own
+                // system convention) — see `menu::install`. This freed F11
+                // from `Demander confirmation avant de quitter`, moved to `C`
+                // below (a rare, opt-in setting; menu-only reachability was
+                // judged an acceptable trade for giving fullscreen the
+                // platform-conventional key).
                 KeyCode::F11 => {
+                    self.set_fullscreen(!self.is_fullscreen());
+                    return;
+                }
+                // `Fichier > Demander confirmation avant de quitter`
+                // (macOS-only menu): moved off F11 (see above).
+                KeyCode::KeyC => {
                     self.set_confirm_on_quit(!self.prefs.confirm_on_quit);
                     return;
                 }
@@ -502,6 +617,18 @@ impl App {
                 }
                 KeyCode::KeyF => {
                     self.toggle_show_fps();
+                    return;
+                }
+                // `Affichage > Filtre` (macOS-only menu): cycles Aucun ->
+                // Lissé -> CRT -> Aucun (`render::Filter::next`).
+                KeyCode::KeyV => {
+                    self.cycle_filter();
+                    return;
+                }
+                // `Affichage > Ratio` (macOS-only menu): toggles
+                // Pixel-parfait <-> TV authentique (`render::Aspect::toggled`).
+                KeyCode::KeyR => {
+                    self.cycle_aspect();
                     return;
                 }
                 // `Émulation > Accéléré > ×N` (macOS-only menu): steps
@@ -711,6 +838,39 @@ impl App {
         #[cfg(target_os = "macos")]
         if let Some(menu) = &self.menu {
             menu.confirm_quit.set_checked(on);
+        }
+    }
+
+    /// Whether the window is currently fullscreen (queried from winit itself
+    /// rather than a mirrored bool on `App`, since `Window::set_fullscreen`
+    /// can resolve asynchronously on some platforms — this always reflects
+    /// what the platform actually reports right now).
+    fn is_fullscreen(&self) -> bool {
+        self.window.as_ref().is_some_and(|w| w.fullscreen().is_some())
+    }
+
+    /// `F11` hotkey / Ctrl+Cmd+F / `Affichage > Plein écran` (macOS-only
+    /// menu): toggles borderless fullscreen on the window's current monitor.
+    /// Borderless (not exclusive) fullscreen, matching winit's own "idiomatic
+    /// way for fullscreen games to work on macOS" recommendation (see
+    /// `winit::window::Window::set_fullscreen`'s doc) — no video-mode
+    /// change, task switching/Spaces keep working.
+    ///
+    /// Deliberately **not** persisted in `prefs`: unlike zoom/filter/aspect,
+    /// starting the next launch already fullscreen would be a surprising
+    /// default for a window a debugger/agent needs to see, and the user
+    /// re-enters it in one keypress anyway.
+    ///
+    /// Entering/leaving fullscreen changes the window's physical size, which
+    /// fires `WindowEvent::Resized`; `apply_resize` (called from there)
+    /// re-letterboxes the content for the new size, same as any other
+    /// resize.
+    fn set_fullscreen(&mut self, on: bool) {
+        let Some(window) = &self.window else { return };
+        if on {
+            window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+        } else {
+            window.set_fullscreen(None);
         }
     }
 
@@ -980,6 +1140,123 @@ impl App {
         }
     }
 
+    /// F1-F4 hotkeys / `Affichage > Zoom > ×N` (macOS-only menu): sets the
+    /// window's integer upscale factor and resizes the window to match.
+    /// Clamped to 1..=4 (the range the menu/hotkeys offer; `Prefs::sanitize`
+    /// separately allows up to 8 for a hand-edited file, which this cannot
+    /// reach through the UI).
+    fn set_zoom(&mut self, zoom: u8) {
+        let zoom = zoom.clamp(1, 4);
+        if self.prefs.zoom == zoom {
+            return;
+        }
+        self.prefs.zoom = zoom;
+        self.prefs.save();
+        self.resize_window_for_display_prefs();
+        #[cfg(target_os = "macos")]
+        if let Some(menu) = &self.menu {
+            menu.sync_zoom(zoom);
+        }
+    }
+
+    /// `V` hotkey / `Affichage > Filtre` (macOS-only menu): applies and
+    /// persists the presentation filter. Purely a rendering setting — no
+    /// resize needed, `render::compose_frame` reads it every presented
+    /// frame.
+    fn set_filter(&mut self, filter: Filter) {
+        let value = filter.as_pref();
+        if self.prefs.filter == value {
+            return;
+        }
+        self.prefs.filter = value.to_string();
+        self.prefs.save();
+        #[cfg(target_os = "macos")]
+        if let Some(menu) = &self.menu {
+            menu.sync_filter(filter);
+        }
+    }
+
+    /// `V` hotkey: steps `Aucun -> Lissé -> CRT -> Aucun`
+    /// (`render::Filter::next`), independent of the current window size.
+    fn cycle_filter(&mut self) {
+        let current = Filter::from_pref(&self.prefs.filter);
+        self.set_filter(current.next());
+    }
+
+    /// `R` hotkey / `Affichage > Ratio` (macOS-only menu): applies and
+    /// persists the pixel-aspect-ratio mode, then resizes the window since
+    /// the content's native (pre-zoom) size depends on it (`Aspect::Tv`
+    /// stretches the width — see `render::content_dims`).
+    fn set_aspect(&mut self, aspect: Aspect) {
+        let value = aspect.as_pref();
+        if self.prefs.aspect == value {
+            return;
+        }
+        self.prefs.aspect = value.to_string();
+        self.prefs.save();
+        self.resize_window_for_display_prefs();
+        #[cfg(target_os = "macos")]
+        if let Some(menu) = &self.menu {
+            menu.sync_aspect(aspect);
+        }
+    }
+
+    /// `R` hotkey: toggles Pixel-parfait <-> TV authentique
+    /// (`render::Aspect::toggled`).
+    fn cycle_aspect(&mut self) {
+        let current = Aspect::from_pref(&self.prefs.aspect);
+        self.set_aspect(current.toggled());
+    }
+
+    /// Resizes the window to `render::zoomed_dims(prefs.zoom, prefs.aspect)`,
+    /// clamped to fit the window's current monitor (`render::
+    /// clamp_to_available`) so a large zoom/TV-ratio combination can never
+    /// request an unusable, off-screen-sized window. Called after `set_zoom`
+    /// and `set_aspect`; `set_filter` never resizes, since a filter doesn't
+    /// change the content's target size.
+    fn resize_window_for_display_prefs(&mut self) {
+        let Some(window) = &self.window else { return };
+        let aspect = Aspect::from_pref(&self.prefs.aspect);
+        let target = render::zoomed_dims(self.prefs.zoom, aspect);
+        let max = window.current_monitor().map(|m| logical_monitor_size(&m));
+        let (w, h) = match max {
+            Some(max) => render::clamp_to_available(target, max),
+            None => target,
+        };
+        // `request_inner_size` resolves synchronously on some platforms (no
+        // `WindowEvent::Resized` follows in that case, per winit's own doc on
+        // the method) and asynchronously on others (a `Resized` event follows
+        // and `window_event` calls `apply_resize` from there) — handle both:
+        // apply immediately when winit already computed the new size, do
+        // nothing otherwise and let the event arrive.
+        if let Some(new_size) = window.request_inner_size(LogicalSize::new(w, h)) {
+            self.apply_resize(new_size);
+        }
+    }
+
+    /// Applies a new physical window size to the `pixels` buffer/surface
+    /// (both always equal — see the `pixels` field doc) and records it in
+    /// `out_w`/`out_h`. Called from `WindowEvent::Resized` (any resize,
+    /// including one the user drags) and, when winit resolves it
+    /// synchronously, straight from `resize_window_for_display_prefs`.
+    fn apply_resize(&mut self, size: winit::dpi::PhysicalSize<u32>) {
+        if size.width == 0 || size.height == 0 {
+            return; // Minimized/zero-size transient; nothing to present.
+        }
+        if let Some(pixels) = &mut self.pixels {
+            if let Err(e) = pixels.resize_buffer(size.width, size.height) {
+                eprintln!("error: resize pixel buffer: {e}");
+                return;
+            }
+            if let Err(e) = pixels.resize_surface(size.width, size.height) {
+                eprintln!("error: resize surface: {e}");
+                return;
+            }
+        }
+        self.out_w = size.width;
+        self.out_h = size.height;
+    }
+
     /// Replace `self.snes` with a freshly constructed console for the ROM at
     /// `path`. Persists the outgoing cart's SRAM (via its own `save_path`)
     /// before replacing it, then loads the new cart's `.srm` sidecar the
@@ -1069,6 +1346,24 @@ impl App {
                 .iter()
                 .position(|item| event.id == *item.id())
                 .map(|i| i as u8);
+            let zoom_click: Option<u8> = menu
+                .zoom_items
+                .iter()
+                .zip(menu::ZOOM_FACTORS)
+                .find(|(item, _)| event.id == *item.id())
+                .map(|(_, &(factor, _))| factor);
+            let filter_click: Option<Filter> = menu
+                .filter_items
+                .iter()
+                .zip(menu::FILTER_ITEMS)
+                .find(|(item, _)| event.id == *item.id())
+                .map(|(_, &(value, _))| value);
+            let aspect_click: Option<Aspect> = menu
+                .aspect_items
+                .iter()
+                .zip(menu::ASPECT_ITEMS)
+                .find(|(item, _)| event.id == *item.id())
+                .map(|(_, &(value, _))| value);
             // Quit shares one id across the app-menu and File-menu items; it
             // goes through the same confirmation as Esc.
             if event.id == menu.quit.id() || event.id == menu.quit_file.id() {
@@ -1119,6 +1414,15 @@ impl App {
                 // mirror it rather than toggling again.
                 let checked = menu.show_fps.is_checked();
                 self.set_show_fps(checked);
+            } else if let Some(zoom) = zoom_click {
+                // Radio group, like the fast-forward factors and slots.
+                self.set_zoom(zoom);
+            } else if let Some(filter) = filter_click {
+                self.set_filter(filter);
+            } else if let Some(aspect) = aspect_click {
+                self.set_aspect(aspect);
+            } else if event.id == menu.fullscreen.id() {
+                self.set_fullscreen(!self.is_fullscreen());
             }
         }
     }
@@ -1168,21 +1472,31 @@ fn pace(deadline: &mut Instant, frame_duration: Duration) {
 
 // --- FPS overlay: tiny built-in bitmap font, windowed-present-only ---------
 //
-// Deliberately not a font asset: the overlay only ever needs digits, F/P/S
-// and '/', so a hand-encoded 3x5 glyph table avoids pulling in a font
-// dependency for six on-screen characters. Drawn directly into the `pixels`
-// RGBA8 frame buffer from `about_to_wait`, after `FrameBuffer::to_rgba` —
-// `snes.framebuffer` (the core's own pixel data) is never touched, so this
-// has no effect on headless `--dump-frame`/`--dump-frame-every` output,
-// which reads straight from the core.
+// Deliberately not a font asset: the overlay only ever needs digits, F/P/S,
+// a space and '/', so a hand-encoded 3x5 glyph table avoids pulling in a
+// font dependency for a handful of on-screen characters. Drawn directly into
+// `pixels`' own RGBA8 frame buffer (`out_w`x`out_h`, the window's physical
+// size) from `about_to_wait`, *after* `render::compose_frame` has already
+// scaled/filtered/letterboxed the emulated picture into it — never onto
+// `native_buf` or `snes.framebuffer` (the core's own pixel data), so this has
+// no effect on headless `--dump-frame`/`--dump-frame-every` output, which
+// reads straight from the core, nor on the F12 screenshot.
+//
+// Drawing after scaling (not before) is deliberate: at a `FONT_SCALE` fixed
+// in *output* pixels, the overlay's on-screen size stays constant regardless
+// of the window's zoom/size — a glyph drawn into the native 256x224 buffer
+// before scaling would instead have grown proportionally with zoom (e.g. 4x
+// too big at zoom x4, worse in a maximized/fullscreen window), which is what
+// made the previous native-resolution placement look oversized.
 
 /// Glyph cell size before scaling: 3 columns x 5 rows.
 const GLYPH_W: usize = 3;
 const GLYPH_H: usize = 5;
-/// Each on-screen glyph pixel is drawn as a `FONT_SCALE`x`FONT_SCALE` block;
-/// at 1x a 3px-wide digit would be nearly unreadable on the native 256x224
-/// buffer.
-const FONT_SCALE: usize = 2;
+/// Each on-screen glyph pixel is drawn as a `FONT_SCALE`x`FONT_SCALE` block
+/// of *output* pixels (the overlay is drawn post-scale — see the module
+/// comment above), so 1x keeps the whole overlay small and unobtrusive at
+/// any window size instead of scaling up with zoom.
+const FONT_SCALE: usize = 1;
 /// Horizontal distance (in output pixels) from one glyph's left edge to the
 /// next: glyph width + 1 column of inter-glyph spacing, both scaled.
 const CHAR_ADVANCE: usize = (GLYPH_W + 1) * FONT_SCALE;
@@ -1243,50 +1557,57 @@ fn glyph(c: char) -> [u8; GLYPH_H] {
     }
 }
 
-/// Blits a solid `w`x`h` RGBA rectangle at `(x,y)` into an RGBA8
-/// `SCREEN_WIDTH`x`SCREEN_HEIGHT` frame buffer, clipped to its bounds.
-fn fill_rect(frame: &mut [u8], x: usize, y: usize, w: usize, h: usize, color: [u8; 4]) {
-    for row in y..(y + h).min(SCREEN_HEIGHT) {
-        let row_base = row * SCREEN_WIDTH * 4;
-        for col in x..(x + w).min(SCREEN_WIDTH) {
+/// Blits a solid `w`x`h` RGBA rectangle at `(x,y)` into a `buf_w`x`buf_h`
+/// RGBA8 buffer, clipped to its bounds. `buf_w`/`buf_h` are the *caller's*
+/// buffer dimensions (the window's current physical size, not a fixed
+/// constant — see the module comment above), so the same drawing code works
+/// at any window size.
+fn fill_rect(frame: &mut [u8], buf_w: usize, buf_h: usize, x: usize, y: usize, w: usize, h: usize, color: [u8; 4]) {
+    for row in y..(y + h).min(buf_h) {
+        let row_base = row * buf_w * 4;
+        for col in x..(x + w).min(buf_w) {
             let i = row_base + col * 4;
             frame[i..i + 4].copy_from_slice(&color);
         }
     }
 }
 
-/// Paints `text` into the top-right corner of an RGBA8
-/// `SCREEN_WIDTH`x`SCREEN_HEIGHT` frame buffer over a solid black background
-/// box, so the overlay stays legible against any game content behind it.
-fn draw_overlay_text(frame: &mut [u8], text: &str, color: [u8; 4]) {
-    let Some((box_w, _)) = text_box_size(text) else { return };
-    draw_text_box(frame, SCREEN_WIDTH - OVERLAY_MARGIN - box_w, OVERLAY_MARGIN, text, color);
+/// Paints `text` into the top-right corner of a `buf_w`x`buf_h` RGBA8 buffer
+/// over a solid black background box, so the overlay stays legible against
+/// any game content behind it.
+fn draw_overlay_text(frame: &mut [u8], buf_w: usize, buf_h: usize, text: &str, color: [u8; 4]) {
+    let Some((box_w, _)) = text_box_size(text, buf_w, buf_h) else { return };
+    draw_text_box(frame, buf_w, buf_h, buf_w.saturating_sub(OVERLAY_MARGIN + box_w), OVERLAY_MARGIN, text, color);
 }
 
 /// Paints `text` in the bottom-left corner: the transient status messages
 /// (screenshot taken, slot saved/loaded, SPC exported) go there so they never
 /// collide with the FPS readout in the opposite corner.
-fn draw_status_text(frame: &mut [u8], text: &str, color: [u8; 4]) {
-    let Some((_, box_h)) = text_box_size(text) else { return };
-    draw_text_box(frame, OVERLAY_MARGIN, SCREEN_HEIGHT - OVERLAY_MARGIN - box_h, text, color);
+fn draw_status_text(frame: &mut [u8], buf_w: usize, buf_h: usize, text: &str, color: [u8; 4]) {
+    let Some((_, box_h)) = text_box_size(text, buf_w, buf_h) else { return };
+    draw_text_box(frame, buf_w, buf_h, OVERLAY_MARGIN, buf_h.saturating_sub(OVERLAY_MARGIN + box_h), text, color);
 }
 
-/// Background-box size for `text`, or `None` when it cannot fit on screen (the
-/// caller then skips drawing rather than doing out-of-bounds math).
-fn text_box_size(text: &str) -> Option<(usize, usize)> {
+/// Background-box size for `text` in a `buf_w`x`buf_h` buffer, or `None` when
+/// it cannot fit (the caller then skips drawing rather than doing
+/// out-of-bounds math). Independent of `buf_w`/`buf_h` except for that fit
+/// check: the box itself is always the same size in output pixels, at any
+/// window size (see the module comment above) — only whether it *fits* can
+/// depend on the buffer.
+fn text_box_size(text: &str, buf_w: usize, buf_h: usize) -> Option<(usize, usize)> {
     let box_w = text.chars().count() * CHAR_ADVANCE + OVERLAY_PAD * 2;
     let box_h = GLYPH_H * FONT_SCALE + OVERLAY_PAD * 2;
-    if box_w > SCREEN_WIDTH || box_h > SCREEN_HEIGHT {
+    if box_w > buf_w || box_h > buf_h {
         return None;
     }
     Some((box_w, box_h))
 }
 
 /// Blits `text` at `(x0, y0)` over a solid black background box.
-fn draw_text_box(frame: &mut [u8], x0: usize, y0: usize, text: &str, color: [u8; 4]) {
-    let Some((box_w, box_h)) = text_box_size(text) else { return };
+fn draw_text_box(frame: &mut [u8], buf_w: usize, buf_h: usize, x0: usize, y0: usize, text: &str, color: [u8; 4]) {
+    let Some((box_w, box_h)) = text_box_size(text, buf_w, buf_h) else { return };
 
-    fill_rect(frame, x0, y0, box_w, box_h, [0, 0, 0, 255]);
+    fill_rect(frame, buf_w, buf_h, x0, y0, box_w, box_h, [0, 0, 0, 255]);
 
     let mut cx = x0 + OVERLAY_PAD;
     let cy = y0 + OVERLAY_PAD;
@@ -1297,7 +1618,7 @@ fn draw_text_box(frame: &mut [u8], x0: usize, y0: usize, text: &str, color: [u8;
                 if bits & (1 << (GLYPH_W - 1 - col)) != 0 {
                     let px = cx + col * FONT_SCALE;
                     let py = cy + row * FONT_SCALE;
-                    fill_rect(frame, px, py, FONT_SCALE, FONT_SCALE, color);
+                    fill_rect(frame, buf_w, buf_h, px, py, FONT_SCALE, FONT_SCALE, color);
                 }
             }
         }
@@ -1323,9 +1644,10 @@ mod overlay_tests {
 
     #[test]
     fn every_character_used_by_a_status_message_has_a_glyph() {
-        // The messages `set_status` can produce, plus the FPS readout.
+        // The messages `set_status` can produce, plus the FPS readout (now
+        // "FPS 60/50" — a space separates the label from the numbers).
         let messages = [
-            "FPS60/50",
+            "FPS 60/50",
             "SLOT 9 SAUVE",
             "SLOT 0 CHARGE",
             "SLOT 3 VIDE",
@@ -1341,7 +1663,10 @@ mod overlay_tests {
             for c in msg.chars().filter(|c| *c != ' ') {
                 assert_ne!(glyph(c), [0; GLYPH_H], "no glyph for {c:?} in {msg:?}");
             }
-            assert!(text_box_size(msg).is_some(), "{msg:?} does not fit on screen");
+            assert!(
+                text_box_size(msg, SCREEN_WIDTH, SCREEN_HEIGHT).is_some(),
+                "{msg:?} does not fit in a 256x224 buffer"
+            );
         }
         // Lowercase folds to uppercase rather than rendering blank.
         assert_eq!(glyph('a'), glyph('A'));
@@ -1351,8 +1676,8 @@ mod overlay_tests {
     #[test]
     fn status_text_is_drawn_bottom_left_and_fps_top_right() {
         let mut frame = vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT * 4];
-        draw_status_text(&mut frame, "SLOT 3 SAUVE", STATUS_COLOR);
-        let (_, box_h) = text_box_size("SLOT 3 SAUVE").expect("fits");
+        draw_status_text(&mut frame, SCREEN_WIDTH, SCREEN_HEIGHT, "SLOT 3 SAUVE", STATUS_COLOR);
+        let (_, box_h) = text_box_size("SLOT 3 SAUVE", SCREEN_WIDTH, SCREEN_HEIGHT).expect("fits");
         // Bottom-left corner of the box is the black background fill.
         let y = SCREEN_HEIGHT - OVERLAY_MARGIN - box_h;
         let idx = (y * SCREEN_WIDTH + OVERLAY_MARGIN) * 4;
@@ -1364,17 +1689,17 @@ mod overlay_tests {
     }
 
     #[test]
-    fn text_too_wide_for_the_screen_is_skipped_instead_of_drawn() {
-        assert_eq!(text_box_size(&"W".repeat(64)), None);
+    fn text_too_wide_for_the_buffer_is_skipped_instead_of_drawn() {
+        assert_eq!(text_box_size(&"W".repeat(64), SCREEN_WIDTH, SCREEN_HEIGHT), None);
         let mut frame = vec![7u8; SCREEN_WIDTH * SCREEN_HEIGHT * 4];
-        draw_status_text(&mut frame, &"W".repeat(64), STATUS_COLOR);
+        draw_status_text(&mut frame, SCREEN_WIDTH, SCREEN_HEIGHT, &"W".repeat(64), STATUS_COLOR);
         assert!(frame.iter().all(|&b| b == 7), "nothing should have been drawn");
     }
 
     #[test]
     fn fill_rect_paints_only_the_target_region() {
         let mut frame = vec![9u8; SCREEN_WIDTH * SCREEN_HEIGHT * 4];
-        fill_rect(&mut frame, 2, 3, 4, 2, [255, 0, 0, 255]);
+        fill_rect(&mut frame, SCREEN_WIDTH, SCREEN_HEIGHT, 2, 3, 4, 2, [255, 0, 0, 255]);
         let idx = |x: usize, y: usize| (y * SCREEN_WIDTH + x) * 4;
         // Inside the 4x2 rect at (2,3): painted red.
         assert_eq!(&frame[idx(2, 3)..idx(2, 3) + 4], &[255, 0, 0, 255]);
@@ -1388,7 +1713,16 @@ mod overlay_tests {
     fn fill_rect_clips_to_frame_bounds_without_panicking() {
         // A rect straddling the bottom-right edge must clip, not index OOB.
         let mut frame = vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT * 4];
-        fill_rect(&mut frame, SCREEN_WIDTH - 2, SCREEN_HEIGHT - 2, 10, 10, [1, 2, 3, 4]);
+        fill_rect(
+            &mut frame,
+            SCREEN_WIDTH,
+            SCREEN_HEIGHT,
+            SCREEN_WIDTH - 2,
+            SCREEN_HEIGHT - 2,
+            10,
+            10,
+            [1, 2, 3, 4],
+        );
         let last = ((SCREEN_HEIGHT - 1) * SCREEN_WIDTH + (SCREEN_WIDTH - 1)) * 4;
         assert_eq!(&frame[last..last + 4], &[1, 2, 3, 4]);
     }
@@ -1397,7 +1731,7 @@ mod overlay_tests {
     fn draw_overlay_text_paints_top_right_box_and_leaves_rest_untouched() {
         let mut frame = vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT * 4];
         let text_color = [80, 255, 80, 255];
-        draw_overlay_text(&mut frame, "FPS60/50", text_color);
+        draw_overlay_text(&mut frame, SCREEN_WIDTH, SCREEN_HEIGHT, "FPS 60/50", text_color);
         // Background box corner near the top-right edge is the black box fill.
         let idx = (OVERLAY_MARGIN * SCREEN_WIDTH + (SCREEN_WIDTH - OVERLAY_MARGIN - 1)) * 4;
         assert_eq!(&frame[idx..idx + 4], &[0, 0, 0, 255]);
@@ -1408,6 +1742,29 @@ mod overlay_tests {
             frame.chunks_exact(4).any(|p| p == text_color),
             "expected at least one lit glyph pixel in the overlay text color"
         );
+    }
+
+    /// The whole point of drawing the overlay *after* scaling (see the "FPS
+    /// overlay" module comment): its on-screen size must not depend on the
+    /// buffer/window size — a zoom x1 window and a maximized/fullscreen one
+    /// get the exact same box in output pixels, not a scaled-up one.
+    #[test]
+    fn overlay_box_size_is_independent_of_the_buffer_size() {
+        let native = text_box_size("FPS 60/50", SCREEN_WIDTH, SCREEN_HEIGHT).expect("fits");
+        // A window several times larger than the native picture (e.g. zoom
+        // x8 or a maximized 4K display).
+        let large = text_box_size("FPS 60/50", 3840, 2160).expect("fits");
+        assert_eq!(native, large);
+    }
+
+    #[test]
+    fn font_scale_is_1x_so_the_overlay_stays_small_in_output_pixels() {
+        // Regression guard for the "l'affichage des FPS est trop gros"
+        // report: each glyph pixel must draw as a single output pixel, not a
+        // multi-pixel block (drawing after scaling — see the module comment —
+        // already keeps the *apparent* size constant across window sizes;
+        // this keeps the *absolute* size small to begin with).
+        assert_eq!(FONT_SCALE, 1);
     }
 }
 

@@ -7,6 +7,7 @@ mod input;
 mod menu;
 mod picker;
 mod prefs;
+mod render;
 mod save;
 mod spc;
 mod state;

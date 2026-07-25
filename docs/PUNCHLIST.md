@@ -62,3 +62,20 @@ Remaining (not blocking boot): deeper Yoshi's Island gameplay past LANGUAGE SELE
 - `--trace-spc` is a no-op: expose an SPC700 trace hook in the APU core (needed for M8 debugging). DO THIS IN M8.
 - `--log-mmio` matches on low-16-bits only, so WRAM shadow writes at `$7E/$7F:21xx`/`:42xx` are logged as FAKE `$21xx/$42xx` register events — actively misleading. Fix: only log when the access is to a real mapped register bank ($00-$3F/$80-$BF). DO THIS IN M8 (audio debugging depends on trustworthy MMIO logs).
 - Frontend prepends `target/debug-out/` to `--trace`/`--dump-frame`; pass BARE filenames to avoid doubled paths.
+
+## Phase 2 — CRT/Lissé coûteux sur une très grande fenêtre (mesuré)
+Le compositing (zoom + filtre + ratio + letterbox) est fait **sur CPU** : `pixels` 0.15 impose
+`FilterMode::Nearest` sans point d'extension public, et monter un second pipeline wgpu/WGSL n'a pas
+été jugé rentable à ce stade. Coûts mesurés (Apple Silicon, release) :
+
+| Fenêtre | Filtre | Coût/image | Verdict |
+|---|---|---|---|
+| 1172x896 (zoom x4, TV) | CRT | 4,1 ms | OK |
+| 3840x2160 (4K plein écran) | Aucun (défaut) | **4,0 ms** | OK |
+| 3840x2160 (4K plein écran) | CRT + TV | **23,4 ms** | dépasse le budget de 20 ms a 50 Hz |
+
+Le défaut (`Aucun`) est sûr à toute taille ; seuls `CRT`/`Lissé` en plein écran 4K posent problème.
+**Correctif suggéré si le cas se présente** : composer l'effet CRT à une résolution intermédiaire
+(~2-3x le natif, ex. 1024x896) puis agrandir au plus proche voisin — visuellement quasi identique
+(les scanlines n'ont pas besoin de la résolution native de l'écran) pour un coût divisé par ~6.
+Alternative plus lourde : un vrai shader wgpu.
