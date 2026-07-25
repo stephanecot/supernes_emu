@@ -298,9 +298,12 @@ where
         // KeyCode's serde impl encodes unit variants as their name ("KeyZ").
         match serde_json::from_value::<KeyCode>(serde_json::Value::String(key.clone())) {
             Ok(code) => match input::reserved_for(code) {
+                // Diagnostic output stays English (see `i18n`), so the
+                // shortcut is named in English whatever the interface speaks.
                 Some(what) => eprintln!(
-                    "prefs: key {key:?} for button {button:?} is an application shortcut ({what}); \
-                     ignored, the button keeps its default key"
+                    "prefs: key {key:?} for button {button:?} is an application shortcut ({}); \
+                     ignored, the button keeps its default key",
+                    what.text(crate::i18n::Lang::En)
                 ),
                 None => {
                     map.insert(button, code);

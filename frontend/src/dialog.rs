@@ -98,7 +98,7 @@ impl Dialogs {
     /// Open the queued dialog, if any. Must be called from the event loop's own
     /// iteration (`about_to_wait`), never from a place that then keeps running
     /// UI code — on macOS this only *posts* the work, so it returns immediately.
-    pub fn pump(&mut self) {
+    pub fn pump(&mut self, lang: crate::i18n::Lang) {
         if self.on_screen {
             return;
         }
@@ -106,7 +106,7 @@ impl Dialogs {
         self.on_screen = true;
         let tx = self.tx.clone();
         post(move || {
-            let _ = tx.send(run(request));
+            let _ = tx.send(run(request, lang));
         });
     }
 
@@ -124,7 +124,7 @@ impl Dialogs {
 
 /// Show one dialog and turn the choice into an `Answer`. Runs on the main
 /// thread in every case (`post`'s contract), which `NSOpenPanel` requires.
-fn run(request: Request) -> Answer {
+fn run(request: Request, lang: crate::i18n::Lang) -> Answer {
     match request {
         Request::Rom { start } => match crate::picker::pick_rom(&start) {
             Some(path) => Answer::Rom(path),
@@ -135,19 +135,19 @@ fn run(request: Request) -> Answer {
             None => Answer::Cancelled,
         },
         Request::LibraryDir { current } => {
-            match crate::picker::pick_dir("Dossier des ROMs", &current) {
+            match crate::picker::pick_dir(crate::i18n::Msg::RomFolder.text(lang), &current) {
                 Some(dir) => Answer::LibraryDir(dir),
                 None => Answer::Cancelled,
             }
         }
         Request::ScreenshotDir { current } => {
-            match crate::picker::pick_dir("Dossier des captures", &current) {
+            match crate::picker::pick_dir(crate::i18n::Msg::ScreenshotFolder.text(lang), &current) {
                 Some(dir) => Answer::ScreenshotDir(dir),
                 None => Answer::Cancelled,
             }
         }
         Request::SaveDir { current } => {
-            match crate::picker::pick_dir("Dossier des sauvegardes", &current) {
+            match crate::picker::pick_dir(crate::i18n::Msg::SaveFolder.text(lang), &current) {
                 Some(dir) => Answer::SaveDir(dir),
                 None => Answer::Cancelled,
             }

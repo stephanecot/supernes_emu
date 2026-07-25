@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 use egui::{Align, Layout, Rect, RichText, Sense, Vec2};
 use snes_core::JoypadState;
 
+use crate::i18n::{self, Lang, Msg};
 use crate::input::{self, Capture, Device};
 use crate::pad;
 use crate::prefs::{Prefs, FAST_FORWARD_FACTORS};
@@ -49,13 +50,27 @@ use super::{Action, Setting};
 /// an expert entry, no longer the head of the list nor the default (which is
 /// resolved from the monitor, see `render::default_zoom`). The window itself
 /// stays freely resizable — these only set a size (see `render::zoomed_dims`).
+/// Labels are the picture each step produces — a machine value, the same in
+/// both languages. Only the native step is named, by `i18n::native_size`.
 pub const ZOOM_CHOICES: &[(u8, &str)] = &[
     (2, "512 × 448"),
     (3, "768 × 672"),
     (4, "1024 × 896"),
     (5, "1280 × 1120"),
-    (1, "Taille native (256 × 224)"),
+    (1, "256 × 224"),
 ];
+
+/// The step whose label is prose rather than a size: the expert entry.
+const NATIVE_ZOOM: u8 = 1;
+
+/// What the ladder shows for one step.
+fn zoom_label(lang: Lang, zoom: u8, dims: &str) -> String {
+    if zoom == NATIVE_ZOOM {
+        i18n::native_size(lang, dims)
+    } else {
+        dims.to_string()
+    }
+}
 
 /// Sizes `F1`-`F4` set, in that order: the four usable steps of the ladder.
 /// The native size deliberately has no hotkey — a key that shrinks the window
@@ -63,12 +78,22 @@ pub const ZOOM_CHOICES: &[(u8, &str)] = &[
 pub const ZOOM_HOTKEYS: [u8; 4] = [2, 3, 4, 5];
 
 /// Display filters, in `render::Filter::next`'s cycle order (the `V` hotkey).
-pub const FILTER_CHOICES: &[(Filter, &str)] =
-    &[(Filter::None, "Aucun"), (Filter::Smooth, "Lissé"), (Filter::Crt, "CRT")];
+pub const FILTER_CHOICES: &[(Filter, Msg)] = &[
+    (Filter::None, Msg::NoneMasculine),
+    (Filter::Smooth, Msg::FilterSmooth),
+    (Filter::Crt, Msg::FilterCrt),
+];
 
 /// Pixel-aspect-ratio modes (the `R` hotkey toggles between the two).
-pub const ASPECT_CHOICES: &[(Aspect, &str)] =
-    &[(Aspect::PixelPerfect, "Pixel-parfait (1:1)"), (Aspect::Tv, "TV authentique (8:7)")];
+pub const ASPECT_CHOICES: &[(Aspect, Msg)] =
+    &[(Aspect::PixelPerfect, Msg::AspectPixel), (Aspect::Tv, Msg::AspectTv)];
+
+/// The three answers the language row offers: follow the host, or one of the
+/// two languages named in its own words (`Lang::endonym`).
+pub fn language_choices() -> [Option<Lang>; 3] {
+    let [first, second] = Lang::ALL;
+    [None, Some(first), Some(second)]
+}
 
 /// Width of the section column on the left, in points. It is a sidebar of the
 /// screen now, so it carries the longest section name ("À propos", "Émulation")
@@ -98,15 +123,22 @@ const NAV_BAR_W: f32 = 3.0;
 /// How far an entry's band is inset from the rail's own edges, so the selected
 /// one reads as a piece laid *on* the rail rather than as a slice of it.
 const NAV_INSET: f32 = 6.0;
-/// Width reserved for a setting's label, so the controls of a section line up.
-const LABEL_W: f32 = 190.0;
-/// Width of the button-name column of the bindings list (`Entrées`).
-const BUTTON_COL_W: f32 = 70.0;
-/// Width of its keyboard column.
-const BIND_COL_W: f32 = 130.0;
-/// Width of its controller column — the widest of the three, since its labels
-/// are the longest ("Gâchette L (LB) / Gâchette L2 (LT)").
-const PAD_COL_W: f32 = 250.0;
+/// Widest a setting's label column is ever drawn. What it *is* drawn at is
+/// measured on the labels of the section actually being shown, in the active
+/// language (`label_column_w`): `Taille de la fenêtre` and `Window size` are
+/// not the same length, and a column sized on either one leaves a hole in the
+/// other or clips it.
+const LABEL_MAX_W: f32 = 190.0;
+/// Gap kept between the longest label and the controls beside it.
+const LABEL_GAP: f32 = 16.0;
+/// Floor of each column of the bindings list, so a short language does not
+/// leave three cramped cells; the widths themselves are measured on the cells
+/// actually rendered (`bind_columns`).
+const BUTTON_COL_MIN_W: f32 = 54.0;
+const BIND_COL_MIN_W: f32 = 96.0;
+const PAD_COL_MIN_W: f32 = 150.0;
+/// Gap between two columns of the list.
+const BIND_COL_GAP: f32 = 16.0;
 /// Height of one line of the bindings list. Every cell is drawn in a box of
 /// exactly this height: a horizontal layout centres each item against the row
 /// height known when it was added, so cells of unequal heights end up
@@ -114,9 +146,7 @@ const PAD_COL_W: f32 = 250.0;
 /// buttons of one line sit on three different baselines, and every line 44
 /// points tall instead of 31.
 const BIND_ROW_H: f32 = 30.0;
-/// Width the three columns of the bindings list need together. What is left of
-/// the content area past it is what the controller drawing may use.
-const BIND_LIST_W: f32 = BUTTON_COL_W + BIND_COL_W + PAD_COL_W;
+
 /// Space between the list and the drawing, and the margin kept between the
 /// drawing and the right edge of the content area.
 const PAD_GAP: f32 = 28.0;
@@ -127,10 +157,7 @@ const PATH_MAX_CHARS: usize = 52;
 const MIN_CONTENT_W: f32 = 130.0;
 /// Length of the volume slider, value box excluded.
 const SLIDER_W: f32 = 280.0;
-/// Keyboard line of the footer. Escape leaves the view for whatever it was
-/// opened from — the library tab that was showing, or the running game — and a
-/// change is written to `prefs.json` as soon as it is made, not on the way out.
-pub const FOOTER_HINT: &str = "Échap : revenir · chaque changement est enregistré aussitôt";
+
 
 /// The panel's sections, in the display order the brief fixes: Affichage ·
 /// Audio · Émulation · Entrées · Dossiers · À propos.
@@ -155,14 +182,18 @@ impl Section {
         Section::About,
     ];
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self, lang: Lang) -> &'static str {
+        self.msg().text(lang)
+    }
+
+    fn msg(self) -> Msg {
         match self {
-            Section::Display => "Affichage",
-            Section::Audio => "Audio",
-            Section::Emulation => "Émulation",
-            Section::Inputs => "Entrées",
-            Section::Folders => "Dossiers",
-            Section::About => "À propos",
+            Section::Display => Msg::SectionDisplay,
+            Section::Audio => Msg::SectionAudio,
+            Section::Emulation => Msg::SectionEmulation,
+            Section::Inputs => Msg::SectionInputs,
+            Section::Folders => Msg::SectionFolders,
+            Section::About => Msg::SectionAbout,
         }
     }
 }
@@ -170,12 +201,12 @@ impl Section {
 /// Name shown for a SNES button in the bindings list. The four directions are
 /// named in French; the eight others carry the legend printed on a real SNES
 /// pad, which is also what the `--script` contract calls them.
-pub fn button_label(name: &str) -> &'static str {
+pub fn button_label(lang: Lang, name: &str) -> &'static str {
     match name {
-        "Up" => "Haut",
-        "Down" => "Bas",
-        "Left" => "Gauche",
-        "Right" => "Droite",
+        "Up" => Msg::ButtonUp.text(lang),
+        "Down" => Msg::ButtonDown.text(lang),
+        "Left" => Msg::ButtonLeft.text(lang),
+        "Right" => Msg::ButtonRight.text(lang),
         "A" => "A",
         "B" => "B",
         "X" => "X",
@@ -190,13 +221,13 @@ pub fn button_label(name: &str) -> &'static str {
 
 /// Text a binding cell shows: the current binding, or the prompt while that
 /// very cell is waiting for a press.
-pub fn binding_cell(current: &str, capturing: bool, device: Device) -> String {
+pub fn binding_cell(lang: Lang, current: &str, capturing: bool, device: Device) -> String {
     if !capturing {
         return current.to_string();
     }
     match device {
-        Device::Keyboard => "Appuyez sur une touche…".to_string(),
-        Device::Gamepad => "Appuyez sur un bouton…".to_string(),
+        Device::Keyboard => Msg::PressAKey.text(lang).to_string(),
+        Device::Gamepad => Msg::PressAButton.text(lang).to_string(),
     }
 }
 
@@ -270,6 +301,9 @@ pub struct SettingsModel<'a> {
     /// rather than in the middle of a game.
     pub pressed: JoypadState,
     pub state: &'a mut SettingsUi,
+    /// Language every string of the panel is rendered in, and the one the
+    /// language row shows as chosen.
+    pub lang: Lang,
 }
 
 /// Widths of the three columns the view is built from — section list, content
@@ -315,7 +349,11 @@ pub fn show(ctx: &egui::Context, model: &mut SettingsModel) -> Action {
         )
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(FOOTER_HINT).size(theme::SIZE_SMALL).color(theme::TEXT_DIM));
+                ui.label(
+                    RichText::new(Msg::SettingsFooter.text(model.lang))
+                        .size(theme::SIZE_SMALL)
+                        .color(theme::TEXT_DIM),
+                );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.label(
                         RichText::new(format!("{} {}", model.app_name, model.version))
@@ -331,7 +369,7 @@ pub fn show(ctx: &egui::Context, model: &mut SettingsModel) -> Action {
             egui::Frame::new().fill(theme::BG_PANEL).inner_margin(egui::Margin::symmetric(24, 16)),
         )
         .show(ctx, |ui| {
-            if let Some(produced) = header(ui) {
+            if let Some(produced) = header(ui, model.lang) {
                 action = produced;
             }
             ui.add_space(10.0);
@@ -339,7 +377,7 @@ pub fn show(ctx: &egui::Context, model: &mut SettingsModel) -> Action {
             // spectral rule under `Réglages` is what says the settings are a
             // view of the shell and not a window laid over it. Choosing another
             // entry leaves for that library tab.
-            if let Some(tab) = tabs::show(ui, Tab::Settings) {
+            if let Some(tab) = tabs::show(ui, Tab::Settings, model.lang) {
                 if tab.is_view() {
                     model.state.capture.cancel();
                     action = Action::ShowLibrary(tab);
@@ -357,7 +395,7 @@ pub fn show(ctx: &egui::Context, model: &mut SettingsModel) -> Action {
 /// Identity header, laid out exactly like the home screen's (same mark, same
 /// type, same heights) so switching between the two moves nothing but the band
 /// below the tabs.
-fn header(ui: &mut egui::Ui) -> Option<Action> {
+fn header(ui: &mut egui::Ui, lang: Lang) -> Option<Action> {
     let mut action = None;
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(super::home::MARK_SIDE), Sense::hover());
@@ -366,12 +404,14 @@ fn header(ui: &mut egui::Ui) -> Option<Action> {
         ui.label(RichText::new("Prisme").font(theme::strong(theme::SIZE_TITLE)).color(theme::TEXT));
         ui.add_space(8.0);
         ui.label(
-            RichText::new("Émulateur Super Nintendo")
+            RichText::new(Msg::AppTagline.text(lang))
                 .font(theme::font(theme::SIZE_SMALL))
                 .color(theme::TEXT_DIM),
         );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if super::icons::button(ui, super::icons::Icon::ArrowLeft, "Retour (Échap)").clicked() {
+            if super::icons::button(ui, super::icons::Icon::ArrowLeft, Msg::BackEsc.text(lang))
+                .clicked()
+            {
                 action = Some(Action::CloseSettings);
             }
         });
@@ -401,7 +441,7 @@ fn body(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
         ui.allocate_ui_with_layout(Vec2::new(nav_w, height), Layout::top_down(Align::Min), |ui| {
             ui.set_min_width(nav_w);
             for section in Section::ALL {
-                if nav_item(ui, section, model.state.section == section).clicked() {
+                if nav_item(ui, section, model.state.section == section, model.lang).clicked() {
                     model.state.section = section;
                     // Leaving the bindings list abandons whatever it was
                     // waiting for: a capture left pending would keep swallowing
@@ -453,7 +493,12 @@ fn body(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
 /// label, so the whole column answers the pointer and the selected section
 /// reads as a place rather than as a highlighted word. The accent bar marks it;
 /// the spectral rule stays spent on the active tab alone.
-fn nav_item(ui: &mut egui::Ui, section: Section, selected: bool) -> egui::Response {
+fn nav_item(
+    ui: &mut egui::Ui,
+    section: Section,
+    selected: bool,
+    lang: Lang,
+) -> egui::Response {
     let (rect, response) = ui.allocate_at_least(
         Vec2::new(ui.available_width(), NAV_ITEM_H),
         Sense::CLICK | Sense::FOCUSABLE,
@@ -485,7 +530,7 @@ fn nav_item(ui: &mut egui::Ui, section: Section, selected: bool) -> egui::Respon
     let colour =
         if selected { theme::TEXT } else { theme::TEXT_DIM.lerp_to_gamma(theme::TEXT, lit) };
     let galley = ui.painter().layout(
-        section.label().to_owned(),
+        section.label(lang).to_owned(),
         font,
         colour,
         (band.width() - 2.0 * NAV_PAD_X).max(1.0),
@@ -511,49 +556,72 @@ fn nav_item(ui: &mut egui::Ui, section: Section, selected: bool) -> egui::Respon
 fn display_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
     let mut action = Action::None;
     let prefs = model.prefs;
+    let lang = model.lang;
+    let label_w = label_column_w(
+        ui,
+        lang,
+        &[Msg::Language, Msg::WindowSize, Msg::Filter, Msg::Aspect, Msg::Fullscreen,
+          Msg::FrameCounter],
+    );
 
-    row(ui, "Taille de la fenêtre", |ui| {
-        for &(zoom, label) in ZOOM_CHOICES {
-            if ui.selectable_label(model.zoom == zoom, label).clicked() {
+    // First thing in the section, before anything else: this is what someone
+    // looks for when they cannot read the screen they are standing on, and a
+    // language row further down would already be unreadable by then.
+    row(ui, Msg::Language.text(lang), label_w, |ui| {
+        for choice in language_choices() {
+            // Endonyms: nobody looks for "Anglais" in order to switch to
+            // English. The `system` entry is the only one named in the
+            // interface's own language, since it names a behaviour.
+            let label = match choice {
+                None => Msg::LanguageSystem.text(lang),
+                Some(other) => other.endonym(),
+            };
+            let selected = Lang::from_pref(&prefs.language) == choice;
+            if ui.selectable_label(selected, label).clicked() {
+                action = Action::Set(Setting::Language(choice));
+            }
+        }
+    });
+
+    row(ui, Msg::WindowSize.text(lang), label_w, |ui| {
+        for &(zoom, dims) in ZOOM_CHOICES {
+            if ui.selectable_label(model.zoom == zoom, zoom_label(lang, zoom, dims)).clicked() {
                 action = Action::Set(Setting::Zoom(zoom));
             }
         }
     });
-    hint(
-        ui,
-        "La fenêtre reste librement redimensionnable ; ces paliers fixent une taille (F1-F4). Sans choix, elle s'ouvre à la plus grande taille confortable sur cet écran.",
-    );
+    hint(ui, Msg::WindowSizeHint.text(lang));
 
     let filter = Filter::from_pref(&prefs.filter);
-    row(ui, "Filtre", |ui| {
+    row(ui, Msg::Filter.text(lang), label_w, |ui| {
         for &(value, label) in FILTER_CHOICES {
-            if ui.selectable_label(filter == value, label).clicked() {
+            if ui.selectable_label(filter == value, label.text(lang)).clicked() {
                 action = Action::Set(Setting::Filter(value));
             }
         }
     });
 
     let aspect = Aspect::from_pref(&prefs.aspect);
-    row(ui, "Ratio", |ui| {
+    row(ui, Msg::Aspect.text(lang), label_w, |ui| {
         for &(value, label) in ASPECT_CHOICES {
-            if ui.selectable_label(aspect == value, label).clicked() {
+            if ui.selectable_label(aspect == value, label.text(lang)).clicked() {
                 action = Action::Set(Setting::Aspect(value));
             }
         }
     });
-    hint(ui, "L'image n'est jamais déformée : bandes noires si la fenêtre ne tombe pas juste.");
+    hint(ui, Msg::AspectHint.text(lang));
 
-    row(ui, "Plein écran", |ui| {
+    row(ui, Msg::Fullscreen.text(lang), label_w, |ui| {
         let mut on = model.fullscreen;
-        if checkbox(ui, &mut on, "Occuper tout l'écran (F11)").changed() {
+        if checkbox(ui, &mut on, Msg::FullscreenCheck.text(lang)).changed() {
             action = Action::Set(Setting::Fullscreen(on));
         }
     });
-    hint(ui, "Non mémorisé : l'application démarre toujours en fenêtré.");
+    hint(ui, Msg::FullscreenHint.text(lang));
 
-    row(ui, "Compteur d'images", |ui| {
+    row(ui, Msg::FrameCounter.text(lang), label_w, |ui| {
         let mut on = prefs.show_fps;
-        if checkbox(ui, &mut on, "Afficher les FPS (F)").changed() {
+        if checkbox(ui, &mut on, Msg::ShowFpsCheck.text(lang)).changed() {
             action = Action::Set(Setting::ShowFps(on));
         }
     });
@@ -564,15 +632,17 @@ fn display_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
 fn audio_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
     let mut action = Action::None;
     let prefs = model.prefs;
+    let lang = model.lang;
+    let label_w = label_column_w(ui, lang, &[Msg::Mute, Msg::Volume]);
 
-    row(ui, "Muet", |ui| {
+    row(ui, Msg::Mute.text(lang), label_w, |ui| {
         let mut on = prefs.mute;
-        if checkbox(ui, &mut on, "Couper le son (M)").changed() {
+        if checkbox(ui, &mut on, Msg::MuteCheck.text(lang)).changed() {
             action = Action::Set(Setting::Mute(on));
         }
     });
 
-    row(ui, "Volume", |ui| {
+    row(ui, Msg::Volume.text(lang), label_w, |ui| {
         let mut volume = prefs.volume;
         // egui's default slider is 100 points long, which in a reading column
         // this wide reads as a stub and gives one point of gain per point of
@@ -586,7 +656,7 @@ fn audio_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
             action = Action::Set(Setting::Volume(volume));
         }
     });
-    hint(ui, "Le son est coupé pendant l'accéléré ; le volume choisi ici revient à sa libération.");
+    hint(ui, Msg::VolumeHint.text(lang));
 
     action
 }
@@ -602,21 +672,28 @@ fn audio_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
 /// left unbound; the swap is announced under the list.
 fn inputs_section(ui: &mut egui::Ui, model: &mut SettingsModel, reading_w: f32) -> Action {
     let mut action = Action::None;
+    let lang = model.lang;
+    // The three columns are measured on the cells they are about to hold, in
+    // the active language: the button names are prose and shrink in English,
+    // the key names never change (they are the legends printed on the keys),
+    // and the controller labels are the longest of the three in both.
+    let columns = bind_columns(ui, model);
+    let list_w = columns.total();
 
     // Where the drawing goes. Beside the list when the window leaves room for
     // it, which is the point of the reading column being bounded; otherwise
     // *under* it — never squeezed into a strip, and never at the cost of the
     // list, which is what the player came here for.
     let available = ui.available_width();
-    let beside = available - BIND_LIST_W - PAD_GAP >= pad_art::MIN_W;
+    let beside = available - list_w - PAD_GAP >= pad_art::MIN_W;
     let mut pad_rect = None;
     let mut column_w = available.min(reading_w);
     if beside {
-        let size = pad_art::size_for(available - BIND_LIST_W - PAD_GAP);
+        let size = pad_art::size_for(available - list_w - PAD_GAP);
         // The inset is taken out of the *list's* column, so it only ever costs
         // slack: at the narrowest width where the drawing still fits beside the
         // list there is none to give, and the clamp gives it back.
-        column_w = (available - size.x - PAD_GAP - PAD_INSET).clamp(BIND_LIST_W, reading_w);
+        column_w = (available - size.x - PAD_GAP - PAD_INSET).clamp(list_w, reading_w.max(list_w));
         // Centred in whatever is left, so the drawing does not drift to the far
         // edge of a very wide window.
         let free = available - column_w - PAD_GAP;
@@ -652,40 +729,37 @@ fn inputs_section(ui: &mut egui::Ui, model: &mut SettingsModel, reading_w: f32) 
         // size, and a capture prompt the player has to scroll to find would be
         // useless.
         if let Some((button, device)) = model.state.capture.pending() {
-            let what = match device {
-                Device::Keyboard => "une touche",
-                Device::Gamepad => "un bouton de manette",
+            let prompt = match device {
+                Device::Keyboard => i18n::press_a_key_for(lang, button_label(lang, button)),
+                Device::Gamepad => i18n::press_a_pad_button_for(lang, button_label(lang, button)),
             };
-            ui.label(
-                RichText::new(format!(
-                    "Appuyez sur {what} pour {} — Échap pour annuler.",
-                    button_label(button)
-                ))
-                .size(theme::SIZE_BODY)
-                .color(theme::ACCENT),
-            );
+            ui.label(RichText::new(prompt).size(theme::SIZE_BODY).color(theme::ACCENT));
         } else {
-            hint(ui, "Cliquez sur une case — ou sur le bouton dessiné — pour le réaffecter.");
+            hint(ui, Msg::RebindHint.text(lang));
         }
         if let Some(notice) = &model.state.capture.notice {
             ui.label(RichText::new(notice).size(theme::SIZE_SMALL).color(theme::RED));
         }
         ui.add_space(4.0);
-        if ui.button("Rétablir les entrées par défaut").clicked() {
+        if ui.button(Msg::ResetInputs.text(lang)).clicked() {
             action = Action::Set(Setting::ResetInputs);
         }
         ui.add_space(8.0);
 
         ui.horizontal(|ui| {
-            bind_cell(ui, BUTTON_COL_W, |ui| {
-                ui.label(RichText::new("Bouton").size(theme::SIZE_SMALL).color(theme::TEXT_DIM));
-            });
-            bind_cell(ui, BIND_COL_W, |ui| {
-                ui.label(RichText::new("Clavier").size(theme::SIZE_SMALL).color(theme::TEXT_DIM));
-            });
-            bind_cell(ui, PAD_COL_W, |ui| {
-                ui.label(RichText::new("Manette").size(theme::SIZE_SMALL).color(theme::TEXT_DIM));
-            });
+            for (width, header) in [
+                (columns.button, Msg::ColumnButton),
+                (columns.key, Msg::ColumnKeyboard),
+                (columns.pad, Msg::ColumnPad),
+            ] {
+                bind_cell(ui, width, |ui| {
+                    ui.label(
+                        RichText::new(header.text(lang))
+                            .size(theme::SIZE_SMALL)
+                            .color(theme::TEXT_DIM),
+                    );
+                });
+            }
         });
 
         // Tighter than the section's default spacing: twelve rows have to fit
@@ -697,7 +771,7 @@ fn inputs_section(ui: &mut egui::Ui, model: &mut SettingsModel, reading_w: f32) 
             // `input::shown_key`).
             let bound_key = input::shown_key(&model.prefs.keymap, name);
             let key = bound_key.map(input::key_label).unwrap_or_else(|| "—".to_string());
-            let pad_binding = pad::binding_label(&model.prefs.pad_map, name);
+            let pad_binding = pad::binding_label(lang, &model.prefs.pad_map, name);
             if bound_key.is_none() && pad_binding == "—" {
                 unbound.push(name);
             }
@@ -709,16 +783,17 @@ fn inputs_section(ui: &mut egui::Ui, model: &mut SettingsModel, reading_w: f32) 
             let band = ui.painter().add(egui::Shape::Noop);
             let row = ui
                 .horizontal(|ui| {
-                    bind_cell(ui, BUTTON_COL_W, |ui| {
+                    bind_cell(ui, columns.button, |ui| {
                         ui.label(
-                            RichText::new(button_label(name))
+                            RichText::new(button_label(lang, name))
                                 .size(theme::SIZE_BODY)
                                 .color(theme::TEXT),
                         );
                     });
-                    bind_cell(ui, BIND_COL_W, |ui| {
-                        // A key name is what the hardware reports, not prose.
-                        let text = RichText::new(binding_cell(&key, capturing_key, Device::Keyboard))
+                    bind_cell(ui, columns.key, |ui| {
+                        // A key name is the legend printed on the key: never
+                        // translated, in either language (`input::key_label`).
+                        let text = RichText::new(binding_cell(lang, &key, capturing_key, Device::Keyboard))
                             .font(theme::mono(theme::SIZE_MONO));
                         let response = ui.selectable_label(capturing_key, text);
                         if response.clicked() {
@@ -730,9 +805,9 @@ fn inputs_section(ui: &mut egui::Ui, model: &mut SettingsModel, reading_w: f32) 
                             response.surrender_focus();
                         }
                     });
-                    bind_cell(ui, PAD_COL_W, |ui| {
+                    bind_cell(ui, columns.pad, |ui| {
                         let text =
-                            RichText::new(binding_cell(&pad_binding, capturing_pad, Device::Gamepad))
+                            RichText::new(binding_cell(lang, &pad_binding, capturing_pad, Device::Gamepad))
                                 .font(theme::mono(theme::SIZE_MONO));
                         let response = ui.selectable_label(capturing_pad, text);
                         if response.clicked() {
@@ -760,7 +835,7 @@ fn inputs_section(ui: &mut egui::Ui, model: &mut SettingsModel, reading_w: f32) 
             if let Some(fill) = fill {
                 let rect = Rect::from_min_size(
                     row.rect.min,
-                    Vec2::new(BIND_LIST_W.min(row.rect.width()), row.rect.height()),
+                    Vec2::new(list_w.min(row.rect.width()), row.rect.height()),
                 );
                 ui.painter().set(
                     band,
@@ -770,14 +845,8 @@ fn inputs_section(ui: &mut egui::Ui, model: &mut SettingsModel, reading_w: f32) 
         }
 
         ui.add_space(8.0);
-        hint(
-            ui,
-            "Une touche déjà prise par un autre bouton est échangée avec lui ; les raccourcis de l'application (F1-F12, Tab, P, M…) sont refusés.",
-        );
-        hint(
-            ui,
-            "Clavier et manette 1 pilotent le joueur 1, manette 2 le joueur 2. Les sticks et la croix restent toujours actifs sur les directions.",
-        );
+        hint(ui, Msg::ConflictHint.text(lang));
+        hint(ui, Msg::PlayersHint.text(lang));
     });
 
     // The drawing goes under the list when there was no room beside it. Same
@@ -819,7 +888,7 @@ fn inputs_section(ui: &mut egui::Ui, model: &mut SettingsModel, reading_w: f32) 
             // another one.
             ui.ctx().request_repaint();
         }
-        let caption = pad_caption(ui, rect);
+        let caption = pad_caption(ui, rect, lang);
         if !beside {
             // Under the list, the caption is part of the section's own height.
             ui.add_space(caption + 10.0);
@@ -832,17 +901,16 @@ fn inputs_section(ui: &mut egui::Ui, model: &mut SettingsModel, reading_w: f32) 
 /// The line under the drawing. It says what the drawing is for — a controller
 /// tester as much as a map of the bindings — because a picture nobody knows is
 /// live is a picture nobody presses a button at.
-fn pad_caption(ui: &mut egui::Ui, rect: Rect) -> f32 {
+fn pad_caption(ui: &mut egui::Ui, rect: Rect, lang: Lang) -> f32 {
     // A narrow drawing would turn the long form into a six-line paragraph
     // taller than the pad it explains.
     let text = if rect.width() >= pad_art::LEGEND_MIN_W {
-        "Les boutons pressés s'allument : de quoi vérifier une manette sans lancer de jeu. \
-         Clic : réaffecter la touche · clic droit : le bouton de manette."
+        format!("{} {}", Msg::PadArtHint.text(lang), Msg::PadArtClickHint.text(lang))
     } else {
-        "Les boutons pressés s'allument. Clic : réaffecter."
+        Msg::PadArtShort.text(lang).to_string()
     };
     let galley = ui.painter().layout(
-        text.to_string(),
+        text,
         theme::font(theme::SIZE_SMALL),
         theme::TEXT_DIM,
         rect.width(),
@@ -855,8 +923,14 @@ fn pad_caption(ui: &mut egui::Ui, rect: Rect) -> f32 {
 fn emulation_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
     let mut action = Action::None;
     let prefs = model.prefs;
+    let lang = model.lang;
+    let label_w = label_column_w(
+        ui,
+        lang,
+        &[Msg::FastForward, Msg::InstantResume, Msg::Confirmation, Msg::SaveSlot],
+    );
 
-    row(ui, "Accéléré (Tab)", |ui| {
+    row(ui, Msg::FastForward.text(lang), label_w, |ui| {
         for &factor in FAST_FORWARD_FACTORS {
             if ui.selectable_label(prefs.fast_forward_factor == factor, format!("×{factor}")).clicked()
             {
@@ -864,99 +938,97 @@ fn emulation_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
             }
         }
     });
-    hint(ui, "Nombre d'images émulées par image affichée tant que Tab est maintenu.");
+    hint(ui, Msg::FastForwardHint.text(lang));
 
-    row(ui, "Reprise instantanée", |ui| {
+    row(ui, Msg::InstantResume.text(lang), label_w, |ui| {
         let mut on = prefs.resume_on_launch;
-        if checkbox(ui, &mut on, "Reprendre où l'on s'était arrêté (F10)").changed() {
+        if checkbox(ui, &mut on, Msg::InstantResumeCheck.text(lang)).changed() {
             action = Action::Set(Setting::ResumeOnLaunch(on));
         }
     });
-    hint(ui, "L'état de session est écrit à chaque sortie, dans un fichier séparé des slots.");
+    hint(ui, Msg::InstantResumeHint.text(lang));
 
-    row(ui, "Confirmation", |ui| {
+    row(ui, Msg::Confirmation.text(lang), label_w, |ui| {
         let mut on = prefs.confirm_on_quit;
-        if checkbox(ui, &mut on, "Demander avant de quitter (C)").changed() {
+        if checkbox(ui, &mut on, Msg::ConfirmQuitCheck.text(lang)).changed() {
             action = Action::Set(Setting::ConfirmOnQuit(on));
         }
     });
 
-    row(ui, "Slot de sauvegarde", |ui| {
+    row(ui, Msg::SaveSlot.text(lang), label_w, |ui| {
         for slot in 0..SLOT_COUNT {
             if ui.selectable_label(prefs.save_slot == slot, slot.to_string()).clicked() {
                 action = Action::Set(Setting::Slot(slot));
             }
         }
     });
-    hint(ui, "F5 sauvegarde et F9 recharge ce slot ; F7 passe au suivant.");
+    hint(ui, Msg::SaveSlotHint.text(lang));
 
     action
 }
 
 fn folders_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
     let mut action = Action::None;
+    let lang = model.lang;
 
-    ui.label(
-        RichText::new("Dossier des ROMs")
-            .font(theme::strong(theme::SIZE_BODY))
-            .color(theme::TEXT),
-    );
+    folder_heading(ui, Msg::RomFolder.text(lang));
     path_line(ui, &super::home::shorten_path(model.library_dir, PATH_MAX_CHARS));
     ui.horizontal(|ui| {
-        if ui.button("Choisir…").clicked() {
+        if ui.button(Msg::Choose.text(lang)).clicked() {
             action = Action::ChooseLibraryDir;
         }
         if ui
-            .add_enabled(model.prefs.library_dir.is_some(), egui::Button::new("Par défaut"))
+            .add_enabled(
+                model.prefs.library_dir.is_some(),
+                egui::Button::new(Msg::DefaultChoice.text(lang)),
+            )
             .clicked()
         {
             action = Action::ResetLibraryDir;
         }
     });
-    hint(ui, "Dossier analysé par la bibliothèque de l'accueil.");
+    hint(ui, Msg::RomFolderHint.text(lang));
 
     ui.add_space(12.0);
-    ui.label(
-        RichText::new("Dossier des captures")
-            .font(theme::strong(theme::SIZE_BODY))
-            .color(theme::TEXT),
-    );
-    path_line(ui, &screenshot_dir_label(model.prefs.screenshot_dir.as_deref()));
+    folder_heading(ui, Msg::ScreenshotFolder.text(lang));
+    path_line(ui, &screenshot_dir_label(lang, model.prefs.screenshot_dir.as_deref()));
     ui.horizontal(|ui| {
-        if ui.button("Choisir…").clicked() {
+        if ui.button(Msg::Choose.text(lang)).clicked() {
             action = Action::ChooseScreenshotDir;
         }
         if ui
-            .add_enabled(model.prefs.screenshot_dir.is_some(), egui::Button::new("Par défaut"))
+            .add_enabled(
+                model.prefs.screenshot_dir.is_some(),
+                egui::Button::new(Msg::DefaultChoice.text(lang)),
+            )
             .clicked()
         {
             action = Action::ResetScreenshotDir;
         }
     });
-    hint(ui, "Destination de F12 ; la galerie de la fiche de jeu lit le même dossier.");
+    hint(ui, Msg::ScreenshotFolderHint.text(lang));
 
     ui.add_space(12.0);
-    ui.label(
-        RichText::new("Dossier des sauvegardes")
-            .font(theme::strong(theme::SIZE_BODY))
-            .color(theme::TEXT),
-    );
-    path_line(ui, &save_dir_label(model.prefs.save_dir.as_deref()));
+    folder_heading(ui, Msg::SaveFolder.text(lang));
+    path_line(ui, &save_dir_label(lang, model.prefs.save_dir.as_deref()));
     ui.horizontal(|ui| {
-        if ui.button("Choisir…").clicked() {
+        if ui.button(Msg::Choose.text(lang)).clicked() {
             action = Action::ChooseSaveDir;
         }
         if ui
-            .add_enabled(model.prefs.save_dir.is_some(), egui::Button::new("Par défaut"))
+            .add_enabled(
+                model.prefs.save_dir.is_some(),
+                egui::Button::new(Msg::DefaultChoice.text(lang)),
+            )
             .clicked()
         {
             action = Action::ResetSaveDir;
         }
     });
-    hint(ui, SAVE_DIR_HINT);
+    hint(ui, Msg::SaveFolderHint.text(lang));
     if let Some(previous) = &model.prefs.previous_save_dir {
         ui.label(
-            RichText::new(previous_save_dir_line(previous))
+            RichText::new(previous_save_dir_line(lang, previous))
                 .size(theme::SIZE_SMALL)
                 .color(theme::TEXT_DIM),
         );
@@ -974,6 +1046,7 @@ fn folders_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
 
 fn about_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
     let mut action = Action::None;
+    let lang = model.lang;
 
     ui.label(
         RichText::new(model.app_name)
@@ -987,29 +1060,22 @@ fn about_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
     );
     ui.add_space(6.0);
     ui.label(
-        RichText::new("Émulateur Super Nintendo écrit en Rust : cœur d'émulation sans entrées/sorties, interface séparée.")
+        RichText::new(Msg::AboutBlurb.text(lang))
             .size(theme::SIZE_BODY)
             .color(theme::TEXT_DIM),
     );
 
     ui.add_space(12.0);
-    ui.label(
-        RichText::new("Guide pédagogique")
-            .font(theme::strong(theme::SIZE_BODY))
-            .color(theme::TEXT),
-    );
+    folder_heading(ui, Msg::Guide.text(lang));
     match &model.state.guide {
         Some(path) => {
             path_line(ui, &super::home::shorten_path(path, PATH_MAX_CHARS));
-            if ui.button("Ouvrir le PDF").clicked() {
+            if ui.button(Msg::OpenPdf.text(lang)).clicked() {
                 action = Action::OpenGuide;
             }
         }
         None => {
-            hint(
-                ui,
-                "Introuvable près de cette version : le PDF se trouve dans le dépôt, sous docs/emulateur-snes-explique.pdf.",
-            );
+            hint(ui, Msg::GuideMissing.text(lang));
         }
     }
     if let Some(notice) = &model.state.notice {
@@ -1017,16 +1083,12 @@ fn about_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
     }
 
     ui.add_space(12.0);
-    ui.label(
-        RichText::new("Fichiers de l'application")
-            .font(theme::strong(theme::SIZE_BODY))
-            .color(theme::TEXT),
-    );
+    folder_heading(ui, Msg::AppFiles.text(lang));
     match model.config_dir {
         Some(dir) => path_line(ui, &super::home::shorten_path(dir, PATH_MAX_CHARS)),
-        None => hint(ui, "Aucun répertoire de configuration disponible : rien n'est mémorisé."),
+        None => hint(ui, Msg::NoConfigDir.text(lang)),
     }
-    hint(ui, "Préférences, cache de la bibliothèque et miniatures ; supprimables sans rien perdre.");
+    hint(ui, Msg::AppFilesHint.text(lang));
 
     action
 }
@@ -1043,8 +1105,8 @@ fn about_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
 /// panel: `Ratio` offers two choices that are together wider than what is left
 /// of a 560-point panel, and a clipped choice is a setting that cannot be
 /// clicked.
-fn row(ui: &mut egui::Ui, label: &str, controls: impl FnOnce(&mut egui::Ui)) {
-    let label_w = LABEL_W.min(ui.available_width() * 0.5);
+fn row(ui: &mut egui::Ui, label: &str, label_w: f32, controls: impl FnOnce(&mut egui::Ui)) {
+    let label_w = label_w.min(ui.available_width() * 0.5);
     ui.horizontal(|ui| {
         ui.allocate_ui_with_layout(Vec2::new(label_w, 0.0), Layout::left_to_right(Align::Min), |ui| {
             ui.set_min_width(label_w);
@@ -1062,6 +1124,29 @@ fn row(ui: &mut egui::Ui, label: &str, controls: impl FnOnce(&mut egui::Ui)) {
     });
 }
 
+/// Width of a section's label column: the widest of the labels it is about to
+/// render, in the language it is about to render them in, plus a gap — never a
+/// constant sized on one language's longest word.
+fn label_column_w(ui: &egui::Ui, lang: Lang, labels: &[Msg]) -> f32 {
+    let font = theme::font(theme::SIZE_BODY);
+    let widest = labels
+        .iter()
+        .map(|msg| {
+            ui.painter()
+                .layout_no_wrap(msg.text(lang).to_owned(), font.clone(), theme::TEXT)
+                .size()
+                .x
+        })
+        .fold(0.0_f32, f32::max);
+    (widest + LABEL_GAP).ceil().min(LABEL_MAX_W)
+}
+
+/// Heading of a block inside a section (a folder, the guide): the name of what
+/// the lines under it describe.
+fn folder_heading(ui: &mut egui::Ui, text: &str) {
+    ui.label(RichText::new(text).font(theme::strong(theme::SIZE_BODY)).color(theme::TEXT));
+}
+
 /// One cell of the bindings list: a box of fixed width and height, its content
 /// aligned on the middle. The width is what makes the three columns start on
 /// the same vertical line whatever a row contains (`allocate_ui_with_layout`
@@ -1077,6 +1162,64 @@ fn bind_cell(ui: &mut egui::Ui, width: f32, add: impl FnOnce(&mut egui::Ui)) {
             add(ui);
         },
     );
+}
+
+/// Widths of the three columns of the bindings list, for one frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BindColumns {
+    button: f32,
+    key: f32,
+    pad: f32,
+}
+
+impl BindColumns {
+    /// What the three of them need together. Past it is what the controller
+    /// drawing may use.
+    fn total(self) -> f32 {
+        self.button + self.key + self.pad
+    }
+}
+
+/// Measure the three columns on the cells they are about to hold rather than
+/// on a constant: `Bouton`/`Button` and `Gâchette L2 (LT)`/`L trigger (LT)`
+/// are not the same width, and a column sized on the French leaves a gap in
+/// English while one sized on the English clips the French.
+///
+/// The capture prompts are deliberately left out of the measurement: only one
+/// row is ever waiting for a press, and widening all twelve for it would push
+/// the controller drawing off the section for good.
+fn bind_columns(ui: &egui::Ui, model: &SettingsModel) -> BindColumns {
+    let lang = model.lang;
+    let body = theme::font(theme::SIZE_BODY);
+    let small = theme::font(theme::SIZE_SMALL);
+    let mono = theme::mono(theme::SIZE_MONO);
+    let measure = |text: String, font: egui::FontId| {
+        ui.painter().layout_no_wrap(text, font, theme::TEXT).size().x
+    };
+    let mut columns = BindColumns {
+        button: measure(Msg::ColumnButton.text(lang).to_owned(), small.clone()),
+        key: measure(Msg::ColumnKeyboard.text(lang).to_owned(), small.clone()),
+        pad: measure(Msg::ColumnPad.text(lang).to_owned(), small),
+    };
+    for name in input::BUTTONS {
+        let key = input::shown_key(&model.prefs.keymap, name)
+            .map(input::key_label)
+            .unwrap_or_else(|| "—".to_string());
+        columns.button =
+            columns.button.max(measure(button_label(lang, name).to_owned(), body.clone()));
+        columns.key = columns.key.max(measure(key, mono.clone()));
+        columns.pad = columns
+            .pad
+            .max(measure(pad::binding_label(lang, &model.prefs.pad_map, name), mono.clone()));
+    }
+    // The cells are `selectable_label`s, which carry egui's button padding on
+    // both sides; without it the widest binding would touch the next column.
+    let padding = 2.0 * ui.spacing().button_padding.x + BIND_COL_GAP;
+    BindColumns {
+        button: (columns.button + BIND_COL_GAP).ceil().max(BUTTON_COL_MIN_W),
+        key: (columns.key + padding).ceil().max(BIND_COL_MIN_W),
+        pad: (columns.pad + padding).ceil().max(PAD_COL_MIN_W),
+    }
 }
 
 /// A checkbox with the weight the rest of the shell's controls have.
@@ -1127,45 +1270,28 @@ fn path_line(ui: &mut egui::Ui, text: &str) {
 /// What the screenshot folder shows: the chosen one, or where captures go
 /// without it (`App::take_screenshot`'s own fallback). A long path is elided in
 /// its middle so the line never widens the panel.
-pub fn screenshot_dir_label(dir: Option<&Path>) -> String {
+pub fn screenshot_dir_label(lang: Lang, dir: Option<&Path>) -> String {
     match dir {
         Some(dir) => super::home::shorten_path(dir, PATH_MAX_CHARS),
-        None => "À côté de la ROM, dans Screenshots/".to_string(),
+        None => Msg::BesideRomShots.text(lang).to_string(),
     }
 }
 
 /// Same for the save folder (`.srm` battery saves, `.state`/`.stateN` slots and
 /// the `.resume` session state).
-pub fn save_dir_label(dir: Option<&Path>) -> String {
+pub fn save_dir_label(lang: Lang, dir: Option<&Path>) -> String {
     match dir {
         Some(dir) => super::home::shorten_path(dir, PATH_MAX_CHARS),
-        None => "À côté de la ROM".to_string(),
+        None => Msg::BesideRom.text(lang).to_string(),
     }
 }
-
-/// What the save folder does and when. Three facts matter: the folder is read
-/// at *load* time (`video::App::switch_rom` freezes it for the session, so the
-/// running game keeps writing where it read from), an existing save left beside
-/// the ROM is still read when the folder has none (`paths::read_sidecar`) —
-/// nothing is moved or deleted — and the files there are named after the game
-/// (`library::game_id`), which is what keeps two ROM files of the same name
-/// from sharing one save.
-pub const SAVE_DIR_HINT: &str =
-    "Sauvegardes de cartouche (.srm), slots et reprise. Pris en compte au chargement d'un jeu. \
-     Dans un dossier commun, chaque fichier porte le nom du jeu (titre de la cartouche et somme \
-     de contrôle), jamais celui du fichier ROM : deux ROMs homonymes gardent des sauvegardes \
-     distinctes. Une sauvegarde restée à côté de la ROM est toujours relue tant que le dossier \
-     n'en a pas : rien n'est déplacé ni supprimé.";
 
 /// Line shown under the save folder when a folder was configured before the
 /// current setting (`prefs.previous_save_dir`): what it still holds is read,
 /// never written to again, so clearing or changing the folder cannot look like
 /// lost progress.
-pub fn previous_save_dir_line(previous: &Path) -> String {
-    format!(
-        "Dossier précédent, toujours relu : {}",
-        super::home::shorten_path(previous, PATH_MAX_CHARS)
-    )
+pub fn previous_save_dir_line(lang: Lang, previous: &Path) -> String {
+    i18n::previous_save_dir(lang, &super::home::shorten_path(previous, PATH_MAX_CHARS))
 }
 
 #[cfg(test)]
@@ -1229,11 +1355,15 @@ mod tests {
     #[test]
     fn every_section_is_listed_once_with_its_own_label() {
         assert_eq!(Section::ALL.len(), 6);
-        let mut labels: Vec<&str> = Section::ALL.iter().map(|s| s.label()).collect();
+        let mut labels: Vec<&str> = Section::ALL.iter().map(|s| s.label(Lang::Fr)).collect();
         // The order the brief fixes, top to bottom in the section column.
         assert_eq!(
             labels,
             vec!["Affichage", "Audio", "Émulation", "Entrées", "Dossiers", "À propos"]
+        );
+        assert_eq!(
+            Section::ALL.iter().map(|s| s.label(Lang::En)).collect::<Vec<_>>(),
+            vec!["Display", "Audio", "Emulation", "Controls", "Folders", "About"]
         );
         labels.sort_unstable();
         labels.dedup();
@@ -1254,13 +1384,21 @@ mod tests {
             "the ladder must not start at 256x224, and must end there"
         );
         let steps: Vec<u8> = ZOOM_CHOICES[..ZOOM_CHOICES.len() - 1].iter().map(|&(z, _)| z).collect();
-        for &(zoom, label) in ZOOM_CHOICES {
+        for &(zoom, dims) in ZOOM_CHOICES {
             let (w, h) = crate::render::zoomed_dims(zoom, Aspect::PixelPerfect);
-            assert!(label.contains(&w.to_string()), "{label} does not name its width {w}");
-            assert!(label.contains(&h.to_string()), "{label} does not name its height {h}");
-            assert!(!label.starts_with('×'), "{label} still reads as a multiplier");
+            assert!(dims.contains(&w.to_string()), "{dims} does not name its width {w}");
+            assert!(dims.contains(&h.to_string()), "{dims} does not name its height {h}");
+            assert!(!dims.starts_with('×'), "{dims} still reads as a multiplier");
+            // The size itself is a machine value and reads the same in both;
+            // only the native step carries a word, and it carries it in both.
+            for lang in Lang::ALL {
+                let label = zoom_label(lang, zoom, dims);
+                assert!(label.contains(dims), "{label} lost its size");
+                assert_eq!(zoom != NATIVE_ZOOM, label == dims, "{label}");
+            }
         }
-        assert!(ZOOM_CHOICES.last().unwrap().1.starts_with("Taille native"));
+        assert!(zoom_label(Lang::Fr, NATIVE_ZOOM, "256 × 224").starts_with("Taille native"));
+        assert!(zoom_label(Lang::En, NATIVE_ZOOM, "256 × 224").starts_with("Native size"));
         // F1-F4 land on the four usable steps, in the ladder's own order —
         // never on the native one.
         assert_eq!(ZOOM_HOTKEYS.to_vec(), steps);
@@ -1310,15 +1448,20 @@ mod tests {
     #[test]
     fn folder_labels_name_the_fallback_when_nothing_is_configured() {
         assert_eq!(
-            screenshot_dir_label(None),
+            screenshot_dir_label(Lang::Fr, None),
             "À côté de la ROM, dans Screenshots/"
         );
-        assert_eq!(screenshot_dir_label(Some(Path::new("/shots"))), "/shots");
-        assert_eq!(save_dir_label(None), "À côté de la ROM");
-        assert_eq!(save_dir_label(Some(Path::new("/saves"))), "/saves");
+        assert_eq!(
+            screenshot_dir_label(Lang::En, None),
+            "Beside the ROM, in Screenshots/"
+        );
+        assert_eq!(screenshot_dir_label(Lang::Fr, Some(Path::new("/shots"))), "/shots");
+        assert_eq!(save_dir_label(Lang::Fr, None), "À côté de la ROM");
+        assert_eq!(save_dir_label(Lang::En, None), "Beside the ROM");
+        assert_eq!(save_dir_label(Lang::Fr, Some(Path::new("/saves"))), "/saves");
         // A long folder is elided in its middle rather than widening the panel.
         let long = PathBuf::from("/Volumes/Backup").join("a".repeat(80));
-        let label = save_dir_label(Some(&long));
+        let label = save_dir_label(Lang::Fr, Some(&long));
         assert!(label.chars().count() <= PATH_MAX_CHARS, "{label}");
         assert!(label.contains('…'), "{label}");
     }
@@ -1352,6 +1495,17 @@ mod tests {
         (action, text)
     }
 
+    /// The same in one named language, which is what the two-language
+    /// assertions walk.
+    fn draw_in(
+        section: Section,
+        prefs: &Prefs,
+        state: &mut SettingsUi,
+        lang: Lang,
+    ) -> String {
+        draw_full(section, prefs, state, (1280.0, 800.0), JoypadState::default(), lang).1
+    }
+
     /// The same with buttons physically held, which only `Entrées` shows.
     fn draw_pressed(
         prefs: &Prefs,
@@ -1359,7 +1513,7 @@ mod tests {
         pressed: JoypadState,
     ) -> (String, Vec<egui::Shape>) {
         let (_, text, shapes) =
-            draw_full(Section::Inputs, prefs, state, (1280.0, 800.0), pressed);
+            draw_full(Section::Inputs, prefs, state, (1280.0, 800.0), pressed, Lang::Fr);
         (text, shapes)
     }
 
@@ -1373,7 +1527,7 @@ mod tests {
         state: &mut SettingsUi,
         size: (f32, f32),
     ) -> (Action, String, Vec<egui::Shape>) {
-        draw_full(section, prefs, state, size, JoypadState::default())
+        draw_full(section, prefs, state, size, JoypadState::default(), Lang::Fr)
     }
 
     fn draw_full(
@@ -1382,6 +1536,7 @@ mod tests {
         state: &mut SettingsUi,
         size: (f32, f32),
         pressed_buttons: JoypadState,
+        lang: Lang,
     ) -> (Action, String, Vec<egui::Shape>) {
         let ctx = egui::Context::default();
         theme::apply(&ctx);
@@ -1414,6 +1569,7 @@ mod tests {
                         config_dir: Some(Path::new("/config/Prisme")),
                         pressed: pressed_buttons,
                         state,
+                        lang,
                     },
                 );
             });
@@ -1441,7 +1597,8 @@ mod tests {
             let mut state = SettingsUi::default();
             let (_, text, shapes) = draw_at(section, &prefs, &mut state, (1280.0, 800.0));
             for tab in Tab::ALL {
-                assert!(text.contains(tab.label()), "tab {:?} is missing: {text}", tab.label());
+                let label = tab.label(Lang::Fr);
+                assert!(text.contains(label), "tab {label:?} is missing: {text}");
             }
             // The rule is spent once: four segments, under the active tab.
             let segments: Vec<egui::Color32> = shapes
@@ -1451,11 +1608,11 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            assert_eq!(segments, theme::ACCENTS.to_vec(), "{:?}", section.label());
+            assert_eq!(segments, theme::ACCENTS.to_vec(), "{:?}", section.label(Lang::Fr));
             assert!(
                 !shapes.iter().any(|s| matches!(s, egui::Shape::Rect(r) if r.fill == theme::VEIL)),
                 "{:?} still darkens a screen behind it",
-                section.label()
+                section.label(Lang::Fr)
             );
             // …and the footer names the way out.
             assert!(text.contains("Échap"), "{text}");
@@ -1484,7 +1641,7 @@ mod tests {
                 assert!(
                     text.contains(tail),
                     "{:?} is cut off at {size:?}, {tail:?} never painted: {text}",
-                    section.label()
+                    section.label(Lang::Fr)
                 );
             }
         }
@@ -1495,7 +1652,7 @@ mod tests {
             let (_, text, _) = draw_at(Section::Inputs, &prefs, &mut state, size);
             for name in input::BUTTONS {
                 assert!(
-                    text.contains(button_label(name)),
+                    text.contains(button_label(Lang::Fr, name)),
                     "{name} is not visible at {size:?}: {text}"
                 );
             }
@@ -1512,10 +1669,14 @@ mod tests {
         for section in Section::ALL {
             let mut state = SettingsUi::default();
             let (produced, text) = draw(section, &prefs, &mut state);
-            assert_eq!(produced, Action::None, "section {:?}", section.label());
+            assert_eq!(produced, Action::None, "section {:?}", section.label(Lang::Fr));
             assert_eq!(state.section, section, "the section must not change by itself");
             assert!(text.contains("Réglages"), "the panel title is missing: {text}");
-            assert!(text.contains(section.label()), "section {:?} not listed", section.label());
+            assert!(
+                text.contains(section.label(Lang::Fr)),
+                "section {:?} not listed",
+                section.label(Lang::Fr)
+            );
         }
         assert_eq!(prefs, Prefs::default(), "the panel must never write a preference");
     }
@@ -1563,7 +1724,11 @@ mod tests {
             let mut state = SettingsUi::default();
             let (_, text) = draw(section, &prefs, &mut state);
             for label in labels {
-                assert!(text.contains(label), "{:?} is missing {label:?}: {text}", section.label());
+                assert!(
+                    text.contains(label),
+                    "{:?} is missing {label:?}: {text}",
+                    section.label(Lang::Fr)
+                );
             }
         }
     }
@@ -1616,7 +1781,7 @@ mod tests {
         let (_, text) = draw(Section::Folders, &prefs, &mut state);
         assert!(text.contains("Dossier précédent"), "{text}");
         assert!(text.contains("old-saves"), "{text}");
-        assert!(previous_save_dir_line(Path::new("/old-saves")).contains("toujours relu"));
+        assert!(previous_save_dir_line(Lang::Fr, Path::new("/old-saves")).contains("toujours relu"));
     }
 
     /// A binding another button won must not be printed as this one's: the row
@@ -1693,18 +1858,26 @@ mod tests {
     #[test]
     fn every_snes_button_has_a_name_and_a_binding_cell() {
         for name in input::BUTTONS {
-            assert_ne!(button_label(name), "?", "no label for {name}");
+            for lang in Lang::ALL {
+                assert_ne!(button_label(lang, name), "?", "no label for {name}");
+            }
         }
-        assert_eq!(button_label("Turbo"), "?");
+        assert_eq!(button_label(Lang::Fr, "Turbo"), "?");
+        // The eight buttons that carry a printed legend keep it in both.
+        for name in ["A", "B", "X", "Y", "L", "R", "Start", "Select"] {
+            for lang in Lang::ALL {
+                assert_eq!(button_label(lang, name), name);
+            }
+        }
+        assert_eq!(button_label(Lang::En, "Up"), "Up");
+        assert_eq!(button_label(Lang::Fr, "Up"), "Haut");
         // Outside a capture the cell shows the binding itself…
-        assert_eq!(binding_cell("Z", false, Device::Keyboard), "Z");
-        assert_eq!(binding_cell("Bouton bas", false, Device::Gamepad), "Bouton bas");
+        assert_eq!(binding_cell(Lang::Fr, "Z", false, Device::Keyboard), "Z");
+        assert_eq!(binding_cell(Lang::Fr, "Bouton bas", false, Device::Gamepad), "Bouton bas");
         // …and during one, the prompt naming the device it waits for.
-        assert_eq!(binding_cell("Z", true, Device::Keyboard), "Appuyez sur une touche…");
-        assert_eq!(
-            binding_cell("Bouton bas", true, Device::Gamepad),
-            "Appuyez sur un bouton…"
-        );
+        assert_eq!(binding_cell(Lang::Fr, "Z", true, Device::Keyboard), "Touche…");
+        assert_eq!(binding_cell(Lang::Fr, "Bouton bas", true, Device::Gamepad), "Bouton…");
+        assert_eq!(binding_cell(Lang::En, "Z", true, Device::Keyboard), "Key…");
     }
 
     /// The list must show what the *player* bound, not the built-in table: a
@@ -1717,8 +1890,11 @@ mod tests {
         prefs.pad_map.insert("A".to_string(), "North".to_string());
         let mut state = SettingsUi::default();
         let (_, text) = draw(Section::Inputs, &prefs, &mut state);
-        assert!(text.contains("Espace"), "the rebound key is missing: {text}");
-        assert!(text.contains(crate::pad::pad_label(crate::pad::Button::North)), "{text}");
+        assert!(text.contains("Space"), "the rebound key is missing: {text}");
+        assert!(
+            text.contains(crate::pad::pad_label(Lang::Fr, crate::pad::Button::North)),
+            "{text}"
+        );
         // A button left alone still shows its built-in key.
         assert!(text.contains(&input::key_label(KeyCode::KeyZ)), "{text}");
     }
@@ -1764,6 +1940,7 @@ mod tests {
                         config_dir: None,
                         pressed: JoypadState::default(),
                         state: &mut state,
+                        lang: Lang::Fr,
                     },
                 );
             });
@@ -1804,7 +1981,7 @@ mod tests {
             assert!(
                 !theme::ACCENTS.iter().all(|a| fills.contains(a)),
                 "{:?} draws a controller",
-                section.label()
+                section.label(Lang::Fr)
             );
         }
     }
@@ -1885,6 +2062,7 @@ mod tests {
                         config_dir: None,
                         pressed: JoypadState::default(),
                         state,
+                        lang: Lang::Fr,
                     },
                 );
             });
@@ -1959,16 +2137,160 @@ mod tests {
         let mut state = SettingsUi::default();
         state.capture.start("Up", Device::Keyboard);
         let (_, text) = draw(Section::Inputs, &prefs, &mut state);
-        assert!(text.contains("Appuyez sur une touche…"), "{text}");
-        assert!(!text.contains("Flèche haut"), "the row must show the prompt: {text}");
+        assert!(text.contains("Touche…"), "{text}");
+        assert!(!text.contains("Arrow Up"), "the row must show the prompt: {text}");
 
         let mut state = SettingsUi::default();
         state.capture.start("Up", Device::Gamepad);
         state.capture.notice = Some("conflit de test".to_string());
         let (_, text) = draw(Section::Inputs, &prefs, &mut state);
-        assert!(text.contains("Appuyez sur un bouton…"), "{text}");
+        assert!(text.contains("Bouton…"), "{text}");
         assert!(text.contains("Appuyez sur un bouton de manette pour Haut"), "{text}");
         assert!(text.contains("conflit de test"), "{text}");
+    }
+
+    /// The row someone reaches for when they cannot read the screen they are
+    /// on: first in the section, three answers, and the two real languages
+    /// named in their own words.
+    #[test]
+    fn the_language_row_leads_the_display_section_and_names_itself_in_endonyms() {
+        assert_eq!(language_choices(), [None, Some(Lang::Fr), Some(Lang::En)]);
+        let prefs = Prefs::default();
+        for lang in Lang::ALL {
+            let mut state = SettingsUi::default();
+            let text = draw_in(Section::Display, &prefs, &mut state, lang);
+            assert!(text.contains(Msg::Language.text(lang)), "no language row: {text}");
+            // Endonyms, never "Anglais" or "French".
+            assert!(text.contains("Français"), "{text}");
+            assert!(text.contains("English"), "{text}");
+            assert!(!text.contains("Anglais"), "{text}");
+            assert!(text.contains(Msg::LanguageSystem.text(lang)), "{text}");
+            // Above the window-size row, which is what "first in the section"
+            // means once both are painted.
+            let language = text.find(Msg::Language.text(lang)).expect("language row");
+            let size = text.find(Msg::WindowSize.text(lang)).expect("window size row");
+            assert!(language < size, "the language row is not the first one: {text}");
+        }
+    }
+
+    /// The stored preference is what the row shows as chosen, and `system` —
+    /// the default — selects none of the two languages.
+    #[test]
+    fn the_language_row_follows_the_stored_preference() {
+        let mut prefs = Prefs::default();
+        assert_eq!(Lang::from_pref(&prefs.language), None, "no choice is the default");
+        for chosen in [Lang::Fr, Lang::En] {
+            prefs.language = chosen.as_pref().to_string();
+            assert_eq!(Lang::from_pref(&prefs.language), Some(chosen));
+        }
+    }
+
+    /// Every section, in both languages, with the closing line of each: a
+    /// section that fits in French and scrolls its last hint out of sight in
+    /// English is a section nobody has looked at.
+    #[test]
+    fn every_section_is_whole_in_both_languages() {
+        let prefs = Prefs::default();
+        let tails: [(Section, Msg); 6] = [
+            (Section::Display, Msg::ShowFpsCheck),
+            (Section::Audio, Msg::VolumeHint),
+            (Section::Inputs, Msg::PlayersHint),
+            (Section::Emulation, Msg::SaveSlotHint),
+            (Section::Folders, Msg::SaveFolderHint),
+            (Section::About, Msg::AppFilesHint),
+        ];
+        for lang in Lang::ALL {
+            for (section, tail) in tails {
+                let mut state = SettingsUi::default();
+                let text = draw_in(section, &prefs, &mut state, lang);
+                // Long hints wrap, so the painted text carries them in pieces:
+                // the first words are enough to say the line was reached.
+                let head: String = tail.text(lang).split_whitespace().take(3).collect::<Vec<_>>().join(" ");
+                assert!(
+                    text.contains(&head),
+                    "{:?} is cut off in {lang}: {head:?} never painted: {text}",
+                    section.label(lang)
+                );
+                assert!(text.contains(section.label(lang)), "{text}");
+            }
+        }
+    }
+
+    /// The English capture must hold no French at all — the failure mode of a
+    /// half-threaded language is precisely a screen where three labels out of
+    /// twenty stayed behind.
+    #[test]
+    fn nothing_french_survives_in_an_english_section() {
+        let prefs = Prefs::default();
+        for section in Section::ALL {
+            let mut state = SettingsUi::default();
+            let text = draw_in(section, &prefs, &mut state, Lang::En);
+            for french in [
+                "Réglages",
+                "Affichage",
+                "Entrées",
+                "Émulation",
+                "Échap",
+                "Retour",
+                "Taille",
+                "Dossier",
+                "Aucun",
+                "Manette",
+                "Bouton",
+            ] {
+                assert!(
+                    !text.contains(french),
+                    "{:?} still says {french:?} in English: {text}",
+                    section.label(Lang::En)
+                );
+            }
+        }
+    }
+
+    /// The three columns of the bindings list are measured on what they hold,
+    /// so they follow the language instead of being sized for French and left
+    /// gaping in English.
+    #[test]
+    fn the_bindings_columns_are_measured_in_the_language_they_render() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let prefs = Prefs::default();
+        let mut widths = Vec::new();
+        for lang in Lang::ALL {
+            let mut state = SettingsUi::default();
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let model = SettingsModel {
+                        app_name: "Prisme",
+                        version: "0.0.0",
+                        prefs: &prefs,
+                        fullscreen: false,
+                        zoom: crate::render::FALLBACK_ZOOM,
+                        library_dir: Path::new("roms"),
+                        config_dir: None,
+                        pressed: JoypadState::default(),
+                        state: &mut state,
+                        lang,
+                    };
+                    widths.push(bind_columns(ui, &model));
+                });
+            });
+        }
+        let (fr, en) = (widths[0], widths[1]);
+        // `Haut`/`Bas`/`Gauche`/`Droite` are longer than `Up`/`Down`/`Left`/
+        // `Right`, so the button column gives ground in English…
+        assert!(en.button < fr.button, "{fr:?} vs {en:?}");
+        // …while the key column does not move at all: key names are the
+        // legends printed on the keys and are never translated.
+        assert_eq!(en.key, fr.key, "a key name changed with the language");
+        // Every column stays above its floor, and the three of them are the
+        // list's width.
+        for columns in [fr, en] {
+            assert!(columns.button >= BUTTON_COL_MIN_W, "{columns:?}");
+            assert!(columns.key >= BIND_COL_MIN_W, "{columns:?}");
+            assert!(columns.pad >= PAD_COL_MIN_W, "{columns:?}");
+            assert_eq!(columns.total(), columns.button + columns.key + columns.pad);
+        }
     }
 
     /// The About section has two shapes (guide found / not found) and both must
@@ -2002,6 +2324,7 @@ mod tests {
                         config_dir: None,
                         pressed: JoypadState::default(),
                         state: &mut state,
+                        lang: Lang::Fr,
                     },
                 );
             });

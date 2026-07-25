@@ -31,6 +31,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use snes_core::{Cartridge, Mapping, Region};
 
+use crate::i18n::{Lang, Msg};
 use crate::prefs::{GameStats, Prefs};
 
 /// File extensions the library picks up, matching what `load_rom_bytes` can
@@ -453,10 +454,10 @@ impl SortMode {
         }
     }
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self, lang: Lang) -> &'static str {
         match self {
-            SortMode::Title => "Titre",
-            SortMode::Recent => "Récemment joué",
+            SortMode::Title => Msg::SortTitle.text(lang),
+            SortMode::Recent => Msg::SortRecent.text(lang),
         }
     }
 
@@ -539,36 +540,42 @@ pub fn arrange<'a>(
 
 // --- formatting -----------------------------------------------------------
 
-/// Human size in French units (Ko/Mo), one decimal above 1 Mo.
-pub fn format_size(bytes: u64) -> String {
+/// Human size, in each language's own units and decimal mark: `2,0 Mo` reads
+/// as a typo in English and `2.0 MB` reads as one in French.
+pub fn format_size(lang: Lang, bytes: u64) -> String {
     const KO: u64 = 1024;
     const MO: u64 = 1024 * 1024;
+    let (mega, kilo, byte, point) = match lang {
+        Lang::Fr => ("Mo", "Ko", "o", ","),
+        Lang::En => ("MB", "KB", "B", "."),
+    };
     if bytes >= MO {
         let mo = bytes as f64 / MO as f64;
-        format!("{:.1} Mo", mo).replace('.', ",")
+        format!("{mo:.1} {mega}").replace('.', point)
     } else if bytes >= KO {
-        format!("{} Ko", bytes / KO)
+        format!("{} {kilo}", bytes / KO)
     } else {
-        format!("{bytes} o")
+        format!("{bytes} {byte}")
     }
 }
 
 /// Battery SRAM line of the game sheet.
-pub fn format_sram(bytes: u64) -> String {
+pub fn format_sram(lang: Lang, bytes: u64) -> String {
     if bytes == 0 {
-        "Aucune".to_string()
+        Msg::NoneFeminine.text(lang).to_string()
     } else {
-        format_size(bytes)
+        format_size(lang, bytes)
     }
 }
 
-/// Cumulated play time, rounded down to the minute above one hour.
-pub fn format_play_time(seconds: u64) -> String {
+/// Cumulated play time, rounded down to the minute above one hour. Only the
+/// two sentences are prose; `20 min` and `4 h 30` read the same either way.
+pub fn format_play_time(lang: Lang, seconds: u64) -> String {
     if seconds == 0 {
-        return "Jamais joué".to_string();
+        return Msg::NeverPlayed.text(lang).to_string();
     }
     if seconds < 60 {
-        return "moins d'une minute".to_string();
+        return Msg::LessThanAMinute.text(lang).to_string();
     }
     let minutes = seconds / 60;
     if minutes < 60 {
@@ -577,10 +584,19 @@ pub fn format_play_time(seconds: u64) -> String {
     format!("{} h {:02}", minutes / 60, minutes % 60)
 }
 
-/// Local calendar date/time of a Unix timestamp, `JJ/MM/AAAA HH:MM`.
-pub fn format_date(unix: i64) -> String {
+/// Local calendar date/time of a Unix timestamp: `JJ/MM/AAAA HH:MM` in French,
+/// and ISO `AAAA-MM-JJ HH:MM` in English — never `MM/DD`, which the two halves
+/// of the English-speaking world read differently.
+pub fn format_date(lang: Lang, unix: i64) -> String {
     let t = crate::local_time(unix);
-    format!("{:02}/{:02}/{:04} {:02}:{:02}", t.day, t.month, t.year, t.hour, t.minute)
+    match lang {
+        Lang::Fr => {
+            format!("{:02}/{:02}/{:04} {:02}:{:02}", t.day, t.month, t.year, t.hour, t.minute)
+        }
+        Lang::En => {
+            format!("{:04}-{:02}-{:02} {:02}:{:02}", t.year, t.month, t.day, t.hour, t.minute)
+        }
+    }
 }
 
 // --- per-game files -------------------------------------------------------
@@ -602,11 +618,8 @@ pub struct StateFile {
 }
 
 impl StateFile {
-    pub fn label(&self) -> String {
-        match self.slot {
-            Some(n) => format!("Slot {n}"),
-            None => "Reprise".to_string(),
-        }
+    pub fn label(&self, lang: Lang) -> String {
+        crate::i18n::slot_label(lang, self.slot)
     }
 }
 
@@ -1252,26 +1265,39 @@ mod tests {
     fn sort_mode_round_trips_through_the_preference_string() {
         for mode in SortMode::ALL {
             assert_eq!(SortMode::from_pref(mode.as_pref()), mode);
-            assert!(!mode.label().is_empty());
+            for lang in Lang::ALL {
+                assert!(!mode.label(lang).is_empty());
+            }
         }
         assert_eq!(SortMode::from_pref("unknown-from-a-newer-build"), SortMode::Title);
     }
 
     #[test]
     fn sizes_and_durations_are_formatted_for_the_sheet() {
-        assert_eq!(format_size(0), "0 o");
-        assert_eq!(format_size(512), "512 o");
-        assert_eq!(format_size(8 * 1024), "8 Ko");
-        assert_eq!(format_size(2 * 1024 * 1024), "2,0 Mo");
-        assert_eq!(format_size(2_621_440), "2,5 Mo");
-        assert_eq!(format_sram(0), "Aucune");
-        assert_eq!(format_sram(8192), "8 Ko");
-        assert_eq!(format_play_time(0), "Jamais joué");
-        assert_eq!(format_play_time(30), "moins d'une minute");
-        assert_eq!(format_play_time(60), "1 min");
-        assert_eq!(format_play_time(59 * 60), "59 min");
-        assert_eq!(format_play_time(3600), "1 h 00");
-        assert_eq!(format_play_time(2 * 3600 + 5 * 60 + 59), "2 h 05");
+        assert_eq!(format_size(Lang::Fr, 0), "0 o");
+        assert_eq!(format_size(Lang::Fr, 512), "512 o");
+        assert_eq!(format_size(Lang::Fr, 8 * 1024), "8 Ko");
+        assert_eq!(format_size(Lang::Fr, 2 * 1024 * 1024), "2,0 Mo");
+        assert_eq!(format_size(Lang::Fr, 2_621_440), "2,5 Mo");
+        assert_eq!(format_sram(Lang::Fr, 0), "Aucune");
+        assert_eq!(format_sram(Lang::Fr, 8192), "8 Ko");
+        assert_eq!(format_play_time(Lang::Fr, 0), "Jamais joué");
+        assert_eq!(format_play_time(Lang::Fr, 30), "moins d'une minute");
+        assert_eq!(format_play_time(Lang::Fr, 60), "1 min");
+        assert_eq!(format_play_time(Lang::Fr, 59 * 60), "59 min");
+        assert_eq!(format_play_time(Lang::Fr, 3600), "1 h 00");
+        assert_eq!(format_play_time(Lang::Fr, 2 * 3600 + 5 * 60 + 59), "2 h 05");
+        // English keeps the point and the English units; a French decimal
+        // comma in an English size line reads as a thousands separator.
+        assert_eq!(format_size(Lang::En, 0), "0 B");
+        assert_eq!(format_size(Lang::En, 8 * 1024), "8 KB");
+        assert_eq!(format_size(Lang::En, 2_621_440), "2.5 MB");
+        assert_eq!(format_sram(Lang::En, 0), "None");
+        assert_eq!(format_play_time(Lang::En, 0), "Never played");
+        assert_eq!(format_play_time(Lang::En, 30), "less than a minute");
+        // The numeric shapes are the same in both: they are not prose.
+        assert_eq!(format_play_time(Lang::En, 3600), "1 h 00");
+        assert_eq!(format_play_time(Lang::En, 59 * 60), "59 min");
     }
 
     #[test]
@@ -1333,10 +1359,11 @@ mod tests {
         let states = save_states(&beside);
         assert_eq!(states.len(), 3);
         assert_eq!(states[0].slot, None);
-        assert_eq!(states[0].label(), "Reprise");
+        assert_eq!(states[0].label(Lang::Fr), "Reprise");
+        assert_eq!(states[0].label(Lang::En), "Resume");
         assert_eq!(states[1].slot, Some(0));
         assert_eq!(states[2].slot, Some(3));
-        assert_eq!(states[2].label(), "Slot 3");
+        assert_eq!(states[2].label(Lang::Fr), "Slot 3");
         assert_eq!(states[1].size, 2);
         // No preview picture was written beside any of them: the sheet must
         // still list the states (the preview is optional by design).
@@ -1436,10 +1463,16 @@ mod tests {
     #[test]
     fn a_timestamp_formats_as_a_local_date() {
         // Only the shape is asserted: the value depends on the host timezone.
-        let s = format_date(1_700_000_000);
+        let s = format_date(Lang::Fr, 1_700_000_000);
         assert_eq!(s.len(), 16, "{s}");
         assert_eq!(s.as_bytes()[2], b'/');
         assert_eq!(s.as_bytes()[5], b'/');
+        assert_eq!(s.as_bytes()[13], b':');
+        // English is ISO, so a date is never read a month out.
+        let s = format_date(Lang::En, 1_700_000_000);
+        assert_eq!(s.len(), 16, "{s}");
+        assert_eq!(s.as_bytes()[4], b'-');
+        assert_eq!(s.as_bytes()[7], b'-');
         assert_eq!(s.as_bytes()[13], b':');
     }
 

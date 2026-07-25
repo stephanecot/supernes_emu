@@ -25,6 +25,7 @@ use snes_core::{Cartridge, JoypadState, Snes, SCREEN_HEIGHT, SCREEN_WIDTH};
 
 use crate::audio::{self, AudioOutput};
 use crate::dialog;
+use crate::i18n::{status_slot, Msg, SlotStatus};
 use crate::input;
 use crate::library::{self, GameEntry, PlayClock, SortMode};
 #[cfg(target_os = "macos")]
@@ -533,7 +534,7 @@ impl ApplicationHandler for App {
         // the egui panel — so it needs no restored state.
         #[cfg(target_os = "macos")]
         {
-            self.menu = Some(menu::install());
+            self.menu = Some(menu::install(self.prefs.lang()));
         }
     }
 
@@ -986,11 +987,12 @@ impl App {
     /// is persisted immediately and applies to the very next frame, since
     /// `handle_key` resolves through `prefs.keymap` every time.
     fn apply_capture_key(&mut self, code: KeyCode) {
-        match self.settings.capture.on_key(code) {
+        match self.settings.capture.on_key(self.prefs.lang(), code) {
             input::Captured::Key { button, key } => {
                 let result = input::bind_key(&mut self.prefs.keymap, button, key);
                 self.prefs.save();
-                self.settings.capture.notice = bind_notice(result, &input::key_label(key));
+                self.settings.capture.notice =
+                    bind_notice(self.prefs.lang(), result, &input::key_label(key));
             }
             // The refusal already wrote its own explanation, and the capture
             // stays pending so another key can be tried.
@@ -1007,13 +1009,14 @@ impl App {
         // storing it would bind every unidentified control of that pad at once.
         if button == pad::Button::Unknown {
             self.settings.capture.notice =
-                Some("Ce bouton n'est pas reconnu par le système.".to_string());
+                Some(crate::i18n::Msg::UnknownPadButton.text(self.prefs.lang()).to_string());
             return;
         }
         let Some(name) = self.settings.capture.take_gamepad() else { return };
         let result = pad::bind_button(&mut self.prefs.pad_map, name, button);
         self.prefs.save();
-        self.settings.capture.notice = bind_notice(result, pad::pad_label(button));
+        let lang = self.prefs.lang();
+        self.settings.capture.notice = bind_notice(lang, result, pad::pad_label(lang, button));
     }
 
     /// Drop every binding the player made, on both devices.
@@ -1043,7 +1046,7 @@ impl App {
                 notice.name,
                 self.pads.connected()
             );
-            self.set_status(notice.status());
+            self.set_status(notice.status(self.prefs.lang()));
         }
         // A controller button pressed while the `Entrées` section waits for
         // one is a binding, not a game input — and it cannot be one anyway,
@@ -1188,8 +1191,11 @@ impl App {
             Action::Launch(path) => {
                 if let Err(e) = self.switch_rom(&path, true) {
                     eprintln!("error: could not load {}: {e}", path.display());
-                    self.library.ui.error =
-                        Some(format!("Impossible de charger {} : {e}", path.display()));
+                    self.library.ui.error = Some(crate::i18n::cannot_load(
+                        self.prefs.lang(),
+                        &path.display().to_string(),
+                        &e,
+                    ));
                 }
             }
             Action::ToggleFavorite(id) => {
@@ -1282,6 +1288,7 @@ impl App {
     /// audio gain, persistence).
     fn apply_setting(&mut self, setting: Setting) {
         match setting {
+            Setting::Language(lang) => self.set_language(lang),
             Setting::Zoom(zoom) => self.set_zoom(zoom),
             Setting::Filter(filter) => self.set_filter(filter),
             Setting::Aspect(aspect) => self.set_aspect(aspect),
@@ -1333,17 +1340,21 @@ impl App {
         if let Some(dir) = &dir {
             if let Err(e) = crate::paths::prepare_dir(dir) {
                 eprintln!("save dir: {e}");
-                self.settings.folder_notice = Some(ui::settings::FolderNotice::Error(format!(
-                    "Dossier inutilisable, réglage inchangé : {e}"
-                )));
+                self.settings.folder_notice =
+                    Some(ui::settings::FolderNotice::Error(crate::i18n::unusable_folder(
+                        self.prefs.lang(),
+                        &e.to_string(),
+                    )));
                 return;
             }
         }
         move_save_dir(&mut self.prefs.save_dir, &mut self.prefs.previous_save_dir, dir);
         self.prefs.save();
-        self.settings.folder_notice = Some(ui::settings::FolderNotice::Info(
-            save_dir_notice(self.snes.is_some(), self.prefs.previous_save_dir.as_deref()),
-        ));
+        self.settings.folder_notice = Some(ui::settings::FolderNotice::Info(save_dir_notice(
+            self.prefs.lang(),
+            self.snes.is_some(),
+            self.prefs.previous_save_dir.as_deref(),
+        )));
         // The sheet lists this game's save states from that folder.
         self.library.sheet = SheetData::default();
     }
@@ -1383,14 +1394,16 @@ impl App {
     /// itself rather than only on stderr, which nobody reading the panel sees.
     fn open_guide(&mut self) {
         let Some(path) = self.settings.guide.clone() else {
-            self.settings.notice = Some("Le guide n'a pas été trouvé.".to_string());
+            self.settings.notice =
+                Some(crate::i18n::Msg::GuideNotFound.text(self.prefs.lang()).to_string());
             return;
         };
         match crate::guide::open(&path) {
             Ok(()) => self.settings.notice = None,
             Err(e) => {
                 eprintln!("guide: {e}");
-                self.settings.notice = Some(format!("Ouverture impossible : {e}"));
+                self.settings.notice =
+                    Some(crate::i18n::cannot_open(self.prefs.lang(), &e.to_string()));
             }
         }
     }
@@ -1413,7 +1426,7 @@ impl App {
             None => {
                 self.library.ui.scanning = false;
                 self.library.ui.error =
-                    Some("La bibliothèque n'a pas pu démarrer (thread indisponible).".to_string());
+                    Some(crate::i18n::Msg::LibraryThreadFailed.text(self.prefs.lang()).to_string());
             }
         }
     }
@@ -1659,6 +1672,7 @@ impl App {
         } else {
             JoypadState::default()
         };
+        let lang = self.prefs.lang();
         let Self { ui, pixels, library, prefs, settings, .. } = self;
         let (Some(ui), Some(pixels)) = (ui.as_mut(), pixels.as_ref()) else {
             return Action::None;
@@ -1680,6 +1694,7 @@ impl App {
                         config_dir: config_dir.as_deref(),
                         pressed,
                         state: settings,
+                        lang,
                     },
                 )
             } else if home {
@@ -1688,6 +1703,7 @@ impl App {
                     &mut HomeModel {
                         app_name: APP_NAME,
                         version: VERSION,
+                        lang,
                         game_title: game_title.as_deref(),
                         rom_path: rom_path.as_deref(),
                         library: LibraryModel {
@@ -1698,6 +1714,7 @@ impl App {
                             pending,
                             state: &mut *view,
                             textures: &mut *textures,
+                            lang,
                         },
                         sheet,
                     },
@@ -1710,7 +1727,7 @@ impl App {
             // settings view: nothing else can be acted on until it is
             // answered.
             if quit_confirm {
-                let produced = crate::ui::confirm::show(ctx, APP_NAME);
+                let produced = crate::ui::confirm::show(ctx, APP_NAME, lang);
                 if produced != Action::None {
                     action = produced;
                 }
@@ -1969,9 +1986,9 @@ impl App {
     /// while they still remember doing it.
     fn add_game(&mut self, path: &Path) {
         if !library::is_rom_file(path) {
-            self.library.ui.error = Some(format!(
-                "{} n'est pas une ROM Super Nintendo (.sfc, .smc ou .zip).",
-                path.file_name().unwrap_or(path.as_os_str()).to_string_lossy()
+            self.library.ui.error = Some(crate::i18n::not_a_rom(
+                self.prefs.lang(),
+                &path.file_name().unwrap_or(path.as_os_str()).to_string_lossy(),
             ));
             return;
         }
@@ -2016,8 +2033,11 @@ impl App {
                     }
                     if let Err(e) = self.switch_rom(&path, true) {
                         eprintln!("error: could not load {}: {e}", path.display());
-                        self.library.ui.error =
-                            Some(format!("Impossible de charger {} : {e}", path.display()));
+                        self.library.ui.error = Some(crate::i18n::cannot_load(
+                            self.prefs.lang(),
+                            &path.display().to_string(),
+                            &e,
+                        ));
                     }
                 }
                 dialog::Answer::LibraryDir(dir) => {
@@ -2036,7 +2056,7 @@ impl App {
                 dialog::Answer::Cancelled => {}
             }
         }
-        self.dialogs.pump();
+        self.dialogs.pump(self.prefs.lang());
     }
 
     /// F5 / `Émulation > Sauvegarder l'état` (Cmd+S): snapshot the whole
@@ -2057,11 +2077,11 @@ impl App {
             Ok(()) => {
                 eprintln!("state: saved {} ({} bytes)", path.display(), bytes.len());
                 self.write_state_preview(&path);
-                self.set_status(format!("SLOT {slot} SAUVE"));
+                self.set_status(status_slot(self.prefs.lang(), slot, SlotStatus::Saved));
             }
             Err(e) => {
                 eprintln!("state: could not write {}: {e}", path.display());
-                self.set_status(format!("SLOT {slot} ERREUR"));
+                self.set_status(status_slot(self.prefs.lang(), slot, SlotStatus::Failed));
             }
         }
     }
@@ -2129,12 +2149,12 @@ impl App {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 eprintln!("state: no state in slot {slot} ({})", path.display());
-                self.set_status(format!("SLOT {slot} VIDE"));
+                self.set_status(status_slot(self.prefs.lang(), slot, SlotStatus::Empty));
                 return;
             }
             Err(e) => {
                 eprintln!("state: could not read {}: {e}", path.display());
-                self.set_status(format!("SLOT {slot} ERREUR"));
+                self.set_status(status_slot(self.prefs.lang(), slot, SlotStatus::Failed));
                 return;
             }
         };
@@ -2144,11 +2164,11 @@ impl App {
                 // The slot's snapshot replaced `cart.sram` wholesale; see
                 // `resync_sram_baseline` (review point A).
                 self.resync_sram_baseline();
-                self.set_status(format!("SLOT {slot} CHARGE"));
+                self.set_status(status_slot(self.prefs.lang(), slot, SlotStatus::Loaded));
             }
             Err(e) => {
                 eprintln!("state: load failed ({}): {e}", path.display());
-                self.set_status(format!("SLOT {slot} ERREUR"));
+                self.set_status(status_slot(self.prefs.lang(), slot, SlotStatus::Failed));
             }
         }
     }
@@ -2164,7 +2184,7 @@ impl App {
         self.prefs.save_slot = slot.min(crate::state::SLOT_COUNT - 1);
         self.prefs.save();
         let slot = self.prefs.save_slot;
-        self.set_status(format!("SLOT {slot}"));
+        self.set_status(status_slot(self.prefs.lang(), slot, SlotStatus::Selected));
     }
 
     /// `F10` hotkey / `Réglages > Émulation > Reprise instantanée`: whether
@@ -2250,7 +2270,7 @@ impl App {
                         path.display()
                     );
                 }
-                self.set_status("REPRISE");
+                self.set_status(Msg::StatusResumed.text(self.prefs.lang()));
                 self.resync_sram_baseline();
             }
             Err(e) => {
@@ -2280,7 +2300,7 @@ impl App {
         );
         if let Err(e) = std::fs::create_dir_all(&dir) {
             eprintln!("screenshot: could not create {}: {e}", dir.display());
-            self.set_status("CAPTURE IMPOSSIBLE");
+            self.set_status(Msg::StatusNoScreenshot.text(self.prefs.lang()));
             return;
         }
         let path = crate::unique_path(&dir, &stem, "png");
@@ -2291,11 +2311,11 @@ impl App {
         match result {
             Ok(()) => {
                 eprintln!("screenshot: wrote {}", path.display());
-                self.set_status("CAPTURE ECRAN");
+                self.set_status(Msg::StatusScreenshot.text(self.prefs.lang()));
             }
             Err(e) => {
                 eprintln!("screenshot: {e}");
-                self.set_status("CAPTURE IMPOSSIBLE");
+                self.set_status(Msg::StatusNoScreenshot.text(self.prefs.lang()));
             }
         }
     }
@@ -2311,7 +2331,7 @@ impl App {
             format!("{}_{}", crate::sanitize_file_stem(&title), crate::now_local().file_stamp());
         if let Err(e) = std::fs::create_dir_all(&dir) {
             eprintln!("spc: could not create {}: {e}", dir.display());
-            self.set_status("EXPORT SPC ERREUR");
+            self.set_status(Msg::StatusSpcFailed.text(self.prefs.lang()));
             return;
         }
         let path = crate::unique_path(&dir, &stem, "spc");
@@ -2322,11 +2342,11 @@ impl App {
         match result {
             Ok(()) => {
                 eprintln!("spc: wrote {} ({} bytes)", path.display(), crate::spc::FILE_SIZE);
-                self.set_status("MUSIQUE SPC EXPORTEE");
+                self.set_status(Msg::StatusSpcExported.text(self.prefs.lang()));
             }
             Err(e) => {
                 eprintln!("spc: {e}");
-                self.set_status("EXPORT SPC ERREUR");
+                self.set_status(Msg::StatusSpcFailed.text(self.prefs.lang()));
             }
         }
     }
@@ -2349,6 +2369,21 @@ impl App {
     fn set_show_fps(&mut self, on: bool) {
         self.prefs.show_fps = on;
         self.prefs.save();
+    }
+
+    /// `Réglages > Affichage > Langue`. The egui screens are rebuilt from
+    /// `prefs` on every frame, so they change with the next one; the native
+    /// menu bar is not, and is rebuilt here — a macOS menu still reading
+    /// `Émulation` under an English interface is exactly the half-translated
+    /// screen the catalogue exists to prevent.
+    fn set_language(&mut self, lang: Option<crate::i18n::Lang>) {
+        self.prefs.language =
+            lang.map_or_else(|| "system".to_string(), |l| l.as_pref().to_string());
+        self.prefs.save();
+        #[cfg(target_os = "macos")]
+        {
+            self.menu = Some(menu::install(self.prefs.lang()));
+        }
     }
 
     /// F1-F4 hotkeys / `Réglages > Affichage > Taille de la fenêtre`: sets the
@@ -2611,18 +2646,24 @@ fn picture_for(prefs: &Prefs, id: &str) -> Option<PathBuf> {
 /// What the `Entrées` section says after a binding was written. A plain
 /// assignment needs no comment; a swap does, since the *other* button changed
 /// too and the player did not ask for that directly.
-fn bind_notice(result: input::BindResult, label: &str) -> Option<String> {
+fn bind_notice(
+    lang: crate::i18n::Lang,
+    result: input::BindResult,
+    label: &str,
+) -> Option<String> {
     match result {
-        input::BindResult::Swapped(other) => Some(format!(
-            "{label} servait déjà pour {} : les deux boutons ont été échangés.",
-            ui::settings::button_label(other)
+        input::BindResult::Swapped(other) => Some(crate::i18n::binding_swapped(
+            lang,
+            label,
+            ui::settings::button_label(lang, other),
         )),
         // The other button had nothing to receive in exchange (it was claiming
         // the same key/button, which is why one of the two was mute): it goes
         // back to its default rather than keeping a binding it no longer has.
-        input::BindResult::Reverted(other) => Some(format!(
-            "{label} servait déjà pour {} : ce bouton revient à son réglage par défaut.",
-            ui::settings::button_label(other)
+        input::BindResult::Reverted(other) => Some(crate::i18n::binding_reverted(
+            lang,
+            label,
+            ui::settings::button_label(lang, other),
         )),
         input::BindResult::Bound | input::BindResult::Unchanged => None,
     }
@@ -2657,21 +2698,13 @@ fn move_save_dir(
 /// from, and a save left in the abandoned folder is still *read*
 /// (`paths::read_sidecar`), which is what stops the change from looking like
 /// lost progress.
-fn save_dir_notice(game_running: bool, previous: Option<&Path>) -> String {
-    let mut text = String::from("Pris en compte au prochain chargement de jeu");
-    if game_running {
-        text.push_str(" : la partie en cours garde ses fichiers actuels.");
-    } else {
-        text.push('.');
-    }
-    if let Some(previous) = previous {
-        text.push_str(&format!(
-            " Les sauvegardes restées dans {} sont toujours relues ; rien n'a été déplacé ni \
-             supprimé.",
-            previous.display()
-        ));
-    }
-    text
+fn save_dir_notice(
+    lang: crate::i18n::Lang,
+    game_running: bool,
+    previous: Option<&Path>,
+) -> String {
+    let previous = previous.map(|p| p.display().to_string());
+    crate::i18n::save_dir_notice(lang, game_running, previous.as_deref())
 }
 
 /// Top-row digit key -> save-state slot number (`Digit0` = slot 0 ... `Digit9`
@@ -2923,7 +2956,8 @@ mod overlay_tests {
         // directions, so the two can't drift apart.
         for player in 0..pad::PLAYERS {
             for connected in [true, false] {
-                let text = pad::PadNotice { player, connected, name: String::new() }.status();
+                let text = pad::PadNotice { player, connected, name: String::new() }
+                    .status(crate::i18n::Lang::Fr);
                 assert!(messages.contains(&text.as_str()), "unlisted status {text:?}");
                 for c in text.chars().filter(|c| *c != ' ') {
                     assert_ne!(glyph(c), [0; GLYPH_H], "no glyph for {c:?} in {text:?}");
@@ -3163,17 +3197,26 @@ mod path_tests {
 
     #[test]
     fn a_binding_is_only_commented_when_it_took_one_from_another_button() {
-        assert_eq!(bind_notice(input::BindResult::Bound, "Espace"), None);
-        assert_eq!(bind_notice(input::BindResult::Unchanged, "Espace"), None);
-        let notice = bind_notice(input::BindResult::Swapped("B"), "Z").expect("a swap is explained");
+        let fr = crate::i18n::Lang::Fr;
+        assert_eq!(bind_notice(fr, input::BindResult::Bound, "Space"), None);
+        assert_eq!(bind_notice(fr, input::BindResult::Unchanged, "Space"), None);
+        let notice =
+            bind_notice(fr, input::BindResult::Swapped("B"), "Z").expect("a swap is explained");
         assert!(notice.contains('Z'), "{notice}");
         assert!(notice.contains("échangés"), "{notice}");
         // A button that had nothing to receive back is told apart from a swap:
         // it went back to its default instead of taking the other's binding.
-        let notice =
-            bind_notice(input::BindResult::Reverted("X"), "Z").expect("a takeover is explained");
+        let notice = bind_notice(fr, input::BindResult::Reverted("X"), "Z")
+            .expect("a takeover is explained");
         assert!(notice.contains("par défaut"), "{notice}");
         assert!(notice.contains("X"), "{notice}");
+        // …and the same two notices exist in English, or half the players
+        // would be told nothing at all.
+        let en = crate::i18n::Lang::En;
+        let notice = bind_notice(en, input::BindResult::Swapped("B"), "Z").expect("a swap");
+        assert!(notice.contains("swapped"), "{notice}");
+        let notice = bind_notice(en, input::BindResult::Reverted("X"), "Z").expect("a takeover");
+        assert!(notice.contains("default"), "{notice}");
     }
 
     /// The folder a player stops using has to stay known, or the saves it holds
@@ -3215,18 +3258,25 @@ mod path_tests {
     /// silence there is what would look like lost progress.
     #[test]
     fn changing_the_save_folder_says_when_it_applies_and_what_was_left_behind() {
-        let running = save_dir_notice(true, None);
+        let fr = crate::i18n::Lang::Fr;
+        let running = save_dir_notice(fr, true, None);
         assert!(running.contains("prochain chargement"), "{running}");
         assert!(running.contains("partie en cours"), "{running}");
 
-        let idle = save_dir_notice(false, None);
+        let idle = save_dir_notice(fr, false, None);
         assert!(idle.contains("prochain chargement"), "{idle}");
         assert!(!idle.contains("partie en cours"), "{idle}");
 
-        let left = save_dir_notice(false, Some(Path::new("/old-saves")));
+        let left = save_dir_notice(fr, false, Some(Path::new("/old-saves")));
         assert!(left.contains("/old-saves"), "{left}");
         assert!(left.contains("toujours relues"), "{left}");
         assert!(left.contains("rien n'a été déplacé"), "{left}");
+
+        let en = crate::i18n::Lang::En;
+        let left = save_dir_notice(en, false, Some(Path::new("/old-saves")));
+        assert!(left.contains("next game load"), "{left}");
+        assert!(left.contains("/old-saves"), "{left}");
+        assert!(left.contains("nothing was moved"), "{left}");
     }
 
     #[test]

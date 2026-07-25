@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 use egui::{Align, Layout, RichText, Sense, Stroke, Vec2};
 
+use crate::i18n::{Lang, Msg};
 use crate::library::{self, GameEntry, StateFile};
 use crate::prefs::GameStats;
 
@@ -46,14 +47,13 @@ const SLOT_W: f32 = 104.0;
 const SLOT_H: f32 = SLOT_W / library_view::PICTURE_RATIO;
 /// Frame margin of a save-state row.
 const SLOT_MARGIN: f32 = 8.0;
-/// Width of the label column of the header facts, so every value starts on the
-/// same vertical line whatever the length of its label.
-const FACT_LABEL_W: f32 = 150.0;
+/// Gap kept between the longest fact label and the column of values, and the
+/// widest that column is ever drawn (`fact_label_w` measures the rest).
+const FACT_LABEL_GAP: f32 = 24.0;
+const FACT_LABEL_MAX_W: f32 = 200.0;
 /// Rows the game's title may take before it is elided.
 const TITLE_ROWS: usize = 2;
-/// Width of the `Jouer` button's own content (icon, gap and label), used to
-/// pad it out to the full width of the left column.
-const PLAY_LABEL_W: f32 = 64.0;
+
 /// Widest the sheet is ever laid out, whatever the window. Past it the facts
 /// column and the save-state rows stretched across a 1600-point window with
 /// nothing but void between a label and its value: a page of text has a
@@ -108,27 +108,30 @@ pub struct SheetModel<'a> {
     pub selected: &'a mut Option<String>,
     /// Save state whose deletion is armed and waiting for a confirmation.
     pub confirm_delete: &'a mut Option<PathBuf>,
+    /// Language every string of the sheet is rendered in.
+    pub lang: Lang,
 }
 
 /// Draw the sheet and return what the player asked for.
 pub fn show(ui: &mut egui::Ui, model: &mut SheetModel) -> Action {
     let mut action = Action::None;
     let entry = model.entry;
+    let lang = model.lang;
 
     column(ui, |ui| {
         ui.horizontal(|ui| {
             // Drawn arrow, not the character `←`: no bundled face carries that
             // glyph, and the button printed a tofu box.
-            if icons::button(ui, Icon::ArrowLeft, "Retour").clicked() {
+            if icons::button(ui, Icon::ArrowLeft, Msg::Back.text(lang)).clicked() {
                 *model.selected = None;
                 *model.confirm_delete = None;
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let favorite = model.stats.favorite;
                 let (icon, label) = if favorite {
-                    (Icon::StarFilled, "Favori")
+                    (Icon::StarFilled, Msg::Favorite.text(lang))
                 } else {
-                    (Icon::Star, "Ajouter aux favoris")
+                    (Icon::Star, Msg::AddToFavorites.text(lang))
                 };
                 if icons::button_tinted(ui, icon, label, theme::YELLOW).clicked() {
                     action = Action::ToggleFavorite(entry.id.clone());
@@ -155,42 +158,44 @@ pub fn show(ui: &mut egui::Ui, model: &mut SheetModel) -> Action {
                             Placeholder::game_pending(model.pending),
                             model.textures,
                             Vec2::new(HERO_W, HERO_H),
+                            lang,
                         );
                         ui.add_space(10.0);
                         // The call to action takes the whole column: it is the one
                         // thing a sheet exists to offer.
                         ui.scope(|ui| {
+                            // Measured on the label actually rendered: `Jouer`
+                            // and `Play` do not pad out to the same button.
                             ui.spacing_mut().button_padding.x =
-                                (HERO_W - PLAY_LABEL_W) / 2.0;
+                                (HERO_W - play_label_w(ui, lang)) / 2.0;
                             // A game whose file is gone offers the only two
                             // things that can still be done with it, in place of
                             // a `Jouer` that could only fail.
                             if entry.missing {
                                 if ui
-                                    .button("Retrouver le fichier…")
-                                    .on_hover_text(
-                                        "Le désigner à son nouvel emplacement, ou déposer \
-                                         le fichier sur la fenêtre",
-                                    )
+                                    .button(Msg::RelocateGame.text(lang))
+                                    .on_hover_text(Msg::RelocateHint.text(lang))
                                     .clicked()
                                 {
                                     action = Action::AddGame { replacing: Some(entry.path.clone()) };
                                 }
                                 if ui
-                                    .button("Retirer de la bibliothèque")
-                                    .on_hover_text("Le fichier lui-même n'est pas supprimé")
+                                    .button(Msg::ForgetGame.text(lang))
+                                    .on_hover_text(Msg::ForgetHint.text(lang))
                                     .clicked()
                                 {
                                     action = Action::ForgetGame(entry.path.clone());
                                 }
-                            } else if icons::primary_button(ui, Icon::Play, "Jouer").clicked() {
+                            } else if icons::primary_button(ui, Icon::Play, Msg::Play.text(lang))
+                                .clicked()
+                            {
                                 action = Action::Launch(entry.path.clone());
                             }
                         });
                         if model.stats.thumbnail.is_some()
                             && ui
-                                .button("Vignette générée")
-                                .on_hover_text("Revenir à la miniature produite par l'émulateur")
+                                .button(Msg::GeneratedThumbnail.text(lang))
+                                .on_hover_text(Msg::GeneratedThumbnailHint.text(lang))
                                 .clicked()
                         {
                             action = Action::ClearThumbnail(entry.id.clone());
@@ -210,21 +215,23 @@ pub fn show(ui: &mut egui::Ui, model: &mut SheetModel) -> Action {
                         icons::chip_badge(ui, chip);
                         ui.add_space(6.0);
                     }
-                    for (label, value) in facts(entry, model.stats) {
-                        fact_row(ui, &label, &value);
+                    let facts = facts(lang, entry, model.stats);
+                    let label_w = fact_label_w(ui, &facts);
+                    for (label, value) in &facts {
+                        fact_row(ui, label, value, label_w);
                     }
                 });
             });
 
             ui.add_space(20.0);
-            super::home::heading(ui, "Sauvegardes d'état");
+            super::home::heading(ui, Msg::SaveStates.text(lang));
             ui.add_space(8.0);
             if model.data.states.is_empty() {
-                note(ui, "Aucune sauvegarde d'état pour ce jeu. F5 en enregistre une.");
+                note(ui, Msg::NoSaveStates.text(lang));
             } else {
                 for state in &model.data.states {
                     if let Some(produced) =
-                        slot_row(ui, state, model.confirm_delete, model.textures)
+                        slot_row(ui, state, model.confirm_delete, model.textures, lang)
                     {
                         action = produced;
                     }
@@ -233,12 +240,12 @@ pub fn show(ui: &mut egui::Ui, model: &mut SheetModel) -> Action {
             }
 
             ui.add_space(14.0);
-            super::home::heading(ui, "Captures d'écran");
+            super::home::heading(ui, Msg::Screenshots.text(lang));
             ui.add_space(8.0);
             if model.data.screenshots.is_empty() {
-                note(ui, "Aucune capture. F12 pendant une partie en enregistre une.");
+                note(ui, Msg::NoScreenshots.text(lang));
             } else {
-                note(ui, "Cliquez une capture pour en faire la vignette du jeu.");
+                note(ui, Msg::PromoteHint.text(lang));
                 ui.add_space(6.0);
                 // Laid out by hand rather than with `horizontal_wrapped`: the row
                 // is what decides where a capture goes, and a cell wider than the
@@ -252,7 +259,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut SheetModel) -> Action {
                     ui.horizontal(|ui| {
                         for shot in row {
                             let promoted = model.stats.thumbnail.as_deref() == Some(shot.as_path());
-                            if capture(ui, shot, promoted, model.textures).clicked() {
+                            if capture(ui, shot, promoted, model.textures, lang).clicked() {
                                 action = Action::SetThumbnail {
                                     id: entry.id.clone(),
                                     source: shot.clone(),
@@ -296,6 +303,7 @@ fn slot_row(
     state: &StateFile,
     confirm: &mut Option<PathBuf>,
     textures: &mut TextureStore,
+    lang: Lang,
 ) -> Option<Action> {
     let mut action = None;
     let armed = confirm.as_deref() == Some(state.path.as_path());
@@ -315,12 +323,13 @@ fn slot_row(
                     Placeholder::NoPreview,
                     textures,
                     Vec2::new(SLOT_W, SLOT_H),
+                    lang,
                 );
                 ui.add_space(12.0);
                 ui.vertical(|ui| {
                     ui.add_space(4.0);
                     ui.label(
-                        RichText::new(state.label())
+                        RichText::new(state.label(lang))
                             .font(theme::strong(theme::SIZE_BODY))
                             .color(theme::TEXT),
                     );
@@ -329,15 +338,15 @@ fn slot_row(
                     ui.label(
                         RichText::new(format!(
                             "{} · {}",
-                            library::format_size(state.size),
-                            library::format_date(state.modified)
+                            library::format_size(lang, state.size),
+                            library::format_date(lang, state.modified)
                         ))
                         .font(theme::mono(theme::SIZE_MONO))
                         .color(theme::TEXT_DIM),
                     );
                     if state.preview.is_none() {
                         ui.label(
-                            RichText::new("Sauvegardé sans aperçu")
+                            RichText::new(Msg::SavedWithoutPreview.text(lang))
                                 .font(theme::font(theme::SIZE_SMALL))
                                 .color(theme::TEXT_DIM),
                         );
@@ -345,12 +354,12 @@ fn slot_row(
                 });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if armed {
-                        if ui.button("Annuler").clicked() {
+                        if ui.button(Msg::Cancel.text(lang)).clicked() {
                             *confirm = None;
                         }
                         let sure = ui.add(
                             egui::Button::new(
-                                RichText::new("Supprimer définitivement")
+                                RichText::new(Msg::DeleteForever.text(lang))
                                     .color(theme::RED)
                                     .font(theme::font(theme::SIZE_BUTTON)),
                             )
@@ -361,8 +370,8 @@ fn slot_row(
                             *confirm = None;
                         }
                     } else if ui
-                        .button("Supprimer…")
-                        .on_hover_text("Efface le fichier d'état et son aperçu")
+                        .button(Msg::Delete.text(lang))
+                        .on_hover_text(Msg::DeleteHint.text(lang))
                         .clicked()
                     {
                         *confirm = Some(state.path.clone());
@@ -379,6 +388,7 @@ fn capture(
     path: &Path,
     promoted: bool,
     textures: &mut TextureStore,
+    lang: Lang,
 ) -> egui::Response {
     let response = egui::Frame::new()
         .fill(theme::BG_CARD)
@@ -396,6 +406,7 @@ fn capture(
                     Placeholder::NoPicture,
                     textures,
                     Vec2::new(SHOT_W, SHOT_H),
+                    lang,
                 );
                 let name = path
                     .file_name()
@@ -411,59 +422,98 @@ fn capture(
         .response
         .interact(Sense::click());
     response.on_hover_text(if promoted {
-        "Vignette actuelle du jeu"
+        Msg::CurrentThumbnail.text(lang)
     } else {
-        "Utiliser comme vignette"
+        Msg::UseAsThumbnail.text(lang)
     })
 }
 
 /// The header/technical facts, in display order. Split out from the drawing
 /// code so the list itself is unit-testable.
-pub fn facts(entry: &GameEntry, stats: &GameStats) -> Vec<(String, String)> {
+pub fn facts(lang: Lang, entry: &GameEntry, stats: &GameStats) -> Vec<(String, String)> {
     let mut out = vec![
-        ("Région".to_string(), entry.region.clone()),
+        (Msg::FactRegion.text(lang).to_string(), entry.region.clone()),
         (
-            "Mapping".to_string(),
+            Msg::FactMapping.text(lang).to_string(),
             format!("{}{}", entry.mapping, if entry.fastrom { " (FastROM)" } else { "" }),
         ),
-        ("Taille".to_string(), library::format_size(entry.rom_bytes)),
-        ("Sauvegarde".to_string(), library::format_sram(entry.sram_bytes)),
+        (Msg::FactSize.text(lang).to_string(), library::format_size(lang, entry.rom_bytes)),
+        (Msg::FactSave.text(lang).to_string(), library::format_sram(lang, entry.sram_bytes)),
         (
-            "Coprocesseur".to_string(),
-            entry.coprocessor.clone().unwrap_or_else(|| "Aucun".to_string()),
+            Msg::FactCoprocessor.text(lang).to_string(),
+            entry
+                .coprocessor
+                .clone()
+                .unwrap_or_else(|| Msg::NoneMasculine.text(lang).to_string()),
         ),
         (
-            "Somme de contrôle".to_string(),
+            Msg::FactChecksum.text(lang).to_string(),
             format!(
                 "${:04X} ({})",
                 entry.checksum,
-                if entry.checksum_valid { "valide" } else { "INVALIDE" }
+                if entry.checksum_valid {
+                    Msg::ChecksumValid.text(lang)
+                } else {
+                    Msg::ChecksumInvalid.text(lang)
+                }
             ),
         ),
-        ("Temps de jeu".to_string(), library::format_play_time(stats.play_seconds)),
+        (
+            Msg::FactPlayTime.text(lang).to_string(),
+            library::format_play_time(lang, stats.play_seconds),
+        ),
     ];
     if let Some(last) = stats.last_played {
-        out.push(("Dernière partie".to_string(), library::format_date(last)));
+        out.push((
+            Msg::FactLastPlayed.text(lang).to_string(),
+            library::format_date(lang, last),
+        ));
     }
     out
 }
 
+/// Width of the fact column: the widest label of the list actually being
+/// rendered, plus a gap. Measured rather than fixed — `Somme de contrôle` and
+/// `Checksum` are not the same length, and a column sized on either of them
+/// leaves a hole in one language or clips the other.
+fn fact_label_w(ui: &egui::Ui, facts: &[(String, String)]) -> f32 {
+    let font = theme::font(theme::SIZE_BODY);
+    let widest = facts
+        .iter()
+        .map(|(label, _)| {
+            ui.painter().layout_no_wrap(label.clone(), font.clone(), theme::TEXT_DIM).size().x
+        })
+        .fold(0.0_f32, f32::max);
+    (widest + FACT_LABEL_GAP).ceil().min(FACT_LABEL_MAX_W)
+}
+
+/// Width of the `Jouer`/`Play` button's own content (icon, gap and label),
+/// used to pad it out to the full width of the left column.
+fn play_label_w(ui: &egui::Ui, lang: Lang) -> f32 {
+    let galley = ui.painter().layout_no_wrap(
+        Msg::Play.text(lang).to_owned(),
+        theme::font(theme::SIZE_BUTTON),
+        theme::TEXT,
+    );
+    galley.size().x + icons::SIZE + icons::GAP
+}
+
 /// One header fact: its name in the interface face, its value in the
 /// machine-data face.
-fn fact_row(ui: &mut egui::Ui, label: &str, value: &str) {
+fn fact_row(ui: &mut egui::Ui, label: &str, value: &str, label_w: f32) {
     ui.horizontal(|ui| {
         // Both cells are centred on the row: the two faces have different
         // ascents, and top-aligning them would print the value a few points
         // above its own label.
         ui.allocate_ui_with_layout(
-            Vec2::new(FACT_LABEL_W, 0.0),
+            Vec2::new(label_w, 0.0),
             Layout::left_to_right(Align::Center),
             |ui| {
                 // `allocate_ui_with_layout` shrinks back to what its content
                 // used, so the column width has to be claimed from inside —
                 // without this every value would start right after its own
                 // label and no two rows would line up.
-                ui.set_min_width(FACT_LABEL_W);
+                ui.set_min_width(label_w);
                 ui.label(
                     RichText::new(label)
                         .font(theme::font(theme::SIZE_BODY))
@@ -510,8 +560,8 @@ mod tests {
 
     #[test]
     fn the_sheet_lists_every_header_fact_including_the_coprocessor() {
-        let facts = facts(&entry(), &GameStats::default());
-        let map: std::collections::BTreeMap<_, _> = facts.into_iter().collect();
+        let map: std::collections::BTreeMap<_, _> =
+            facts(Lang::Fr, &entry(), &GameStats::default()).into_iter().collect();
         assert_eq!(map["Région"], "PAL");
         assert_eq!(map["Mapping"], "HiROM (FastROM)");
         assert_eq!(map["Taille"], "2,0 Mo");
@@ -521,6 +571,17 @@ mod tests {
         assert_eq!(map["Temps de jeu"], "Jamais joué");
         // Never launched: no "last played" line at all rather than an epoch.
         assert!(!map.contains_key("Dernière partie"));
+
+        // The same facts in English: the chip name is a chip name, the region
+        // a machine value, and everything around them is translated.
+        let map: std::collections::BTreeMap<_, _> =
+            facts(Lang::En, &entry(), &GameStats::default()).into_iter().collect();
+        assert_eq!(map["Region"], "PAL");
+        assert_eq!(map["Size"], "2.0 MB");
+        assert_eq!(map["Battery save"], "8 KB");
+        assert_eq!(map["Coprocessor"], "SA-1");
+        assert_eq!(map["Checksum"], "$ABCD (valid)");
+        assert_eq!(map["Play time"], "Never played");
     }
 
     #[test]
@@ -531,18 +592,24 @@ mod tests {
         e.fastrom = false;
         e.checksum_valid = false;
         let map: std::collections::BTreeMap<_, _> =
-            facts(&e, &GameStats::default()).into_iter().collect();
+            facts(Lang::Fr, &e, &GameStats::default()).into_iter().collect();
         assert_eq!(map["Coprocesseur"], "Aucun");
         assert_eq!(map["Sauvegarde"], "Aucune");
         assert_eq!(map["Mapping"], "HiROM");
         assert_eq!(map["Somme de contrôle"], "$ABCD (INVALIDE)");
+        let map: std::collections::BTreeMap<_, _> =
+            facts(Lang::En, &e, &GameStats::default()).into_iter().collect();
+        assert_eq!(map["Coprocessor"], "None");
+        assert_eq!(map["Battery save"], "None");
+        assert_eq!(map["Checksum"], "$ABCD (INVALID)");
     }
 
     #[test]
     fn play_time_and_last_launch_come_from_the_persisted_stats() {
         let stats =
             GameStats { play_seconds: 4 * 3600 + 30 * 60, last_played: Some(1_700_000_000), ..Default::default() };
-        let map: std::collections::BTreeMap<_, _> = facts(&entry(), &stats).into_iter().collect();
+        let map: std::collections::BTreeMap<_, _> =
+            facts(Lang::Fr, &entry(), &stats).into_iter().collect();
         assert_eq!(map["Temps de jeu"], "4 h 30");
         assert_eq!(map["Dernière partie"].len(), 16);
     }
@@ -603,6 +670,7 @@ mod tests {
         data: &SheetData,
         stats: &GameStats,
         confirm: &mut Option<PathBuf>,
+        lang: Lang,
     ) -> (Action, String) {
         let ctx = egui::Context::default();
         theme::apply(&ctx);
@@ -630,6 +698,7 @@ mod tests {
                         textures: &mut textures,
                         selected: &mut selected,
                         confirm_delete: confirm,
+                        lang,
                     },
                 );
             });
@@ -664,7 +733,7 @@ mod tests {
             screenshots: Vec::new(),
         };
         let mut confirm = None;
-        let (produced, text) = draw(&data, &GameStats::default(), &mut confirm);
+        let (produced, text) = draw(&data, &GameStats::default(), &mut confirm, Lang::Fr);
         assert_eq!(produced, Action::None, "drawing alone must delete nothing");
         assert!(text.contains("Reprise"), "{text}");
         assert!(text.contains("Slot 3"), "{text}");
@@ -684,14 +753,14 @@ mod tests {
             screenshots: Vec::new(),
         };
         let mut confirm = None;
-        let (_, text) = draw(&data, &GameStats::default(), &mut confirm);
+        let (_, text) = draw(&data, &GameStats::default(), &mut confirm, Lang::Fr);
         assert!(text.contains("Supprimer…"), "{text}");
         assert!(!text.contains("Supprimer définitivement"), "{text}");
 
         // Armed (what the first click does): the row now offers the real
         // deletion and a way out of it.
         let mut confirm = Some(PathBuf::from("/roms/game.state3"));
-        let (_, text) = draw(&data, &GameStats::default(), &mut confirm);
+        let (_, text) = draw(&data, &GameStats::default(), &mut confirm, Lang::Fr);
         assert!(text.contains("Supprimer définitivement"), "{text}");
         assert!(text.contains("Annuler"), "{text}");
     }
@@ -700,7 +769,7 @@ mod tests {
     #[test]
     fn the_empty_sections_say_what_fills_them() {
         let mut confirm = None;
-        let (_, text) = draw(&SheetData::default(), &GameStats::default(), &mut confirm);
+        let (_, text) = draw(&SheetData::default(), &GameStats::default(), &mut confirm, Lang::Fr);
         assert!(text.contains("Aucune sauvegarde d'état"), "{text}");
         assert!(text.contains("F5"), "{text}");
         assert!(text.contains("Aucune capture"), "{text}");

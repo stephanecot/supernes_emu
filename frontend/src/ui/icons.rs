@@ -19,7 +19,7 @@ use super::theme;
 /// Side of an icon standing next to body text, in points.
 pub const SIZE: f32 = 15.0;
 /// Gap between an icon and the label that follows it.
-const GAP: f32 = 7.0;
+pub const GAP: f32 = 7.0;
 /// Stroke width as a fraction of the icon's side. One value for the whole set:
 /// that uniformity is what makes drawn icons read as a family.
 const STROKE_RATIO: f32 = 0.095;
