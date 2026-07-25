@@ -53,6 +53,13 @@ pub enum View {
     /// at a time, so a capture of only the first one leaves the five others —
     /// and the controller drawing of `Entrées` — impossible to look at.
     Settings(Section),
+    /// `Entrées` waiting for a key on one named button: the state the drawn
+    /// controller exists for, and one a resting capture can never show.
+    InputsCapture,
+    /// `Entrées` with four buttons physically held, on the keyboard and on a
+    /// controller at once — the live feedback that makes the drawing a pad
+    /// tester. Without this view that half of the section is unverifiable.
+    InputsPressed,
     /// The empty screen: a library folder with no game in it, and the call to
     /// action that goes with it.
     Empty,
@@ -73,12 +80,15 @@ const SCROLL_BAR_W: f32 = 16.0;
 const GRID_TOP: f32 = 200.0;
 /// Height of a card's text block at the shell's type scale.
 const CARD_TEXT_H: f32 = 60.0;
+/// Middle of the `Y` row of the bindings list, measured on a capture. Only used
+/// to rest the pointer on a row.
+const INPUTS_ROW_Y: f32 = 464.0;
 
 impl View {
     /// Names accepted on the command line, in the order `--help` lists them.
     /// One name per screen the shell can show, the settings panel counting one
     /// per section since that is what it draws at a time.
-    pub const ALL: [(&'static str, View); 11] = [
+    pub const ALL: [(&'static str, View); 13] = [
         ("library", View::Library),
         ("favorites", View::Favorites),
         ("game-sheet", View::GameSheet),
@@ -86,6 +96,8 @@ impl View {
         ("settings-audio", View::Settings(Section::Audio)),
         ("settings-emulation", View::Settings(Section::Emulation)),
         ("settings-inputs", View::Settings(Section::Inputs)),
+        ("settings-inputs-capture", View::InputsCapture),
+        ("settings-inputs-pressed", View::InputsPressed),
         ("settings-folders", View::Settings(Section::Folders)),
         ("settings-about", View::Settings(Section::About)),
         ("empty", View::Empty),
@@ -110,10 +122,45 @@ impl View {
             })
     }
 
+    /// The settings section this view shows, if it is a settings view at all.
+    /// The two `Entrées` states are that section too — they differ by what the
+    /// panel is *doing*, not by what it draws.
+    pub fn settings_section(self) -> Option<Section> {
+        match self {
+            View::Settings(section) => Some(section),
+            View::InputsCapture | View::InputsPressed => Some(Section::Inputs),
+            _ => None,
+        }
+    }
+
+    /// The SNES buttons held while this view is drawn: the live feedback the
+    /// controller drawing shows.
+    fn held(self) -> snes_core::JoypadState {
+        match self {
+            // A direction, a face button, a shoulder and a menu button: one of
+            // each kind of shape the drawing has.
+            View::InputsPressed => snes_core::JoypadState {
+                right: true,
+                b: true,
+                r: true,
+                select: true,
+                ..Default::default()
+            },
+            _ => snes_core::JoypadState::default(),
+        }
+    }
+
     /// Where the mouse cursor is during a capture of this view, in points.
     /// Only `library-hover` has one: it exists to show the state of a tile
     /// under the pointer, which no other capture can reach.
     pub fn pointer(self, size: (u32, u32)) -> Option<egui::Pos2> {
+        // On the `Entrées` state that holds buttons down, the pointer also
+        // rests on one row of the list — that is how a capture shows the link
+        // between a row and the drawing beside it (the row lights up, and so
+        // does its button).
+        if self == View::InputsPressed {
+            return Some(egui::pos2(280.0, INPUTS_ROW_Y));
+        }
         // Middle of the second card of the first row, computed the way the
         // grid lays it out rather than read off a picture, so the pointer
         // keeps landing on a card when the geometry is tuned.
@@ -761,13 +808,18 @@ impl Fixture {
                 tab: if view == View::Favorites { Tab::Favorites } else { Tab::Library },
                 ..Default::default()
             },
-            settings_ui: SettingsUi {
-                open: matches!(view, View::Settings(_)),
-                section: match view {
-                    View::Settings(section) => section,
-                    _ => Section::default(),
-                },
-                ..Default::default()
+            settings_ui: {
+                let mut ui = SettingsUi {
+                    open: view.settings_section().is_some(),
+                    section: view.settings_section().unwrap_or_default(),
+                    ..Default::default()
+                };
+                if view == View::InputsCapture {
+                    // A face button, so the capture pulse is shown where the
+                    // drawing is most itself: on the coloured diamond.
+                    ui.capture.start("A", crate::input::Device::Keyboard);
+                }
+                ui
             },
             textures: TextureStore::new(),
             prefs: Prefs::default(),
@@ -780,7 +832,7 @@ impl Fixture {
     /// composes exactly this way: one screen owns the window, and the settings
     /// view is one of them (a full-width view, not a panel over the library).
     pub fn build(&mut self, ctx: &egui::Context) {
-        if matches!(self.view, View::Settings(_)) {
+        if self.view.settings_section().is_some() {
             super::settings::show(
                 ctx,
                 &mut SettingsModel {
@@ -793,6 +845,7 @@ impl Fixture {
                     zoom: crate::render::FALLBACK_ZOOM,
                     library_dir: &self.rom_dir,
                     config_dir: Some(&self.config_dir),
+                    pressed: self.view.held(),
                     state: &mut self.settings_ui,
                 },
             );
@@ -877,15 +930,17 @@ mod tests {
         assert_eq!(View::parse("game-sheet"), Ok(View::GameSheet));
         assert_eq!(View::parse("empty"), Ok(View::Empty));
         assert_eq!(View::parse("library-hover"), Ok(View::Hover));
-        // Only that view carries a pointer, and it lands inside the window.
+        // Only the two views that exist to show a hover state carry a pointer,
+        // and it lands inside the window.
         for (_, view) in View::ALL {
+            let hovering = matches!(view, View::Hover | View::InputsPressed);
             match view.pointer(DEFAULT_SIZE) {
                 Some(p) => {
-                    assert_eq!(view, View::Hover);
+                    assert!(hovering, "{view:?} places a pointer for nothing");
                     assert!(p.x > 0.0 && p.x < DEFAULT_SIZE.0 as f32, "{p:?}");
                     assert!(p.y > 0.0 && p.y < DEFAULT_SIZE.1 as f32, "{p:?}");
                 }
-                None => assert_ne!(view, View::Hover),
+                None => assert!(!hovering, "{view:?} shows a hover state with no pointer"),
             }
         }
         assert!(View::parse("Library").is_err(), "the names are case-sensitive");
@@ -910,6 +965,16 @@ mod tests {
             View::ALL.iter().filter(|(_, v)| matches!(v, View::Settings(_))).count(),
             Section::ALL.len()
         );
+        // …plus the two states of `Entrées` a resting capture cannot show: the
+        // panel waiting for a press, and buttons held on the drawing.
+        assert_eq!(View::parse("settings-inputs-capture"), Ok(View::InputsCapture));
+        assert_eq!(View::parse("settings-inputs-pressed"), Ok(View::InputsPressed));
+        for view in [View::InputsCapture, View::InputsPressed] {
+            assert_eq!(view.settings_section(), Some(Section::Inputs));
+        }
+        assert_eq!(View::Library.settings_section(), None);
+        assert!(View::InputsPressed.held() != snes_core::JoypadState::default());
+        assert_eq!(View::Settings(Section::Inputs).held(), snes_core::JoypadState::default());
         // The name used before the sections were split still resolves, to the
         // section the panel opens on.
         assert_eq!(View::parse("settings"), Ok(View::Settings(Section::default())));
@@ -974,7 +1039,7 @@ mod tests {
             // but placeholders. The empty view has no game and therefore no
             // picture — that is the point of it — and the settings view shows
             // no library at all.
-            if !matches!(view, View::Empty | View::Settings(_)) {
+            if view != View::Empty && view.settings_section().is_none() {
                 assert!(textures > 1, "{name} uploaded no picture ({textures} textures)");
             }
         }

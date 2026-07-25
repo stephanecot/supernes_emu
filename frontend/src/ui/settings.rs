@@ -27,6 +27,7 @@
 use std::path::{Path, PathBuf};
 
 use egui::{Align, Layout, Rect, RichText, Sense, Vec2};
+use snes_core::JoypadState;
 
 use crate::input::{self, Capture, Device};
 use crate::pad;
@@ -34,6 +35,7 @@ use crate::prefs::{Prefs, FAST_FORWARD_FACTORS};
 use crate::render::{Aspect, Filter};
 use crate::state::SLOT_COUNT;
 
+use super::pad_art;
 use super::tabs::{self, Tab};
 use super::theme;
 use super::{Action, Setting};
@@ -112,6 +114,13 @@ const PAD_COL_W: f32 = 250.0;
 /// buttons of one line sit on three different baselines, and every line 44
 /// points tall instead of 31.
 const BIND_ROW_H: f32 = 30.0;
+/// Width the three columns of the bindings list need together. What is left of
+/// the content area past it is what the controller drawing may use.
+const BIND_LIST_W: f32 = BUTTON_COL_W + BIND_COL_W + PAD_COL_W;
+/// Space between the list and the drawing, and the margin kept between the
+/// drawing and the right edge of the content area.
+const PAD_GAP: f32 = 28.0;
+const PAD_INSET: f32 = 10.0;
 /// Longest folder path shown before its middle is elided.
 const PATH_MAX_CHARS: usize = 52;
 /// Narrowest the controls column is ever drawn.
@@ -231,6 +240,11 @@ pub struct SettingsUi {
     /// (`video::App::handle_key`) — otherwise F11 pressed in capture would go
     /// fullscreen instead of being assigned.
     pub capture: Capture,
+    /// Button the pointer was on in the controller drawing. Only read when the
+    /// drawing sits *under* the list (a narrow window), where its rectangle is
+    /// known too late to highlight the matching row in the same frame; beside
+    /// the list the answer is recomputed before the rows are laid out.
+    pub pad_hover: Option<&'static str>,
 }
 
 /// Everything the panel displays, borrowed for one UI frame.
@@ -250,6 +264,11 @@ pub struct SettingsModel<'a> {
     pub library_dir: &'a Path,
     /// Where `prefs.json` and the derived caches live, for the About section.
     pub config_dir: Option<&'a Path>,
+    /// SNES buttons held right now, keyboard and controllers together. The
+    /// `Entrées` section lights them on its drawing, which is what turns the
+    /// screen into a controller tester — a half-broken pad is found out here
+    /// rather than in the middle of a game.
+    pub pressed: JoypadState,
     pub state: &'a mut SettingsUi,
 }
 
@@ -397,15 +416,23 @@ fn body(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
             |ui| {
                 ui.set_min_width(content_w);
                 egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+                    // `Entrées` is the one section allowed past the reading
+                    // column: the controller drawing lives in the space a wide
+                    // window leaves free beside it, and bounds its own prose to
+                    // the reading width from the inside.
+                    let column_w = match model.state.section {
+                        Section::Inputs => content_w,
+                        _ => reading_w,
+                    };
                     ui.allocate_ui_with_layout(
-                        Vec2::new(reading_w, 0.0),
+                        Vec2::new(column_w, 0.0),
                         Layout::top_down(Align::Min),
                         |ui| {
-                            ui.set_min_width(reading_w);
+                            ui.set_min_width(column_w);
                             let produced = match model.state.section {
                                 Section::Display => display_section(ui, model),
                                 Section::Audio => audio_section(ui, model),
-                                Section::Inputs => inputs_section(ui, model),
+                                Section::Inputs => inputs_section(ui, model, reading_w),
                                 Section::Emulation => emulation_section(ui, model),
                                 Section::Folders => folders_section(ui, model),
                                 Section::About => about_section(ui, model),
@@ -518,7 +545,7 @@ fn display_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
 
     row(ui, "Plein écran", |ui| {
         let mut on = model.fullscreen;
-        if ui.checkbox(&mut on, "Occuper tout l'écran (F11)").changed() {
+        if checkbox(ui, &mut on, "Occuper tout l'écran (F11)").changed() {
             action = Action::Set(Setting::Fullscreen(on));
         }
     });
@@ -526,7 +553,7 @@ fn display_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
 
     row(ui, "Compteur d'images", |ui| {
         let mut on = prefs.show_fps;
-        if ui.checkbox(&mut on, "Afficher les FPS (F)").changed() {
+        if checkbox(ui, &mut on, "Afficher les FPS (F)").changed() {
             action = Action::Set(Setting::ShowFps(on));
         }
     });
@@ -540,7 +567,7 @@ fn audio_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
 
     row(ui, "Muet", |ui| {
         let mut on = prefs.mute;
-        if ui.checkbox(&mut on, "Couper le son (M)").changed() {
+        if checkbox(ui, &mut on, "Couper le son (M)").changed() {
             action = Action::Set(Setting::Mute(on));
         }
     });
@@ -573,106 +600,256 @@ fn audio_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
 /// stored as a binding that would never reach the console. A conflict with
 /// another SNES button is settled by swapping the two, so no button is ever
 /// left unbound; the swap is announced under the list.
-fn inputs_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
+fn inputs_section(ui: &mut egui::Ui, model: &mut SettingsModel, reading_w: f32) -> Action {
     let mut action = Action::None;
 
-    // The prompt, the notice and the reset button sit *above* the list: the
-    // twelve rows are taller than the panel's content area at a small window
-    // size, and a capture prompt the player has to scroll to find would be
-    // useless.
-    if let Some((button, device)) = model.state.capture.pending() {
-        let what = match device {
-            Device::Keyboard => "une touche",
-            Device::Gamepad => "un bouton de manette",
-        };
-        ui.label(
-            RichText::new(format!(
-                "Appuyez sur {what} pour {} — Échap pour annuler.",
-                button_label(button)
-            ))
-            .size(theme::SIZE_BODY)
-            .color(theme::ACCENT),
-        );
-    } else {
-        hint(ui, "Cliquez sur une case pour réaffecter la touche ou le bouton.");
+    // Where the drawing goes. Beside the list when the window leaves room for
+    // it, which is the point of the reading column being bounded; otherwise
+    // *under* it — never squeezed into a strip, and never at the cost of the
+    // list, which is what the player came here for.
+    let available = ui.available_width();
+    let beside = available - BIND_LIST_W - PAD_GAP >= pad_art::MIN_W;
+    let mut pad_rect = None;
+    let mut column_w = available.min(reading_w);
+    if beside {
+        let size = pad_art::size_for(available - BIND_LIST_W - PAD_GAP);
+        // The inset is taken out of the *list's* column, so it only ever costs
+        // slack: at the narrowest width where the drawing still fits beside the
+        // list there is none to give, and the clamp gives it back.
+        column_w = (available - size.x - PAD_GAP - PAD_INSET).clamp(BIND_LIST_W, reading_w);
+        // Centred in whatever is left, so the drawing does not drift to the far
+        // edge of a very wide window.
+        let free = available - column_w - PAD_GAP;
+        let left = ui.max_rect().left() + column_w + PAD_GAP + (free - size.x) / 2.0;
+        pad_rect = Some(Rect::from_min_size(egui::pos2(left, ui.cursor().top()), size));
     }
-    if let Some(notice) = &model.state.capture.notice {
-        ui.label(RichText::new(notice).size(theme::SIZE_SMALL).color(theme::RED));
+    // Interacted with *before* the list is laid out, so pointing at a button on
+    // the drawing highlights its row in the very same frame.
+    let pad_response =
+        pad_rect.map(|rect| ui.interact(rect, ui.id().with("pad-art"), Sense::click()));
+    let pad_hover = match (&pad_response, pad_rect) {
+        (Some(response), Some(rect)) => response.hover_pos().and_then(|p| pad_art::hit(rect, p)),
+        _ => None,
+    };
+    // Under the list the drawing's rectangle is not known yet: last frame's
+    // answer stands in, and egui refreshes it as soon as the pointer moves.
+    let mut hovered = if beside { pad_hover } else { model.state.pad_hover };
+    if let (Some(response), Some(name)) = (&pad_response, pad_hover) {
+        // Clicking the drawing is clicking the row: the primary button rebinds
+        // the key, the secondary one the controller button.
+        if response.clicked() {
+            model.state.capture.start(name, Device::Keyboard);
+        } else if response.secondary_clicked() {
+            model.state.capture.start(name, Device::Gamepad);
+        }
     }
-    ui.add_space(4.0);
-    if ui.button("Rétablir les entrées par défaut").clicked() {
-        action = Action::Set(Setting::ResetInputs);
-    }
-    ui.add_space(8.0);
 
-    ui.horizontal(|ui| {
-        bind_cell(ui, BUTTON_COL_W, |ui| {
-            ui.label(RichText::new("Bouton").size(theme::SIZE_SMALL).color(theme::TEXT_DIM));
-        });
-        bind_cell(ui, BIND_COL_W, |ui| {
-            ui.label(RichText::new("Clavier").size(theme::SIZE_SMALL).color(theme::TEXT_DIM));
-        });
-        bind_cell(ui, PAD_COL_W, |ui| {
-            ui.label(RichText::new("Manette").size(theme::SIZE_SMALL).color(theme::TEXT_DIM));
-        });
-    });
+    let mut unbound: Vec<&'static str> = Vec::new();
+    ui.allocate_ui_with_layout(Vec2::new(column_w, 0.0), Layout::top_down(Align::Min), |ui| {
+        ui.set_min_width(column_w);
+        // The prompt, the notice and the reset button sit *above* the list: the
+        // twelve rows are taller than the panel's content area at a small window
+        // size, and a capture prompt the player has to scroll to find would be
+        // useless.
+        if let Some((button, device)) = model.state.capture.pending() {
+            let what = match device {
+                Device::Keyboard => "une touche",
+                Device::Gamepad => "un bouton de manette",
+            };
+            ui.label(
+                RichText::new(format!(
+                    "Appuyez sur {what} pour {} — Échap pour annuler.",
+                    button_label(button)
+                ))
+                .size(theme::SIZE_BODY)
+                .color(theme::ACCENT),
+            );
+        } else {
+            hint(ui, "Cliquez sur une case — ou sur le bouton dessiné — pour le réaffecter.");
+        }
+        if let Some(notice) = &model.state.capture.notice {
+            ui.label(RichText::new(notice).size(theme::SIZE_SMALL).color(theme::RED));
+        }
+        ui.add_space(4.0);
+        if ui.button("Rétablir les entrées par défaut").clicked() {
+            action = Action::Set(Setting::ResetInputs);
+        }
+        ui.add_space(8.0);
 
-    // Tighter than the section's default spacing: twelve rows have to fit
-    // beside a controller drawing without pushing the last of them out of view.
-    ui.spacing_mut().item_spacing.y = 2.0;
-    for name in input::BUTTONS {
-        // `shown_key`, not `effective_key`: a binding another button won is
-        // shown as a dash, since this one does not answer to it (see
-        // `input::shown_key`).
-        let key = input::shown_key(&model.prefs.keymap, name)
-            .map(input::key_label)
-            .unwrap_or_else(|| "—".to_string());
-        let pad_binding = pad::binding_label(&model.prefs.pad_map, name);
-        let capturing_key = model.state.capture.waiting_for(Device::Keyboard) == Some(name);
-        let capturing_pad = model.state.capture.waiting_for(Device::Gamepad) == Some(name);
         ui.horizontal(|ui| {
             bind_cell(ui, BUTTON_COL_W, |ui| {
-                ui.label(
-                    RichText::new(button_label(name)).size(theme::SIZE_BODY).color(theme::TEXT),
-                );
+                ui.label(RichText::new("Bouton").size(theme::SIZE_SMALL).color(theme::TEXT_DIM));
             });
             bind_cell(ui, BIND_COL_W, |ui| {
-                // A key name is what the hardware reports, not prose.
-                let text = RichText::new(binding_cell(&key, capturing_key, Device::Keyboard))
-                    .font(theme::mono(theme::SIZE_MONO));
-                let response = ui.selectable_label(capturing_key, text);
-                if response.clicked() {
-                    model.state.capture.start(name, Device::Keyboard);
-                    // The clicked cell keeps egui's keyboard focus, where
-                    // Space and Enter count as a click: binding either of
-                    // them would immediately re-open the capture on the
-                    // same row.
-                    response.surrender_focus();
-                }
+                ui.label(RichText::new("Clavier").size(theme::SIZE_SMALL).color(theme::TEXT_DIM));
             });
             bind_cell(ui, PAD_COL_W, |ui| {
-                let text = RichText::new(binding_cell(&pad_binding, capturing_pad, Device::Gamepad))
-                    .font(theme::mono(theme::SIZE_MONO));
-                let response = ui.selectable_label(capturing_pad, text);
-                if response.clicked() {
-                    model.state.capture.start(name, Device::Gamepad);
-                    response.surrender_focus();
-                }
+                ui.label(RichText::new("Manette").size(theme::SIZE_SMALL).color(theme::TEXT_DIM));
             });
         });
+
+        // Tighter than the section's default spacing: twelve rows have to fit
+        // beside a controller drawing without pushing the last of them out of view.
+        ui.spacing_mut().item_spacing.y = 2.0;
+        for name in input::BUTTONS {
+            // `shown_key`, not `effective_key`: a binding another button won is
+            // shown as a dash, since this one does not answer to it (see
+            // `input::shown_key`).
+            let bound_key = input::shown_key(&model.prefs.keymap, name);
+            let key = bound_key.map(input::key_label).unwrap_or_else(|| "—".to_string());
+            let pad_binding = pad::binding_label(&model.prefs.pad_map, name);
+            if bound_key.is_none() && pad_binding == "—" {
+                unbound.push(name);
+            }
+            let capturing_key = model.state.capture.waiting_for(Device::Keyboard) == Some(name);
+            let capturing_pad = model.state.capture.waiting_for(Device::Gamepad) == Some(name);
+            let held = pad_art::is_pressed(&model.pressed, name);
+            // Reserved before the row is drawn so the band paints *behind* it;
+            // the row's own rectangle is only known once it has been laid out.
+            let band = ui.painter().add(egui::Shape::Noop);
+            let row = ui
+                .horizontal(|ui| {
+                    bind_cell(ui, BUTTON_COL_W, |ui| {
+                        ui.label(
+                            RichText::new(button_label(name))
+                                .size(theme::SIZE_BODY)
+                                .color(theme::TEXT),
+                        );
+                    });
+                    bind_cell(ui, BIND_COL_W, |ui| {
+                        // A key name is what the hardware reports, not prose.
+                        let text = RichText::new(binding_cell(&key, capturing_key, Device::Keyboard))
+                            .font(theme::mono(theme::SIZE_MONO));
+                        let response = ui.selectable_label(capturing_key, text);
+                        if response.clicked() {
+                            model.state.capture.start(name, Device::Keyboard);
+                            // The clicked cell keeps egui's keyboard focus, where
+                            // Space and Enter count as a click: binding either of
+                            // them would immediately re-open the capture on the
+                            // same row.
+                            response.surrender_focus();
+                        }
+                    });
+                    bind_cell(ui, PAD_COL_W, |ui| {
+                        let text =
+                            RichText::new(binding_cell(&pad_binding, capturing_pad, Device::Gamepad))
+                                .font(theme::mono(theme::SIZE_MONO));
+                        let response = ui.selectable_label(capturing_pad, text);
+                        if response.clicked() {
+                            model.state.capture.start(name, Device::Gamepad);
+                            response.surrender_focus();
+                        }
+                    });
+                })
+                .response;
+            // The link the drawing earns its space with: the row under the
+            // pointer lights its button, and the button under the pointer
+            // lights its row.
+            if row.contains_pointer() {
+                hovered = Some(name);
+            }
+            let fill = if capturing_key || capturing_pad {
+                Some(theme::ACCENT.gamma_multiply(0.28))
+            } else if held {
+                Some(theme::TEXT.gamma_multiply(0.14))
+            } else if hovered == Some(name) {
+                Some(theme::BG_WIDGET)
+            } else {
+                None
+            };
+            if let Some(fill) = fill {
+                let rect = Rect::from_min_size(
+                    row.rect.min,
+                    Vec2::new(BIND_LIST_W.min(row.rect.width()), row.rect.height()),
+                );
+                ui.painter().set(
+                    band,
+                    egui::epaint::RectShape::filled(rect.expand2(Vec2::new(6.0, 1.0)), 5.0, fill),
+                );
+            }
+        }
+
+        ui.add_space(8.0);
+        hint(
+            ui,
+            "Une touche déjà prise par un autre bouton est échangée avec lui ; les raccourcis de l'application (F1-F12, Tab, P, M…) sont refusés.",
+        );
+        hint(
+            ui,
+            "Clavier et manette 1 pilotent le joueur 1, manette 2 le joueur 2. Les sticks et la croix restent toujours actifs sur les directions.",
+        );
+    });
+
+    // The drawing goes under the list when there was no room beside it. Same
+    // widget, same interaction — only later in the frame, which is why the
+    // hover it reports is carried to the next one.
+    if !beside {
+        ui.add_space(6.0);
+        let size = pad_art::size_for(column_w);
+        let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+        let under = response.hover_pos().and_then(|p| pad_art::hit(rect, p));
+        if let Some(name) = under {
+            if response.clicked() {
+                model.state.capture.start(name, Device::Keyboard);
+            } else if response.secondary_clicked() {
+                model.state.capture.start(name, Device::Gamepad);
+            }
+        }
+        pad_rect = Some(rect);
+        model.state.pad_hover = under;
+    } else {
+        model.state.pad_hover = pad_hover;
     }
 
-    ui.add_space(8.0);
-    hint(
-        ui,
-        "Une touche déjà prise par un autre bouton est échangée avec lui ; les raccourcis de l'application (F1-F12, Tab, P, M…) sont refusés.",
-    );
-    hint(
-        ui,
-        "Clavier et manette 1 pilotent le joueur 1, manette 2 le joueur 2. Les sticks et la croix restent toujours actifs sur les directions.",
-    );
+    if let Some(rect) = pad_rect {
+        let time = ui.input(|i| i.time);
+        pad_art::paint(
+            ui.painter(),
+            rect,
+            &pad_art::Pad {
+                highlight: hovered,
+                capturing: model.state.capture.pending().map(|(button, _)| button),
+                pressed: model.pressed,
+                unbound: &unbound,
+                time,
+            },
+        );
+        if model.state.capture.is_active() {
+            // A pulse only exists if the frame it is drawn in is followed by
+            // another one.
+            ui.ctx().request_repaint();
+        }
+        let caption = pad_caption(ui, rect);
+        if !beside {
+            // Under the list, the caption is part of the section's own height.
+            ui.add_space(caption + 10.0);
+        }
+    }
 
     action
+}
+
+/// The line under the drawing. It says what the drawing is for — a controller
+/// tester as much as a map of the bindings — because a picture nobody knows is
+/// live is a picture nobody presses a button at.
+fn pad_caption(ui: &mut egui::Ui, rect: Rect) -> f32 {
+    // A narrow drawing would turn the long form into a six-line paragraph
+    // taller than the pad it explains.
+    let text = if rect.width() >= pad_art::LEGEND_MIN_W {
+        "Les boutons pressés s'allument : de quoi vérifier une manette sans lancer de jeu. \
+         Clic : réaffecter la touche · clic droit : le bouton de manette."
+    } else {
+        "Les boutons pressés s'allument. Clic : réaffecter."
+    };
+    let galley = ui.painter().layout(
+        text.to_string(),
+        theme::font(theme::SIZE_SMALL),
+        theme::TEXT_DIM,
+        rect.width(),
+    );
+    let height = galley.size().y;
+    ui.painter().galley(egui::pos2(rect.left(), rect.bottom() + 10.0), galley, theme::TEXT_DIM);
+    height
 }
 
 fn emulation_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
@@ -691,7 +868,7 @@ fn emulation_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
 
     row(ui, "Reprise instantanée", |ui| {
         let mut on = prefs.resume_on_launch;
-        if ui.checkbox(&mut on, "Reprendre où l'on s'était arrêté (F10)").changed() {
+        if checkbox(ui, &mut on, "Reprendre où l'on s'était arrêté (F10)").changed() {
             action = Action::Set(Setting::ResumeOnLaunch(on));
         }
     });
@@ -699,7 +876,7 @@ fn emulation_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
 
     row(ui, "Confirmation", |ui| {
         let mut on = prefs.confirm_on_quit;
-        if ui.checkbox(&mut on, "Demander avant de quitter (C)").changed() {
+        if checkbox(ui, &mut on, "Demander avant de quitter (C)").changed() {
             action = Action::Set(Setting::ConfirmOnQuit(on));
         }
     });
@@ -900,6 +1077,39 @@ fn bind_cell(ui: &mut egui::Ui, width: f32, add: impl FnOnce(&mut egui::Ui)) {
             add(ui);
         },
     );
+}
+
+/// A checkbox with the weight the rest of the shell's controls have.
+///
+/// Still an `egui::Checkbox` — same semantics, same keyboard behaviour — but
+/// egui paints its box from the widget visuals, and those are tuned for a
+/// *filled* control: on this palette the resting box came out as a 14-point
+/// square of panel grey outlined with a hairline nobody could see, which is
+/// what made `Plein écran` and `Compteur d'images` read as blemishes rather
+/// than controls. A checked box is filled with the accent, like a selected
+/// choice; an unchecked one carries a border in the secondary text colour, the
+/// same value as the label next to it.
+fn checkbox(ui: &mut egui::Ui, on: &mut bool, label: &str) -> egui::Response {
+    let checked = *on;
+    {
+        let spacing = ui.spacing_mut();
+        spacing.icon_width = 18.0;
+        spacing.icon_width_inner = 11.0;
+        spacing.icon_spacing = 8.0;
+    }
+    let widgets = &mut ui.visuals_mut().widgets;
+    for (state, border) in [
+        (&mut widgets.inactive, theme::TEXT_DIM.gamma_multiply(0.8)),
+        (&mut widgets.hovered, theme::ACCENT),
+        (&mut widgets.active, theme::ACCENT),
+    ] {
+        state.bg_fill = if checked { theme::ACCENT } else { theme::BG_WIDGET };
+        state.weak_bg_fill = state.bg_fill;
+        state.bg_stroke =
+            egui::Stroke::new(1.5, if checked { theme::ACCENT } else { border });
+        state.fg_stroke = egui::Stroke::new(2.0, egui::Color32::WHITE);
+    }
+    ui.checkbox(on, RichText::new(label).size(theme::SIZE_BODY).color(theme::TEXT))
 }
 
 /// Secondary line under a setting: what it does, or the limit it has.
@@ -1142,6 +1352,17 @@ mod tests {
         (action, text)
     }
 
+    /// The same with buttons physically held, which only `Entrées` shows.
+    fn draw_pressed(
+        prefs: &Prefs,
+        state: &mut SettingsUi,
+        pressed: JoypadState,
+    ) -> (String, Vec<egui::Shape>) {
+        let (_, text, shapes) =
+            draw_full(Section::Inputs, prefs, state, (1280.0, 800.0), pressed);
+        (text, shapes)
+    }
+
     /// The same at an explicit window size, also returning the shapes: a
     /// section that scrolls out of view is *not* painted (egui skips a widget
     /// whose rectangle is outside the clip rectangle), which is what makes this
@@ -1151,6 +1372,16 @@ mod tests {
         prefs: &Prefs,
         state: &mut SettingsUi,
         size: (f32, f32),
+    ) -> (Action, String, Vec<egui::Shape>) {
+        draw_full(section, prefs, state, size, JoypadState::default())
+    }
+
+    fn draw_full(
+        section: Section,
+        prefs: &Prefs,
+        state: &mut SettingsUi,
+        size: (f32, f32),
+        pressed_buttons: JoypadState,
     ) -> (Action, String, Vec<egui::Shape>) {
         let ctx = egui::Context::default();
         theme::apply(&ctx);
@@ -1181,6 +1412,7 @@ mod tests {
                         zoom: crate::render::FALLBACK_ZOOM,
                         library_dir: Path::new("roms"),
                         config_dir: Some(Path::new("/config/Prisme")),
+                        pressed: pressed_buttons,
                         state,
                     },
                 );
@@ -1530,6 +1762,7 @@ mod tests {
                         zoom: crate::render::FALLBACK_ZOOM,
                         library_dir: Path::new("roms"),
                         config_dir: None,
+                        pressed: JoypadState::default(),
                         state: &mut state,
                     },
                 );
@@ -1538,6 +1771,173 @@ mod tests {
         }
         assert!(state.capture.is_active(), "only the event loop ends a capture");
         assert_eq!(state.section, Section::Inputs);
+    }
+
+    /// Circles the panel painted, as (fill, radius).
+    fn circles(shapes: &[egui::Shape]) -> Vec<(egui::Color32, f32)> {
+        shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Circle(c) => Some((c.fill, c.radius)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The controller is drawn in `Entrées` and nowhere else, and it carries
+    /// the four prism accents on its face buttons — the legend of the European
+    /// pad, which is the whole reason the drawing is there.
+    #[test]
+    fn the_entrees_section_draws_the_controller_with_its_four_coloured_buttons() {
+        let prefs = Prefs::default();
+        let mut state = SettingsUi::default();
+        let (_, _, shapes) = draw_at(Section::Inputs, &prefs, &mut state, (1280.0, 800.0));
+        let fills: Vec<egui::Color32> = circles(&shapes).into_iter().map(|(f, _)| f).collect();
+        for accent in theme::ACCENTS {
+            assert!(fills.contains(&accent), "no {accent:?} face button on the drawing");
+        }
+        // …and no other section spends the four accents on a drawing of its own.
+        for section in [Section::Display, Section::Audio, Section::Folders] {
+            let mut state = SettingsUi::default();
+            let (_, _, shapes) = draw_at(section, &prefs, &mut state, (1280.0, 800.0));
+            let fills: Vec<egui::Color32> = circles(&shapes).into_iter().map(|(f, _)| f).collect();
+            assert!(
+                !theme::ACCENTS.iter().all(|a| fills.contains(a)),
+                "{:?} draws a controller",
+                section.label()
+            );
+        }
+    }
+
+    /// The live half: a button held on the keyboard or on a controller must
+    /// change what the drawing paints, or the section is not the tester it says
+    /// it is.
+    #[test]
+    fn a_held_button_lights_up_on_the_drawing() {
+        let prefs = Prefs::default();
+        let mut state = SettingsUi::default();
+        let (_, resting) = draw_pressed(&prefs, &mut state, JoypadState::default());
+        let mut state = SettingsUi::default();
+        let (_, held) =
+            draw_pressed(&prefs, &mut state, JoypadState { b: true, ..Default::default() });
+        let (resting, held) = (circles(&resting), circles(&held));
+        assert!(resting.iter().any(|(f, _)| *f == theme::YELLOW), "B is not yellow at rest");
+        assert!(
+            !held.iter().any(|(f, _)| *f == theme::YELLOW),
+            "B kept its resting colour while it was held"
+        );
+        // It is still a yellow button, only a lit one — a pressed button must
+        // not lose the colour it is identified by.
+        let lit = theme::YELLOW.lerp_to_gamma(egui::Color32::WHITE, 0.30);
+        assert!(held.iter().any(|(f, _)| *f == lit), "B did not light up: {held:?}");
+        // A lit button is also ringed, so it reads as pressed and not merely as
+        // a lighter shade of yellow: one more circle than at rest.
+        assert_eq!(held.len(), resting.len() + 1, "the pressed button carries no ring");
+    }
+
+    /// Clicking a button *on the drawing* must start the same capture clicking
+    /// its cell does, and pointing at it must light its row. The pointer is
+    /// aimed at whatever the panel actually painted red — the A button — so
+    /// this follows the drawing wherever the layout puts it instead of
+    /// hard-coding a position that would rot.
+    #[test]
+    fn clicking_a_button_on_the_drawing_rebinds_it_and_hovering_it_lights_its_row() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let prefs = Prefs::default();
+        let mut state = SettingsUi { open: true, section: Section::Inputs, ..Default::default() };
+        let size = egui::vec2(1280.0, 800.0);
+        let mut run = |pointer: Option<egui::Pos2>, click: bool, state: &mut SettingsUi| {
+            let mut events = Vec::new();
+            if let Some(pos) = pointer {
+                events.push(egui::Event::PointerMoved(pos));
+                if click {
+                    events.push(egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: Default::default(),
+                    });
+                    events.push(egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: Default::default(),
+                    });
+                }
+            }
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                time: Some(1.0),
+                events,
+                ..Default::default()
+            };
+            let output = ctx.run(input, |ctx| {
+                show(
+                    ctx,
+                    &mut SettingsModel {
+                        app_name: "Prisme",
+                        version: "0.0.0",
+                        prefs: &prefs,
+                        fullscreen: false,
+                        zoom: crate::render::FALLBACK_ZOOM,
+                        library_dir: Path::new("roms"),
+                        config_dir: None,
+                        pressed: JoypadState::default(),
+                        state,
+                    },
+                );
+            });
+            let mut shapes = Vec::new();
+            fn walk(shape: &egui::Shape, out: &mut Vec<egui::Shape>) {
+                match shape {
+                    egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                    other => out.push(other.clone()),
+                }
+            }
+            for clipped in &output.shapes {
+                walk(&clipped.shape, &mut shapes);
+            }
+            shapes
+        };
+
+        // Settle the layout, then find the red button the drawing painted.
+        let mut shapes = Vec::new();
+        for _ in 0..4 {
+            shapes = run(None, false, &mut state);
+        }
+        let a = shapes
+            .iter()
+            .find_map(|s| match s {
+                egui::Shape::Circle(c) if c.fill == theme::RED => Some(c.center),
+                _ => None,
+            })
+            .expect("the drawing painted no red A button");
+
+        // Pointing at it lights the A row of the list…
+        let hovered = run(Some(a), false, &mut state);
+        assert_eq!(state.pad_hover, Some("A"), "the drawing does not report what it is under");
+        let bands = hovered
+            .iter()
+            .filter(|s| matches!(s, egui::Shape::Rect(r) if r.fill == theme::BG_WIDGET))
+            .count();
+        assert!(bands > 0, "no row was highlighted while the drawing was hovered");
+
+        // …and clicking it opens the very capture the cell would have opened.
+        assert!(!state.capture.is_active());
+        let _ = run(Some(a), true, &mut state);
+        assert_eq!(
+            state.capture.pending(),
+            Some(("A", Device::Keyboard)),
+            "clicking the drawn A button did not start its capture"
+        );
+
+        // A click on the body of the pad binds nothing: only the buttons do.
+        state.capture.cancel();
+        // Straight below A, clear of its rim and of B, still on the shell.
+        let body = a + egui::vec2(0.0, 40.0);
+        let _ = run(Some(body), true, &mut state);
+        assert_eq!(state.capture.pending(), None, "the shell of the pad is not a button");
     }
 
     /// A pending capture must be visible: the row it waits on shows the prompt
@@ -1586,6 +1986,7 @@ mod tests {
                 notice: Some("erreur de test".to_string()),
                 folder_notice: None,
                 capture: Capture::default(),
+                pad_hover: None,
             };
             let mut produced = Action::Quit;
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
@@ -1599,6 +2000,7 @@ mod tests {
                         zoom: crate::render::FALLBACK_ZOOM,
                         library_dir: Path::new("roms"),
                         config_dir: None,
+                        pressed: JoypadState::default(),
                         state: &mut state,
                     },
                 );

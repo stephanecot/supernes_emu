@@ -8,7 +8,8 @@
 //! and its spectral underline) and the decision
 //! helpers of `library_view` /
 //! `game_sheet` / `settings` (card subtitle, sheet facts, offered choices,
-//! Escape precedence) are pure logic; `egui_layer` is the only module that
+//! Escape precedence) are pure logic; `pad_art` draws the SNES controller of
+//! the `Entrées` section and maps a point back to the button under it; `egui_layer` is the only module that
 //! touches wgpu; `home`, `library_view`, `game_sheet` and `settings` only
 //! build widgets, and `textures` caches the decoded pictures they draw.
 //! `shot` renders those same screens to a PNG with no window at all
@@ -23,6 +24,7 @@ pub mod game_sheet;
 pub mod home;
 pub mod icons;
 pub mod library_view;
+pub mod pad_art;
 pub mod settings;
 pub mod shot;
 pub mod tabs;

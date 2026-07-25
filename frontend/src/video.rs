@@ -790,6 +790,13 @@ impl App {
                 }
                 return;
             }
+            // The key still drives nothing — both ports are held at rest while
+            // the panel is up (`current_pads`) — but it lights its button on
+            // the controller drawn by `Entrées`, which is what turns that
+            // section into a tester.
+            if let Some(name) = input::resolve_key(&self.prefs.keymap, code) {
+                let _ = input::set_button(&mut self.pad, name, pressed);
+            }
             if pressed && !repeat {
                 match code {
                     KeyCode::Escape => self.handle_escape(event_loop),
@@ -1615,6 +1622,20 @@ impl App {
         } else {
             (PathBuf::new(), None)
         };
+        // What `Entrées` lights on its drawing: the keyboard and *both*
+        // controller ports at once, since the drawing is there to answer "does
+        // this pad still work", whichever port it happens to be plugged into.
+        let pressed = if settings_open {
+            pad::merge(
+                self.pad,
+                pad::merge(
+                    self.pads.player(0, &self.prefs.pad_map),
+                    self.pads.player(1, &self.prefs.pad_map),
+                ),
+            )
+        } else {
+            JoypadState::default()
+        };
         let Self { ui, pixels, library, prefs, settings, .. } = self;
         let (Some(ui), Some(pixels)) = (ui.as_mut(), pixels.as_ref()) else {
             return Action::None;
@@ -1634,6 +1655,7 @@ impl App {
                         zoom,
                         library_dir: &rom_dir,
                         config_dir: config_dir.as_deref(),
+                        pressed,
                         state: settings,
                     },
                 )
