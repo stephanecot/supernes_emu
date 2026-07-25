@@ -502,6 +502,11 @@ pub struct StateFile {
     pub path: PathBuf,
     pub size: u64,
     pub modified: i64,
+    /// Framebuffer picture written beside the state when it was saved
+    /// (`crate::state::preview_path`), when there is one. Always optional: a
+    /// state written by an earlier version, or one whose picture failed to
+    /// write, simply shows a neutral plate in the sheet.
+    pub preview: Option<PathBuf>,
 }
 
 impl StateFile {
@@ -527,11 +532,14 @@ pub fn save_states(paths: &crate::paths::GamePaths) -> Vec<StateFile> {
     let mut push = |slot: Option<u8>, path: PathBuf| {
         if let Ok(meta) = std::fs::metadata(&path) {
             if meta.is_file() {
+                let preview = crate::state::preview_path(&path);
+                let preview = preview.is_file().then_some(preview);
                 out.push(StateFile {
                     slot,
                     path,
                     size: file_size(&meta),
                     modified: file_mtime(&meta),
+                    preview,
                 });
             }
         }
@@ -1198,6 +1206,16 @@ mod tests {
         assert_eq!(states[2].slot, Some(3));
         assert_eq!(states[2].label(), "Slot 3");
         assert_eq!(states[1].size, 2);
+        // No preview picture was written beside any of them: the sheet must
+        // still list the states (the preview is optional by design).
+        assert!(states.iter().all(|s| s.preview.is_none()));
+
+        // …and one that has a preview reports its path.
+        let preview = crate::state::preview_path(&beside.state_write(3));
+        std::fs::write(&preview, b"png").expect("write");
+        let states = save_states(&beside);
+        assert_eq!(states[2].preview.as_deref(), Some(preview.as_path()));
+        assert_eq!(states[1].preview, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

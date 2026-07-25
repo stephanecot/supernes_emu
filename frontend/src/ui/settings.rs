@@ -42,10 +42,12 @@ pub const FILTER_CHOICES: &[(Filter, &str)] =
 pub const ASPECT_CHOICES: &[(Aspect, &str)] =
     &[(Aspect::PixelPerfect, "Pixel-parfait (1:1)"), (Aspect::Tv, "TV authentique (8:7)")];
 
-/// Width of the panel's content area, in points. Wide enough for a folder path
-/// on one line, narrow enough to fit a ×1 window (256 px) side of the screen
-/// only partly — the modal is clamped to the window by egui itself.
-const PANEL_W: f32 = 560.0;
+/// Width of the panel, in points. Wide enough that a setting's controls fit on
+/// one line beside its label — at 560 the two `Ratio` choices together were
+/// wider than what was left of the row and wrapped onto a second line — and
+/// wide enough for a folder path. Narrower windows shrink it (`panel_dims`);
+/// the modal is clamped to the window by egui itself.
+const PANEL_W: f32 = 720.0;
 /// Width of the section list on the left.
 const NAV_W: f32 = 150.0;
 /// Width reserved for a setting's label, so the controls of a section line up.
@@ -66,7 +68,7 @@ const MIN_CONTENT_W: f32 = 130.0;
 /// three folders each carry a path, two buttons and an explanation) not to
 /// scroll. Fixed rather than content-driven so the modal keeps one size when the
 /// player walks the section list.
-const CONTENT_H: f32 = 470.0;
+const CONTENT_H: f32 = 500.0;
 /// Vertical space the panel's own chrome takes outside the content area (title
 /// row, separators, frame margins), subtracted from the window height before
 /// `CONTENT_H` is clamped to it.
@@ -230,6 +232,7 @@ pub fn show(ctx: &egui::Context, model: &mut SettingsModel) -> Action {
         ctx.input_mut(|input| input.events.retain(|e| !matches!(e, egui::Event::Key { .. })));
     }
     let response = egui::Modal::new(egui::Id::new("prisme-settings"))
+        .backdrop_color(theme::VEIL)
         .frame(
             egui::Frame::new()
                 .fill(theme::BG_PANEL)
@@ -244,11 +247,18 @@ pub fn show(ctx: &egui::Context, model: &mut SettingsModel) -> Action {
             let (panel_w, nav_w) = panel_dims(ctx.content_rect().width());
             ui.set_width(panel_w);
             ui.horizontal(|ui| {
+                let (mark, _) = ui.allocate_exact_size(Vec2::splat(22.0), egui::Sense::hover());
+                theme::mark(ui.painter(), mark);
+                ui.add_space(8.0);
                 ui.label(
-                    RichText::new("Réglages").size(theme::SIZE_TITLE).strong().color(theme::TEXT),
+                    RichText::new("Réglages")
+                        .font(theme::strong(theme::SIZE_TITLE))
+                        .color(theme::TEXT),
                 );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.button("Fermer (Échap)").clicked() {
+                    if super::icons::button(ui, super::icons::Icon::Close, "Fermer (Échap)")
+                        .clicked()
+                    {
                         action = Action::CloseSettings;
                     }
                 });
@@ -264,10 +274,12 @@ pub fn show(ctx: &egui::Context, model: &mut SettingsModel) -> Action {
                     |ui| {
                         for section in Section::ALL {
                             let selected = model.state.section == section;
-                            if ui
-                                .selectable_label(selected, RichText::new(section.label()))
-                                .clicked()
-                            {
+                            let label = RichText::new(section.label()).font(if selected {
+                                theme::strong(theme::SIZE_BODY)
+                            } else {
+                                theme::font(theme::SIZE_BODY)
+                            });
+                            if ui.selectable_label(selected, label).clicked() {
                                 model.state.section = section;
                                 // Leaving the bindings list abandons whatever
                                 // it was waiting for: a capture left pending
@@ -485,7 +497,9 @@ fn inputs_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
                 Vec2::new(BIND_COL_W, 0.0),
                 Layout::left_to_right(Align::Min),
                 |ui| {
-                    let text = binding_cell(&key, capturing_key, Device::Keyboard);
+                    // A key name is what the hardware reports, not prose.
+                    let text = RichText::new(binding_cell(&key, capturing_key, Device::Keyboard))
+                        .font(theme::mono(theme::SIZE_MONO));
                     let response = ui.selectable_label(capturing_key, text);
                     if response.clicked() {
                         model.state.capture.start(name, Device::Keyboard);
@@ -497,7 +511,8 @@ fn inputs_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
                     }
                 },
             );
-            let text = binding_cell(&pad_binding, capturing_pad, Device::Gamepad);
+            let text = RichText::new(binding_cell(&pad_binding, capturing_pad, Device::Gamepad))
+                .font(theme::mono(theme::SIZE_MONO));
             let response = ui.selectable_label(capturing_pad, text);
             if response.clicked() {
                 model.state.capture.start(name, Device::Gamepad);
@@ -563,7 +578,11 @@ fn emulation_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
 fn folders_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
     let mut action = Action::None;
 
-    ui.label(RichText::new("Dossier des ROMs").size(theme::SIZE_BODY).color(theme::TEXT));
+    ui.label(
+        RichText::new("Dossier des ROMs")
+            .font(theme::strong(theme::SIZE_BODY))
+            .color(theme::TEXT),
+    );
     path_line(ui, &super::home::shorten_path(model.library_dir, PATH_MAX_CHARS));
     ui.horizontal(|ui| {
         if ui.button("Choisir…").clicked() {
@@ -579,7 +598,11 @@ fn folders_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
     hint(ui, "Dossier analysé par la bibliothèque de l'accueil.");
 
     ui.add_space(12.0);
-    ui.label(RichText::new("Dossier des captures").size(theme::SIZE_BODY).color(theme::TEXT));
+    ui.label(
+        RichText::new("Dossier des captures")
+            .font(theme::strong(theme::SIZE_BODY))
+            .color(theme::TEXT),
+    );
     path_line(ui, &screenshot_dir_label(model.prefs.screenshot_dir.as_deref()));
     ui.horizontal(|ui| {
         if ui.button("Choisir…").clicked() {
@@ -595,7 +618,11 @@ fn folders_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
     hint(ui, "Destination de F12 ; la galerie de la fiche de jeu lit le même dossier.");
 
     ui.add_space(12.0);
-    ui.label(RichText::new("Dossier des sauvegardes").size(theme::SIZE_BODY).color(theme::TEXT));
+    ui.label(
+        RichText::new("Dossier des sauvegardes")
+            .font(theme::strong(theme::SIZE_BODY))
+            .color(theme::TEXT),
+    );
     path_line(ui, &save_dir_label(model.prefs.save_dir.as_deref()));
     ui.horizontal(|ui| {
         if ui.button("Choisir…").clicked() {
@@ -631,11 +658,13 @@ fn about_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
     let mut action = Action::None;
 
     ui.label(
-        RichText::new(model.app_name).size(theme::SIZE_HEADING).strong().color(theme::TEXT),
+        RichText::new(model.app_name)
+            .font(theme::strong(theme::SIZE_HEADING))
+            .color(theme::TEXT),
     );
     ui.label(
         RichText::new(format!("version {}", model.version))
-            .size(theme::SIZE_BODY)
+            .font(theme::mono(theme::SIZE_MONO))
             .color(theme::TEXT_DIM),
     );
     ui.add_space(6.0);
@@ -646,7 +675,11 @@ fn about_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
     );
 
     ui.add_space(12.0);
-    ui.label(RichText::new("Guide pédagogique").size(theme::SIZE_BODY).color(theme::TEXT));
+    ui.label(
+        RichText::new("Guide pédagogique")
+            .font(theme::strong(theme::SIZE_BODY))
+            .color(theme::TEXT),
+    );
     match &model.state.guide {
         Some(path) => {
             path_line(ui, &super::home::shorten_path(path, PATH_MAX_CHARS));
@@ -666,7 +699,11 @@ fn about_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
     }
 
     ui.add_space(12.0);
-    ui.label(RichText::new("Fichiers de l'application").size(theme::SIZE_BODY).color(theme::TEXT));
+    ui.label(
+        RichText::new("Fichiers de l'application")
+            .font(theme::strong(theme::SIZE_BODY))
+            .color(theme::TEXT),
+    );
     match model.config_dir {
         Some(dir) => path_line(ui, &super::home::shorten_path(dir, PATH_MAX_CHARS)),
         None => hint(ui, "Aucun répertoire de configuration disponible : rien n'est mémorisé."),
@@ -679,25 +716,44 @@ fn about_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
 /// One setting: its name on the left, its controls on the right. The label
 /// column never takes more than half the row, so a narrow window keeps the
 /// controls usable.
+///
+/// Every row of a section starts its controls on the **same** vertical line:
+/// `allocate_ui_with_layout` shrinks back to what its content used, so the
+/// column has to be claimed from inside it (`set_min_width`) — without that,
+/// each row started right after its own label and no two lined up. The
+/// controls then wrap inside their own column rather than overflowing the
+/// panel: `Ratio` offers two choices that are together wider than what is left
+/// of a 560-point panel, and a clipped choice is a setting that cannot be
+/// clicked.
 fn row(ui: &mut egui::Ui, label: &str, controls: impl FnOnce(&mut egui::Ui)) {
     let label_w = LABEL_W.min(ui.available_width() * 0.5);
     ui.horizontal(|ui| {
         ui.allocate_ui_with_layout(Vec2::new(label_w, 0.0), Layout::left_to_right(Align::Min), |ui| {
+            ui.set_min_width(label_w);
             ui.label(RichText::new(label).size(theme::SIZE_BODY).color(theme::TEXT));
         });
-        controls(ui);
+        let controls_w = ui.available_width().max(MIN_CONTENT_W);
+        ui.allocate_ui_with_layout(
+            Vec2::new(controls_w, 0.0),
+            Layout::left_to_right(Align::Min).with_main_wrap(true),
+            |ui| {
+                ui.set_max_width(controls_w);
+                controls(ui);
+            },
+        );
     });
 }
 
 /// Secondary line under a setting: what it does, or the limit it has.
 fn hint(ui: &mut egui::Ui, text: &str) {
-    ui.label(RichText::new(text).size(theme::SIZE_SMALL).color(theme::TEXT_DIM));
+    ui.label(RichText::new(text).font(theme::font(theme::SIZE_SMALL)).color(theme::TEXT_DIM));
     ui.add_space(8.0);
 }
 
-/// A folder path, styled apart from the prose around it.
+/// A folder path: machine data, set in the monospace face like every other
+/// string the application did not write itself.
 fn path_line(ui: &mut egui::Ui, text: &str) {
-    ui.label(RichText::new(text).size(theme::SIZE_SMALL).color(theme::TEXT));
+    ui.label(RichText::new(text).font(theme::mono(theme::SIZE_MONO)).color(theme::TEXT));
 }
 
 /// What the screenshot folder shows: the chosen one, or where captures go

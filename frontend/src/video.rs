@@ -1187,6 +1187,7 @@ impl App {
                 self.prefs.save();
                 self.refresh_thumbnails();
             }
+            Action::DeleteState(path) => self.delete_state(&path),
             Action::Rescan => self.rescan_library(),
             Action::ChooseLibraryDir => {
                 // `library.dir` is still empty when the run went straight into
@@ -1337,6 +1338,7 @@ impl App {
             return;
         }
         self.library.ui.sort = SortMode::from_pref(&self.prefs.library_sort);
+        self.library.ui.tab = ui::Tab::from_pref(&self.prefs.library_tab);
         match library::Worker::spawn() {
             Some(worker) => {
                 self.library.worker = Some(worker);
@@ -1457,8 +1459,10 @@ impl App {
             return;
         }
         let sort = self.library.ui.sort.as_pref();
-        if self.prefs.library_sort != sort {
+        let tab = self.library.ui.tab.as_pref();
+        if self.prefs.library_sort != sort || self.prefs.library_tab != tab {
             self.prefs.library_sort = sort.to_string();
+            self.prefs.library_tab = tab.to_string();
             self.prefs.save();
         }
         let selected = self.library.ui.selected.clone();
@@ -1590,6 +1594,7 @@ impl App {
                         version: VERSION,
                         game_title: game_title.as_deref(),
                         rom_path: rom_path.as_deref(),
+                        settings_open,
                         library: LibraryModel {
                             entries,
                             games: &prefs.games,
@@ -1940,6 +1945,7 @@ impl App {
         match crate::atomic::write(&path, &bytes) {
             Ok(()) => {
                 eprintln!("state: saved {} ({} bytes)", path.display(), bytes.len());
+                self.write_state_preview(&path);
                 self.set_status(format!("SLOT {slot} SAUVE"));
             }
             Err(e) => {
@@ -1947,6 +1953,52 @@ impl App {
                 self.set_status(format!("SLOT {slot} ERREUR"));
             }
         }
+    }
+
+    /// Write the picture of a save state beside it (`<state>.png`, the raw
+    /// 256x224 framebuffer, exactly what F12 and `--dump-frame` produce), so
+    /// the game sheet can show what each slot holds.
+    ///
+    /// Atomic like the state itself, and **optional**: a failure is reported
+    /// and nothing else happens — the state is already on disk and loads with
+    /// or without its picture. Called after the state was written, so the two
+    /// files always describe the same instant.
+    fn write_state_preview(&mut self, state: &Path) {
+        let Some(snes) = self.snes.as_ref() else { return };
+        let mut rgba = vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT * 4];
+        snes.framebuffer.to_rgba(&mut rgba);
+        match crate::state::write_preview(
+            state,
+            &rgba,
+            SCREEN_WIDTH as u32,
+            SCREEN_HEIGHT as u32,
+        ) {
+            // The picture of this slot may already be on screen in the game
+            // sheet: drop the cached texture so the new one is decoded.
+            Ok(path) => self.library.textures.forget(&path),
+            Err(e) => eprintln!("state: {e}"),
+        }
+    }
+
+    /// Delete one save state and, with it, its preview picture: an orphaned
+    /// picture would show the frame of a state that no longer exists. Asked for
+    /// by the game sheet, which arms the request on a first click and sends it
+    /// on the confirmation.
+    fn delete_state(&mut self, path: &Path) {
+        let preview = match crate::state::delete_with_preview(path) {
+            Ok(preview) => {
+                eprintln!("state: deleted {}", path.display());
+                preview
+            }
+            Err(e) => {
+                eprintln!("state: {e}");
+                return;
+            }
+        };
+        self.library.textures.forget(&preview);
+        // Force `sync_library_view` to gather the sheet's file lists again on
+        // the next frame, so the deleted slot leaves the list at once.
+        self.library.sheet = SheetData::default();
     }
 
     /// F9 / `Émulation > Charger l'état` (Cmd+L): restore the console from the
@@ -2026,7 +2078,12 @@ impl App {
         // half-written file could in principle also be misread as valid by
         // an unlucky byte pattern, which atomic replacement rules out.
         match crate::atomic::write(&path, &bytes) {
-            Ok(()) => eprintln!("resume: wrote {} ({} bytes)", path.display(), bytes.len()),
+            Ok(()) => {
+                eprintln!("resume: wrote {} ({} bytes)", path.display(), bytes.len());
+                // Same picture-beside-the-state rule as the manual slots, so
+                // the sheet's `Reprise` line shows where the session stopped.
+                self.write_state_preview(&path);
+            }
             Err(e) => eprintln!("resume: could not write {}: {e}", path.display()),
         }
     }

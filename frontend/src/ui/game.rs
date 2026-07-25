@@ -34,8 +34,12 @@ pub fn overlay(ctx: &egui::Context, paused: bool) {
                 .corner_radius(egui::CornerRadius::same(6))
                 .inner_margin(egui::Margin::symmetric(12, 6))
                 .show(ui, |ui| {
+                    // `RichText::strong` only changes the colour — egui has no
+                    // synthetic bold — so the weight comes from the face.
                     ui.label(
-                        RichText::new("PAUSE").size(theme::SIZE_SMALL).strong().color(theme::YELLOW),
+                        RichText::new("PAUSE")
+                            .font(theme::strong(theme::SIZE_SMALL))
+                            .color(theme::YELLOW),
                     );
                 });
         });

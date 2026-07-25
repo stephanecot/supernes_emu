@@ -75,6 +75,10 @@ pub enum Action {
     SetThumbnail { id: String, source: std::path::PathBuf },
     /// Go back to the generated thumbnail.
     ClearThumbnail(String),
+    /// Delete one save state of the open game sheet, and the preview picture
+    /// written beside it (`state::preview_path`). Confirmed in place by the
+    /// sheet before it is produced.
+    DeleteState(std::path::PathBuf),
     /// Rescan the library folder.
     Rescan,
     /// Choose the library folder with the native folder dialog, then rescan.

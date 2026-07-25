@@ -175,7 +175,13 @@ Save states snapshot the whole console (CPU/PPU/APU/DSP/DMA and all RAM) to a
 restores it. The blob stores no ROM image (the running ROM is reattached on
 load) and carries the ROM's checksum, so loading a state saved from a different
 game is rejected and the running game is left untouched. Any load error is
-printed and emulation continues.
+printed and emulation continues. Each write also drops the framebuffer of that
+exact moment next to the state, as `<state>.png` (raw 256×224 RGBA, the same
+picture `--dump-frame` writes): `game.state3` -> `game.state3.png`, and the same
+for the instant-resume file `game.resume`. The game sheet shows it as the slot's
+preview. The picture is optional — a state written before this existed, or one
+whose picture could not be written, still loads — and deleting a slot from the
+sheet deletes its picture with it.
 
 Battery-backed cartridges save to a `.srm` sidecar next to the ROM (e.g.
 `game.sfc` -> `game.srm`; for a `.zip`, next to the zip using its base name).
@@ -219,6 +225,7 @@ Launched from Finder with no arguments, the app opens the ROM picker.
 - `core/` — `snes-core`, the pure emulation library (no I/O), fully testable headless.
   - `cpu/`, `ppu/`, `apu/`, `bus.rs`, `scheduler.rs`, `dma.rs`, `cartridge/`, `coprocessor/` (SuperFX/GSU), `debug/`
 - `frontend/` — `prisme`, the winit/pixels/cpal binary and CLI (picker, menu bar, save states, FPS overlay, `render.rs` zoom/filter/aspect compositing).
+  - `frontend/assets/fonts/` — the two typefaces embedded in the binary (`include_bytes!`, see `ui/theme.rs`): **Space Grotesk** Regular/Bold for the interface and **IBM Plex Mono** Regular for machine data (region, mapping, checksum, sizes, key bindings, paths). Both are under the SIL Open Font License 1.1, whose text ships beside them (`SpaceGrotesk-OFL.txt`, `IBMPlexMono-OFL.txt`).
 - `scripts/` — `make-app.sh` (macOS `.app` bundler); `packaging/` — app icon assets.
 - `docs/` — architecture, the pedagogical PDF, `PUNCHLIST.md` (known accuracy gaps), `IDEAS.md` (planned features).
 - `.claude/` — development tooling: subagent definitions and a condensed, source-verified SNES hardware reference (`skills/snes-refs/references/`).
@@ -230,3 +237,13 @@ No game ROMs are included — they are copyrighted. Supply your own `.sfc`/`.smc
 ## License
 
 No license granted yet; all rights reserved by the author pending a choice of open-source license.
+
+Third-party assets shipped in this repository and embedded in the binary:
+
+| Asset | Author | License |
+|---|---|---|
+| `frontend/assets/fonts/SpaceGrotesk-{Regular,Bold}.ttf` | © 2020 The Space Grotesk Project Authors | SIL Open Font License 1.1 (`SpaceGrotesk-OFL.txt`) |
+| `frontend/assets/fonts/IBMPlexMono-Regular.ttf` | © 2017 IBM Corp., Reserved Font Name "Plex" | SIL Open Font License 1.1 (`IBMPlexMono-OFL.txt`) |
+
+The OFL permits embedding the faces in a program and redistributing them with it; the icon set is
+drawn with egui's painter (`frontend/src/ui/icons.rs`), so no icon font is bundled.

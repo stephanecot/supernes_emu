@@ -64,6 +64,10 @@ struct Args {
     save_state_at: Option<(u32, PathBuf)>,
     load_state: Option<PathBuf>,
     dump_spc: Option<PathBuf>,
+    /// `--ui-shot VIEW`: render that screen of the shell offscreen instead of
+    /// running anything, with the positional argument as the output PNG.
+    ui_shot: Option<ui::shot::View>,
+    ui_shot_size: (u32, u32),
 }
 
 const USAGE: &str = "usage: prisme [rom.sfc|.smc|.zip] [flags]
@@ -89,6 +93,10 @@ const USAGE: &str = "usage: prisme [rom.sfc|.smc|.zip] [flags]
                                         windowed save folder preference if set)
   --load-state FILE                     headless: load a save-state before frame 0
   --save-state-at FRAME FILE            headless: write a save-state after FRAME
+  --ui-shot VIEW out.png                render a screen of the interface offscreen and exit
+                                        (VIEW: library, favorites, game-sheet, settings, empty;
+                                        no window, no ROM)
+  --ui-shot-size WxH                    size of that capture, in points (default 1280x800)
 
 Output paths: a relative PATH given to --trace/--trace-spc/--trace-gsu/--trace-sa1
 is rooted under target/debug-out/ (traces can reach gigabytes over a long capture).
@@ -136,7 +144,13 @@ fn main() -> ExitCode {
 }
 
 fn parse_args(args: &[String]) -> Result<Args, String> {
-    let mut a = Args { count: 30, frames: 1, trace_end_frame: u32::MAX, ..Args::default() };
+    let mut a = Args {
+        count: 30,
+        frames: 1,
+        trace_end_frame: u32::MAX,
+        ui_shot_size: ui::shot::DEFAULT_SIZE,
+        ..Args::default()
+    };
     let mut it = args.iter().peekable();
     let value = |it: &mut std::iter::Peekable<std::slice::Iter<String>>,
                      flag: &str|
@@ -180,6 +194,10 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                 let file = value(&mut it, "--save-state-at")?;
                 a.save_state_at = Some((frame, file.into()));
             }
+            "--ui-shot" => a.ui_shot = Some(ui::shot::View::parse(&value(&mut it, "--ui-shot")?)?),
+            "--ui-shot-size" => {
+                a.ui_shot_size = ui::shot::parse_size(&value(&mut it, "--ui-shot-size")?)?
+            }
             "--help" | "-h" => return Err("help requested".into()),
             s if s.starts_with("--") => return Err(format!("unknown flag: {s}")),
             _ => {
@@ -199,6 +217,11 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
     if a.rom.is_none() && a.headless && !a.version {
         return Err("no ROM path given".into());
     }
+    // `--ui-shot` needs no cartridge, but it does need somewhere to write: its
+    // positional argument is the output PNG, not a ROM.
+    if a.ui_shot.is_some() && a.rom.is_none() {
+        return Err("--ui-shot requires an output PNG path".into());
+    }
     Ok(a)
 }
 
@@ -215,6 +238,21 @@ fn parse_bus_addr(s: &str) -> Result<(u8, u16), String> {
 }
 
 fn run(args: Args) -> Result<(), String> {
+    // `--ui-shot` renders a screen of the shell to a PNG and exits: no window,
+    // no cartridge, no preferences read. Answered before anything else so its
+    // positional argument (the output file) is never taken for a ROM.
+    if let Some(view) = args.ui_shot {
+        let out = args.rom.clone().ok_or("--ui-shot requires an output PNG path")?;
+        ui::shot::capture(view, args.ui_shot_size, &out)?;
+        println!(
+            "wrote {} — {} {}x{}",
+            out.display(),
+            view.name(),
+            args.ui_shot_size.0,
+            args.ui_shot_size.1
+        );
+        return Ok(());
+    }
     // Windowed launch with no ROM: open the application on its home screen.
     // Unreachable with `--headless` (`parse_args` rejects it) and with
     // `--info`/`--disasm` (`main` runs the file dialog for those first), so
@@ -1081,6 +1119,34 @@ mod tests {
         assert_eq!(parsed.dump_spc, Some(PathBuf::from("out.spc")));
         // A missing value is an error, not a silent default.
         assert!(parse_args(&["--dump-spc".to_string()]).is_err());
+    }
+
+    #[test]
+    fn ui_shot_takes_a_view_a_size_and_an_output_path() {
+        let args = ["--ui-shot", "library", "shot.png"].map(String::from).to_vec();
+        let parsed = parse_args(&args).expect("parse");
+        assert_eq!(parsed.ui_shot, Some(ui::shot::View::Library));
+        // The positional argument is the *output*, not a ROM to run.
+        assert_eq!(parsed.rom, Some(PathBuf::from("shot.png")));
+        assert_eq!(parsed.ui_shot_size, ui::shot::DEFAULT_SIZE);
+
+        let args = ["--ui-shot", "settings", "--ui-shot-size", "1024x768", "s.png"]
+            .map(String::from)
+            .to_vec();
+        let parsed = parse_args(&args).expect("parse");
+        assert_eq!(parsed.ui_shot, Some(ui::shot::View::Settings));
+        assert_eq!(parsed.ui_shot_size, (1024, 768));
+
+        // A view that does not exist, a missing size and a missing output path
+        // are all refused up front rather than producing an empty PNG.
+        assert!(parse_args(&["--ui-shot".into(), "grid".into(), "s.png".into()]).is_err());
+        assert!(parse_args(&["--ui-shot".into(), "library".into()]).is_err());
+        assert!(parse_args(
+            &["--ui-shot".into(), "library".into(), "--ui-shot-size".into(), "huge".into(), "s.png".into()]
+        )
+        .is_err());
+        // …and it never disturbs a plain run: no flag, no capture.
+        assert_eq!(parse_args(&["rom.sfc".into()]).expect("parse").ui_shot, None);
     }
 
     #[test]

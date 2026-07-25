@@ -1,19 +1,30 @@
 //! `Accueil` — the landing screen of the application shell.
 //!
 //! This is the screen the application opens on when it is launched without a
-//! ROM path: identity header, the entry points (open a cartridge, return to a
-//! suspended session, quit), and the library itself — either the game grid
+//! ROM path. Three bands, and nothing else: a one-line identity header with
+//! the entry points on its right, the tab bar (`ui::tabs`) whose active entry
+//! carries the spectral rule, and the view itself — the game grid
 //! (`ui::library_view`) or, when a game is selected, its sheet
-//! (`ui::game_sheet`). Everything it needs comes in through `HomeModel`, so
-//! the screen owns no state of its own and can be re-rendered from scratch
-//! every frame, as immediate mode expects.
+//! (`ui::game_sheet`).
+//!
+//! The chrome is deliberately thin: everything above the first card is space
+//! taken from the library, and the header used to eat half the window. The
+//! suspended session, the ROM picker and the quit button all live on the
+//! header line; the sheet replaces the whole content band, so nothing of the
+//! grid is repeated above it.
+//!
+//! Everything the screen displays comes in through `HomeModel`, so it owns no
+//! state of its own and can be re-rendered from scratch every frame, as
+//! immediate mode expects.
 
 use std::path::Path;
 
-use egui::{Align, Color32, Layout, RichText, Sense, Stroke, Vec2};
+use egui::{Align, Color32, Layout, RichText, Sense, Stroke, StrokeKind, Vec2};
 
 use super::game_sheet::{self, SheetData, SheetModel};
+use super::icons::{self, Icon};
 use super::library_view::{self, LibraryModel};
+use super::tabs::{self, Tab};
 use super::theme;
 use super::Action;
 
@@ -24,8 +35,11 @@ pub struct HomeModel<'a> {
     pub version: &'a str,
     /// Cartridge title of the suspended session, `None` when nothing is loaded.
     pub game_title: Option<&'a str>,
-    /// Path of that cartridge, shown under its title.
+    /// Path of that cartridge, shown as the session chip's tooltip.
     pub rom_path: Option<&'a Path>,
+    /// The settings panel is up: it then owns the screen, so the `Réglages`
+    /// tab is the one the spectral rule is drawn under.
+    pub settings_open: bool,
     /// The library: entries, per-game state, view state and pictures.
     pub library: LibraryModel<'a>,
     /// Files listed by the open game sheet, gathered by the shell when the
@@ -40,12 +54,12 @@ impl HomeModel<'_> {
     }
 }
 
-/// Side of the four squares of the prism mark, in points.
-const MARK_SQUARE: f32 = 13.0;
-/// Gap between two squares of the mark.
-const MARK_GAP: f32 = 4.0;
+/// Side of the product mark in the header, in points.
+const MARK_SIDE: f32 = 30.0;
 /// Longest path rendered in full before `shorten_path` elides its middle.
 const PATH_MAX_CHARS: usize = 64;
+/// Longest game title shown on the session chip.
+const SESSION_TITLE_MAX_CHARS: usize = 28;
 
 /// Draw the whole home screen and return what the user asked for.
 pub fn show(ctx: &egui::Context, model: &mut HomeModel) -> Action {
@@ -59,8 +73,12 @@ pub fn show(ctx: &egui::Context, model: &mut HomeModel) -> Action {
         )
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
+                // Escape only "goes back to the game" when there is one to go
+                // back to; with no cartridge loaded it leaves the application
+                // (`app_state::escape_action`), and the line must not promise
+                // otherwise.
                 ui.label(
-                    RichText::new("Échap : revenir au jeu · O : ouvrir une ROM · , : réglages")
+                    RichText::new(footer_hint(model.has_session()))
                         .size(theme::SIZE_SMALL)
                         .color(theme::TEXT_DIM),
                 );
@@ -78,47 +96,29 @@ pub fn show(ctx: &egui::Context, model: &mut HomeModel) -> Action {
         .frame(
             egui::Frame::new()
                 .fill(theme::BG_PANEL)
-                .inner_margin(egui::Margin::symmetric(24, 20)),
+                .inner_margin(egui::Margin::symmetric(24, 16)),
         )
         .show(ctx, |ui| {
-            let has_session = model.has_session();
-            header(ui, model.app_name, model.version);
-            ui.add_space(14.0);
-
-            if let Some(title) = model.game_title {
-                if session_card(ui, title, model.rom_path).clicked() {
-                    action = Action::ResumeGame;
-                }
-                ui.add_space(10.0);
+            if let Some(produced) = header(ui, model) {
+                action = produced;
             }
+            ui.add_space(10.0);
 
-            ui.label(
-                RichText::new(library_hint(has_session))
-                    .color(theme::TEXT_DIM)
-                    .size(theme::SIZE_BODY),
-            );
-            ui.add_space(12.0);
-
-            ui.horizontal(|ui| {
-                if primary_button(ui, "Ouvrir une ROM…").clicked() {
-                    action = Action::PickRom;
-                }
-                if has_session && ui.button("Reprendre la partie").clicked() {
-                    action = Action::ResumeGame;
-                }
-                if ui.button("Réglages…").clicked() {
+            // The rule marks whatever owns the screen: the settings panel when
+            // it is up, the current library view otherwise.
+            let active = if model.settings_open { Tab::Settings } else { model.library.state.tab };
+            if let Some(tab) = tabs::show(ui, active) {
+                if tab.is_view() {
+                    model.library.state.tab = tab;
+                    // Switching tab leaves whatever sheet was open: the sheet
+                    // belongs to the game, not to the view.
+                    model.library.state.selected = None;
+                    model.library.state.confirm_delete = None;
+                } else {
                     action = Action::OpenSettings;
                 }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.button("Quitter").clicked() {
-                        action = Action::Quit;
-                    }
-                });
-            });
-
-            ui.add_space(14.0);
-            section_rule(ui, "Bibliothèque");
-            ui.add_space(10.0);
+            }
+            ui.add_space(12.0);
 
             let library_action = library(ui, model);
             if library_action != Action::None {
@@ -129,9 +129,9 @@ pub fn show(ctx: &egui::Context, model: &mut HomeModel) -> Action {
     action
 }
 
-/// The lower half of the home screen: the game grid, or the sheet of the
-/// selected game. A selection naming a game that is no longer in the library
-/// (folder changed, file deleted) falls back to the grid.
+/// The lower band: the game grid, or the sheet of the selected game. A
+/// selection naming a game that is no longer in the library (folder changed,
+/// file deleted) falls back to the grid.
 fn library(ui: &mut egui::Ui, model: &mut HomeModel) -> Action {
     let entries = model.library.entries;
     let games = model.library.games;
@@ -150,6 +150,7 @@ fn library(ui: &mut egui::Ui, model: &mut HomeModel) -> Action {
                 pending: pending.contains(&id),
                 textures: model.library.textures,
                 selected: &mut model.library.state.selected,
+                confirm_delete: &mut model.library.state.confirm_delete,
             };
             return game_sheet::show(ui, &mut sheet);
         }
@@ -158,116 +159,107 @@ fn library(ui: &mut egui::Ui, model: &mut HomeModel) -> Action {
     library_view::show(ui, &mut model.library)
 }
 
-/// Identity header: the four-square prism mark, the product name and what the
-/// emulated machine is.
-fn header(ui: &mut egui::Ui, _app_name: &str, version: &str) {
+/// Identity header on one line: the product mark and its name on the left, the
+/// suspended session and the two global actions on the right.
+fn header(ui: &mut egui::Ui, model: &HomeModel) -> Option<Action> {
+    let mut action = None;
     ui.horizontal(|ui| {
-        prism_mark(ui);
-        ui.add_space(12.0);
-        ui.vertical(|ui| {
-            ui.label(RichText::new("Prisme").size(theme::SIZE_TITLE).strong().color(theme::TEXT));
-            ui.label(
-                RichText::new("Émulateur Super Nintendo")
-                    .size(theme::SIZE_BODY)
-                    .color(theme::TEXT_DIM),
-            );
-        });
-        ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-            ui.label(
-                RichText::new(format!("version {version}"))
-                    .size(theme::SIZE_SMALL)
-                    .color(theme::TEXT_DIM),
-            );
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(MARK_SIDE), Sense::hover());
+        theme::mark(ui.painter(), rect);
+        ui.add_space(10.0);
+        ui.label(RichText::new("Prisme").font(theme::strong(theme::SIZE_TITLE)).color(theme::TEXT));
+        ui.add_space(8.0);
+        ui.label(
+            RichText::new("Émulateur Super Nintendo")
+                .font(theme::font(theme::SIZE_SMALL))
+                .color(theme::TEXT_DIM),
+        );
+
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui.button("Quitter").clicked() {
+                action = Some(Action::Quit);
+            }
+            if icons::primary_button(ui, Icon::Folder, "Ouvrir une ROM…").clicked() {
+                action = Some(Action::PickRom);
+            }
+            if let Some(title) = model.game_title {
+                if session_chip(ui, title, model.rom_path).clicked() {
+                    action = Some(Action::ResumeGame);
+                }
+            }
         });
     });
+    action
 }
 
-/// The product mark: the four prism colours as a 2x2 block of squares, in the
-/// canonical order of `theme::ACCENTS`.
-fn prism_mark(ui: &mut egui::Ui) {
-    let side = MARK_SQUARE * 2.0 + MARK_GAP;
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(side), Sense::hover());
-    let painter = ui.painter();
-    for i in 0..theme::ACCENTS.len() {
-        let col = (i % 2) as f32;
-        let row = (i / 2) as f32;
-        let min = rect.min
-            + Vec2::new(col * (MARK_SQUARE + MARK_GAP), row * (MARK_SQUARE + MARK_GAP));
-        painter.rect_filled(
-            egui::Rect::from_min_size(min, Vec2::splat(MARK_SQUARE)),
-            2.0,
-            theme::accent(i),
+/// The suspended session, as a chip on the header line: green means "running"
+/// everywhere in the shell, and clicking it goes back into the game.
+fn session_chip(ui: &mut egui::Ui, title: &str, path: Option<&Path>) -> egui::Response {
+    let label = format!("Reprendre · {}", elide(title, SESSION_TITLE_MAX_CHARS));
+    let galley = ui.painter().layout_no_wrap(
+        label,
+        theme::font(theme::SIZE_BUTTON),
+        Color32::PLACEHOLDER,
+    );
+    let padding = ui.spacing().button_padding;
+    let dot = 8.0;
+    let size = Vec2::new(galley.size().x + dot + 8.0, galley.size().y) + 2.0 * padding;
+    let (rect, response) = ui.allocate_at_least(size, Sense::click());
+    if ui.is_rect_visible(rect) {
+        let hovered = response.hovered();
+        let fill = if hovered { theme::BG_WIDGET_HOVER } else { theme::BG_WIDGET };
+        ui.painter().rect(
+            rect,
+            6.0,
+            fill,
+            Stroke::new(1.0, theme::GREEN.gamma_multiply(if hovered { 1.0 } else { 0.6 })),
+            StrokeKind::Inside,
         );
+        ui.painter().circle_filled(
+            egui::pos2(rect.left() + padding.x + dot / 2.0, rect.center().y),
+            dot / 2.0,
+            theme::GREEN,
+        );
+        ui.painter().galley(
+            egui::pos2(rect.left() + padding.x + dot + 8.0, rect.center().y - galley.size().y / 2.0),
+            galley,
+            theme::TEXT,
+        );
+    }
+    match path {
+        Some(path) => response.on_hover_text(shorten_path(path, PATH_MAX_CHARS)),
+        None => response,
     }
 }
 
-/// Section title followed by a hairline rule tinted with the primary accent.
-fn section_rule(ui: &mut egui::Ui, title: &str) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(title).size(theme::SIZE_HEADING).strong().color(theme::TEXT));
-        let (rect, _) = ui.allocate_exact_size(
-            Vec2::new(ui.available_width(), 1.0),
-            Sense::hover(),
-        );
-        ui.painter().hline(
-            rect.x_range(),
-            rect.center().y,
-            Stroke::new(1.0, theme::STROKE),
-        );
-    });
+/// The keyboard line of the footer. What Escape does depends on whether a
+/// cartridge is loaded, so the line does too.
+pub fn footer_hint(has_session: bool) -> &'static str {
+    if has_session {
+        "Échap : revenir au jeu · O : ouvrir une ROM · , : réglages"
+    } else {
+        "O : ouvrir une ROM · , : réglages · Échap : quitter"
+    }
 }
 
-/// Card for the suspended session: clicking it goes back into the game.
-fn session_card(ui: &mut egui::Ui, title: &str, path: Option<&Path>) -> egui::Response {
-    egui::Frame::new()
-        .fill(theme::BG_CARD)
-        .stroke(Stroke::new(1.0, theme::STROKE))
-        .corner_radius(egui::CornerRadius::same(8))
-        .inner_margin(egui::Margin::same(14))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let (rect, _) = ui.allocate_exact_size(Vec2::new(4.0, 40.0), Sense::hover());
-                ui.painter().rect_filled(rect, 2.0, theme::GREEN);
-                ui.add_space(10.0);
-                ui.vertical(|ui| {
-                    ui.label(
-                        RichText::new("Partie en cours")
-                            .size(theme::SIZE_SMALL)
-                            .color(theme::GREEN),
-                    );
-                    ui.label(RichText::new(title).size(theme::SIZE_HEADING).color(theme::TEXT));
-                    if let Some(path) = path {
-                        ui.label(
-                            RichText::new(shorten_path(path, PATH_MAX_CHARS))
-                                .size(theme::SIZE_SMALL)
-                                .color(theme::TEXT_DIM),
-                        );
-                    }
-                });
-            });
-        })
-        .response
-        .interact(Sense::click())
-}
-
-/// Accent-filled call to action, distinct from the neutral secondary buttons.
-/// Shared with the game sheet's `Jouer` button.
+/// Accent-filled call to action with no icon, distinct from the neutral
+/// secondary buttons (`icons::primary_button` is the same button with one).
 pub fn primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     ui.add(
-        egui::Button::new(RichText::new(label).color(Color32::WHITE).size(theme::SIZE_BUTTON))
-            .fill(theme::ACCENT)
-            .stroke(Stroke::new(1.0, theme::ACCENT)),
+        egui::Button::new(
+            RichText::new(label).color(Color32::WHITE).font(theme::font(theme::SIZE_BUTTON)),
+        )
+        .fill(theme::ACCENT)
+        .stroke(Stroke::new(1.0, theme::ACCENT)),
     )
 }
 
-/// One-line explanation under the library heading, depending on whether a game
-/// is already loaded.
-pub fn library_hint(has_session: bool) -> &'static str {
-    if has_session {
-        "La partie est suspendue : la console garde son état, rien n'est perdu."
-    } else {
-        "Aucune cartouche chargée. Ouvrez un fichier .sfc, .smc ou .zip pour commencer."
-    }
+/// Heading of a band. No rule under it: the bold heading face already separates
+/// it from the body, and a grey hairline as long as the words themselves read
+/// as an artefact. The **spectral** rule is spent on the active tab and nowhere
+/// else (`ui::tabs`).
+pub fn heading(ui: &mut egui::Ui, title: &str) {
+    ui.label(RichText::new(title).font(theme::strong(theme::SIZE_HEADING)).color(theme::TEXT));
 }
 
 /// Shorten a path for display by eliding its middle, keeping the beginning and
@@ -290,9 +282,10 @@ pub fn shorten_path(path: &Path, max_chars: usize) -> String {
     format!("{head}…{tail}")
 }
 
-/// Shorten a label by cutting its tail and appending an ellipsis, so every
-/// grid card keeps the same width. Counts characters, not bytes (an accented
-/// title must never be cut mid-character).
+/// Shorten a label by cutting its tail and appending an ellipsis. Counts
+/// characters, not bytes (an accented title must never be cut mid-character).
+/// The grid's titles are elided by the text layout instead
+/// (`library_view::elided_galley`), which can do it on two rows.
 pub fn elide(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars || max_chars == 0 {
         return text.to_string();
@@ -307,10 +300,15 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn the_hint_reflects_whether_a_game_is_loaded() {
-        assert!(library_hint(true).contains("suspendue"));
-        assert!(library_hint(false).contains(".sfc"));
-        assert_ne!(library_hint(true), library_hint(false));
+    fn the_footer_line_matches_what_escape_actually_does() {
+        assert!(footer_hint(true).contains("revenir au jeu"));
+        assert!(footer_hint(false).contains("quitter"));
+        assert_ne!(footer_hint(true), footer_hint(false));
+        // Both name the two other shortcuts of the screen.
+        for line in [footer_hint(true), footer_hint(false)] {
+            assert!(line.contains("ouvrir une ROM"), "{line}");
+            assert!(line.contains("réglages"), "{line}");
+        }
     }
 
     #[test]
@@ -361,23 +359,26 @@ mod tests {
         assert_eq!(elide("x", 0), "x");
     }
 
-    /// The home screen is the only pointer route to the settings panel when no
-    /// cartridge is running (the native menu is macOS-only, the `,` hotkey is
-    /// not discoverable), so its button must actually be painted.
-    #[test]
-    fn the_home_screen_offers_the_settings_panel() {
+    /// One headless frame of the whole screen, returning what it asked for and
+    /// every string it painted.
+    fn draw(
+        game_title: Option<&str>,
+        settings_open: bool,
+        state: &mut super::super::library_view::LibraryUi,
+        size: egui::Vec2,
+    ) -> (Action, String) {
         let entries: Vec<crate::library::GameEntry> = Vec::new();
         let games = std::collections::BTreeMap::new();
         let thumbs = std::collections::HashMap::new();
         let pending = std::collections::HashSet::new();
-        let mut state = super::super::library_view::LibraryUi::default();
         let mut textures = super::super::textures::TextureStore::new();
         let sheet = SheetData::default();
         let ctx = egui::Context::default();
         theme::apply(&ctx);
-        let mut input = egui::RawInput::default();
-        input.screen_rect =
-            Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1024.0, 896.0)));
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            ..Default::default()
+        };
         let mut produced = Action::Quit;
         let output = ctx.run(input, |ctx| {
             produced = show(
@@ -385,22 +386,22 @@ mod tests {
                 &mut HomeModel {
                     app_name: "Prisme",
                     version: "0.0.0",
-                    game_title: None,
+                    game_title,
                     rom_path: None,
+                    settings_open,
                     library: LibraryModel {
                         entries: &entries,
                         games: &games,
                         dir: Path::new("roms"),
                         thumbs: &thumbs,
                         pending: &pending,
-                        state: &mut state,
+                        state,
                         textures: &mut textures,
                     },
                     sheet: &sheet,
                 },
             );
         });
-        assert_eq!(produced, Action::None, "drawing alone must ask for nothing");
         let mut text = String::new();
         fn walk(shape: &egui::Shape, out: &mut String) {
             match shape {
@@ -415,9 +416,46 @@ mod tests {
         for clipped in &output.shapes {
             walk(&clipped.shape, &mut text);
         }
-        assert!(text.contains("Réglages…"), "{text}");
+        (produced, text)
+    }
+
+    /// The home screen is the only pointer route to a ROM and to the settings
+    /// panel when no cartridge is running, so both must actually be painted.
+    #[test]
+    fn the_home_screen_offers_the_tabs_and_the_global_actions() {
+        let mut state = super::super::library_view::LibraryUi::default();
+        let (produced, text) = draw(None, false, &mut state, egui::vec2(1024.0, 896.0));
+        assert_eq!(produced, Action::None, "drawing alone must ask for nothing");
+        for tab in Tab::ALL {
+            assert!(text.contains(tab.label()), "tab {:?} is missing: {text}", tab.label());
+        }
         assert!(text.contains("Ouvrir une ROM…"), "{text}");
         assert!(text.contains("Quitter"), "{text}");
+        // No cartridge: no session chip.
+        assert!(!text.contains("Reprendre ·"), "{text}");
+    }
+
+    /// A suspended session is shown as one chip on the header line, not as a
+    /// card that pushes the library down the screen.
+    #[test]
+    fn a_suspended_session_is_offered_on_the_header_line() {
+        let mut state = super::super::library_view::LibraryUi::default();
+        let (_, text) = draw(Some("SUPER MARIOWORLD"), false, &mut state, egui::vec2(1024.0, 896.0));
+        assert!(text.contains("Reprendre · SUPER MARIOWORLD"), "{text}");
+    }
+
+    /// The chrome above the first card is what the brief measured at 53 % of
+    /// the window. Header, tabs and toolbar together must stay a small band,
+    /// whatever the window size.
+    #[test]
+    fn the_chrome_above_the_library_stays_a_band() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        assert!(tabs::height() < 40.0, "the tab bar alone is {} tall", tabs::height());
+        // Header (mark 30 + margins) + tab bar + spacing, measured from the
+        // constants the screen is built from.
+        let chrome = 16.0 + MARK_SIDE + 10.0 + tabs::height() + 12.0;
+        assert!(chrome < 120.0, "the chrome is {chrome} points tall");
     }
 
     #[test]
@@ -434,6 +472,7 @@ mod tests {
             version: "0.0.0",
             game_title: None,
             rom_path: None,
+            settings_open: false,
             library: LibraryModel {
                 entries: &entries,
                 games: &games,

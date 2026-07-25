@@ -36,6 +36,8 @@ description: Build, test, lint and run the SNES emulator (Rust workspace) — ru
 | `--dump-spc PATH.spc` | On exit write the APU state as a 66048-byte `.spc` music file (headless only) |
 | `--load-state FILE` | Headless: `Snes::load_state` from FILE before emulating frame 0 (rejects a state saved from a different ROM) |
 | `--save-state-at FRAME FILE` | Headless: write `Snes::save_state` to FILE right after emulating frame FRAME |
+| `--ui-shot VIEW OUT.png` | Render one screen of the interface offscreen and exit. VIEW is `library`, `favorites`, `game-sheet`, `settings`, `empty` or `library-hover`; the positional argument is the **output PNG**, not a ROM. Needs no display, no ROM and no `prefs.json`: it draws the application's own `ui::home`/`ui::settings` code on a fake library (a dozen games, missing thumbnails, long titles, favourites, the four coprocessors, save slots with and without a preview picture) into an offscreen wgpu texture. `library-hover` injects a pointer over one tile, which is the only way the hover state can be looked at. This is how the UI is *looked at* on a machine with no screen. |
+| `--ui-shot-size WxH` | Size of that capture in points, `320..=4096` per side (default `1280x800`) |
 
 **Output path handling:** only `--trace`/`--trace-spc`/`--trace-gsu`/`--trace-sa1` auto-root a
 relative PATH under `target/debug-out/` (traces can reach gigabytes — this is the output-hygiene
@@ -49,7 +51,9 @@ after the *game* there (`library::game_id` = cartridge title + header checksum, 
 reading the ROM-file-named file of that folder, then the folder configured before it
 (`previous_save_dir`), then the beside-the-ROM file, as fallbacks. `--save` keeps
 priority over both for the `.srm`, and a **headless run never reads the preferences file**, so its
-paths are exactly `--save` or `<rom>.srm`. Those writes (battery saves,
+paths are exactly `--save` or `<rom>.srm`. A windowed save-state write also drops the framebuffer
+beside the state as `<state>.png` (raw 256x224, e.g. `game.state3.png`, `game.resume.png`); it is
+optional at load and deleted with its slot. Those writes (battery saves,
 save states, prefs) are atomic (temp file + `rename`); a `.srm` whose size doesn't exactly match
 the cart's declared SRAM is rejected at load (fresh SRAM is used instead), so don't hand-edit a
 `.srm` to a different length when testing.

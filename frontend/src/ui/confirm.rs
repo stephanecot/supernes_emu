@@ -19,6 +19,7 @@ use super::Action;
 pub fn show(ctx: &egui::Context, app_name: &str) -> Action {
     let mut action = Action::None;
     let response = egui::Modal::new(egui::Id::new("prisme-quit-confirm"))
+        .backdrop_color(theme::VEIL)
         .frame(
             egui::Frame::new()
                 .fill(theme::BG_PANEL)
@@ -30,12 +31,15 @@ pub fn show(ctx: &egui::Context, app_name: &str) -> Action {
             ui.set_max_width(380.0);
             ui.label(
                 RichText::new(title(app_name))
-                    .size(theme::SIZE_HEADING)
-                    .strong()
+                    .font(theme::strong(theme::SIZE_HEADING))
                     .color(theme::TEXT),
             );
             ui.add_space(8.0);
-            ui.label(RichText::new(DESCRIPTION).size(theme::SIZE_BODY).color(theme::TEXT_DIM));
+            ui.label(
+                RichText::new(DESCRIPTION)
+                    .font(theme::font(theme::SIZE_BODY))
+                    .color(theme::TEXT_DIM),
+            );
             ui.add_space(14.0);
             ui.horizontal(|ui| {
                 if ui.button("Annuler (Échap)").clicked() {

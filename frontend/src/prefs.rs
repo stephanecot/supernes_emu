@@ -26,7 +26,7 @@
 //! Fields the frontend actually *acts on* today: `mute`, `volume`, `show_fps`,
 //! `fast_forward_factor`, `confirm_on_quit`, `resume_on_launch`, `save_slot`,
 //! `save_dir`, `screenshot_dir`, `zoom`, `filter`, `aspect`, `library_dir`,
-//! `library_sort`, `games`, `keymap`, `pad_map`. Every other field is
+//! `library_sort`, `library_tab`, `games`, `keymap`, `pad_map`. Every other field is
 //! annotated below with the roadmap phase that wires it up (`parental`
 //! already carries this note in its own doc comment) — a value stored there
 //! today is preserved for when that phase lands, but changing it has no
@@ -204,6 +204,10 @@ pub struct Prefs {
     /// values are preserved on a round trip and render as `title`, like
     /// `filter`/`aspect`.
     pub library_sort: String,
+    /// Tab the home screen opens on: `library`, `favorites` or `recent`
+    /// (`ui::tabs::Tab`). Unknown values are preserved on a round trip and
+    /// render as `library`, like `library_sort`.
+    pub library_tab: String,
     /// Per-game library state, keyed by `library::game_id`. Games never
     /// launched and never pinned have no entry at all, so the file stays small.
     pub games: BTreeMap<String, GameStats>,
@@ -235,6 +239,7 @@ impl Default for Prefs {
             save_slot: 0,
             library_dir: None,
             library_sort: "title".to_string(),
+            library_tab: "library".to_string(),
             games: BTreeMap::new(),
             persist: false,
         }
