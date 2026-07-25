@@ -1,6 +1,7 @@
 //! snes-frontend CLI. Contract lives in .claude/skills/snes-build-test/SKILL.md
 //! — keep the two in sync.
 
+mod atomic;
 mod audio;
 mod input;
 mod menu;
@@ -77,7 +78,13 @@ const USAGE: &str = "usage: prisme [rom.sfc|.smc|.zip] [flags]
   --dump-spc PATH.spc                   write the APU state as an .spc music file on exit
   --save PATH                           battery SRAM file (default: <rom>.srm)
   --load-state FILE                     headless: load a save-state before frame 0
-  --save-state-at FRAME FILE            headless: write a save-state after FRAME";
+  --save-state-at FRAME FILE            headless: write a save-state after FRAME
+
+Output paths: a relative PATH given to --trace/--trace-spc/--trace-gsu/--trace-sa1
+is rooted under target/debug-out/ (traces can reach gigabytes over a long capture).
+Every other output flag (--dump-frame, --dump-frame-every/--dump-dir, --dump-state,
+--dump-spc, --dump-audio, --save-state-at) honors PATH exactly as given, relative
+to the current directory.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -225,12 +232,6 @@ fn run(args: Args) -> Result<(), String> {
         eprintln!("--trace-sa1 requires --headless; ignoring");
     }
 
-    // Preferences are read on both paths, so a malformed file is reported the
-    // same way everywhere; `persist` is set only for the windowed run, so an
-    // automated headless run never writes the user's file back. No preference
-    // takes part in the CLI contract — headless behavior is unchanged.
-    let prefs = prefs::Prefs::load(!args.headless);
-
     if !args.headless {
         if args.dump_audio.is_some() {
             eprintln!("--dump-audio requires --headless; ignoring (windowed mode plays live)");
@@ -238,6 +239,14 @@ fn run(args: Args) -> Result<(), String> {
         if args.dump_spc.is_some() {
             eprintln!("--dump-spc requires --headless; ignoring (use Fichier > Exporter la musique)");
         }
+        // Preferences are only ever read by the windowed path (no preference
+        // takes part in the CLI contract, and headless behavior must stay
+        // unchanged): loading them here, rather than unconditionally above,
+        // means a malformed prefs.json warning never mixes into a headless
+        // run's stderr (e.g. alongside --log-mmio output). `persist: true`
+        // since this is exactly the windowed run that writes option changes
+        // back.
+        let prefs = prefs::Prefs::load(true);
         return video::run(rom_path.clone(), cart, save_path, sram_baseline, prefs);
     }
 
@@ -366,8 +375,7 @@ fn run(args: Args) -> Result<(), String> {
         if let Some((at, path)) = &args.save_state_at {
             if frame == *at {
                 let bytes = snes.save_state();
-                std::fs::write(path, &bytes)
-                    .map_err(|e| format!("write {}: {e}", path.display()))?;
+                atomic::write(path, &bytes)?;
                 println!("wrote {} ({} bytes) at frame {}", path.display(), bytes.len(), at);
             }
         }
@@ -412,17 +420,19 @@ fn run(args: Args) -> Result<(), String> {
         dump_state(&snes, dir)?;
     }
 
+    // `--dump-spc`/`--dump-audio` honor `path` exactly as given (relative to
+    // the current directory), like `--dump-frame`/`--dump-state`/
+    // `--save-state-at` — see `resolve_out_path`'s doc comment for why only
+    // the trace flags redirect.
     if let Some(path) = &args.dump_spc {
-        let path = resolve_out_path(path);
         let bytes = spc::build(&snes, &cart_title);
-        write_new_file(&path, &bytes)?;
+        write_new_file(path, &bytes)?;
         println!("wrote {} ({} bytes)", path.display(), bytes.len());
     }
 
     if let Some(path) = &args.dump_audio {
         let rate = snes.sample_rate();
-        let path = resolve_out_path(path);
-        write_wav(&path, &audio_pcm, rate)?;
+        write_wav(path, &audio_pcm, rate)?;
         println!("wrote {} ({} frames @ {} Hz)", path.display(), audio_pcm.len(), rate);
     }
     Ok(())
@@ -639,19 +649,48 @@ fn is_forbidden_in_file_name(c: char) -> bool {
     c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
 }
 
+/// Maximum length of a sanitized stem, in *bytes* (not `chars`): several
+/// filesystems cap a path component at 255 bytes, and a title's characters
+/// can be multi-byte UTF-8 (accents, CJK) — bounding by `chars().take(64)`
+/// alone could let a 64-character title produce up to 256 bytes.
+const MAX_STEM_BYTES: usize = 64;
+
+/// Windows' reserved DOS device names: a file whose *base name* (ignoring any
+/// extension) case-insensitively matches one of these cannot be created on
+/// that OS, no matter the extension.
+const WINDOWS_RESERVED_NAMES: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+fn is_windows_reserved_name(stem: &str) -> bool {
+    WINDOWS_RESERVED_NAMES.iter().any(|&r| stem.eq_ignore_ascii_case(r))
+}
+
 /// Turn a cartridge title into a portable file-name stem: forbidden characters
 /// become `_`, runs of whitespace collapse to a single `_`, trailing dots and
-/// spaces are dropped (Windows strips them silently), and an empty result falls
-/// back to `SNES` so a blank/garbage header still produces a usable name.
+/// spaces are dropped (Windows strips them silently), leading dots are
+/// dropped too (would otherwise create a hidden file on Unix), a name that
+/// collides with a Windows reserved device name gets a trailing `_` so it no
+/// longer does, the result is bounded to `MAX_STEM_BYTES` *bytes*, and an
+/// empty result falls back to `SNES` so a blank/garbage header still produces
+/// a usable name.
 pub(crate) fn sanitize_file_stem(title: &str) -> String {
     let mut out = String::new();
     let mut pending_sep = false;
-    for c in title.chars().take(64) {
+    for c in title.chars() {
         if c.is_whitespace() {
             pending_sep = !out.is_empty();
             continue;
         }
         let c = if is_forbidden_in_file_name(c) { '_' } else { c };
+        let mut grown = out.len() + c.len_utf8();
+        if pending_sep {
+            grown += 1; // the separator `_` this character would follow
+        }
+        if grown > MAX_STEM_BYTES {
+            break;
+        }
         if pending_sep {
             out.push('_');
             pending_sep = false;
@@ -661,31 +700,69 @@ pub(crate) fn sanitize_file_stem(title: &str) -> String {
     while out.ends_with('.') || out.ends_with('_') {
         out.pop();
     }
-    if out.is_empty() {
-        "SNES".to_string()
-    } else {
-        out
+    while out.starts_with('.') {
+        out.remove(0);
     }
+    if out.is_empty() {
+        return "SNES".to_string();
+    }
+    if is_windows_reserved_name(&out) {
+        out.push('_'); // e.g. "CON" -> "CON_": no longer a reserved name
+    }
+    out
 }
 
-/// `dir/<stem>.<ext>`, with `_2`, `_3`… appended until the name is free, so two
-/// captures within the same second never overwrite each other.
+/// `dir/<stem>.<ext>`, with `_2`, `_3`… appended until a name is reserved, so
+/// two captures never overwrite each other. Each candidate is claimed with
+/// `File::create_new` — an atomic test-and-create — rather than a separate
+/// `exists()` check followed by a later `File::create`: the latter is a
+/// TOCTOU race (two captures started in the same instant could both pass the
+/// check, then one silently clobbers the other when they finally write). The
+/// returned path always names a file that already exists (empty, just
+/// reserved); the caller's own write fills it in immediately after.
 pub(crate) fn unique_path(dir: &Path, stem: &str, ext: &str) -> PathBuf {
-    let first = dir.join(format!("{stem}.{ext}"));
-    if !first.exists() {
-        return first;
-    }
-    for n in 2..1000 {
-        let p = dir.join(format!("{stem}_{n}.{ext}"));
-        if !p.exists() {
-            return p;
+    // `n == 0` is the bare `<stem>.<ext>`; `n >= 1` appends `_<n+1>`, matching
+    // the previous naming (`_2`, `_3`, …).
+    for n in 0..1000u32 {
+        let path = if n == 0 {
+            dir.join(format!("{stem}.{ext}"))
+        } else {
+            dir.join(format!("{stem}_{}.{ext}", n + 1))
+        };
+        match File::options().write(true).create_new(true).open(&path) {
+            Ok(_) => return path,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            // Any other error (e.g. permissions): stop trying to reserve and
+            // let the caller's own write surface the real error.
+            Err(_) => return path,
         }
     }
-    dir.join(format!("{stem}_{}.{ext}", std::process::id()))
+    // 1000 names already taken in `dir` (would mean 1000 captures of the same
+    // title in one session — never observed in practice, but still reserved
+    // atomically rather than trusting a bare `exists()` check).
+    let path = dir.join(format!("{stem}_{}.{ext}", std::process::id()));
+    match File::options().write(true).create_new(true).open(&path) {
+        Ok(_) => path,
+        // Even the PID-qualified name is taken: give up reserving and let the
+        // caller's write overwrite it, same as any ordinary save-over.
+        Err(_) => path,
+    }
 }
 
-/// Resolve a debug-output path: absolute paths are honored as-is; relative
+/// Resolve a *trace* output path: absolute paths are honored as-is; relative
 /// paths are rooted under `target/debug-out/` (SKILL output-hygiene rule).
+///
+/// Used only by `open_trace`, i.e. `--trace`/`--trace-spc`/`--trace-gsu`/
+/// `--trace-sa1`: those can run into gigabytes over a long capture and are
+/// almost always throwaway debugging artifacts, which is what the hygiene
+/// rule (auto-root under `target/`, keep the repo root clean) is for. Every
+/// other output flag (`--dump-frame`, `--dump-frame-every`/`--dump-dir`,
+/// `--dump-state`, `--dump-spc`, `--dump-audio`, `--save-state-at`) is a
+/// single, normally small artifact the caller asked for by an explicit name —
+/// silently redirecting *that* path would be surprising (a script writing
+/// `--dump-frame out.png` and then looking for `out.png` would not find it),
+/// so those honor `path` exactly as given, relative to the current directory.
+/// This split is deliberate (review point H) and documented in `USAGE`.
 fn resolve_out_path(p: &Path) -> PathBuf {
     if p.is_absolute() {
         p.to_path_buf()
@@ -874,6 +951,39 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_file_stem_strips_leading_dots_to_avoid_hidden_files() {
+        assert_eq!(sanitize_file_stem(".hidden game"), "hidden_game");
+        // Nothing left after stripping leading/trailing dots: falls back like
+        // any other empty result.
+        assert_eq!(sanitize_file_stem("..."), "SNES");
+    }
+
+    #[test]
+    fn sanitize_file_stem_avoids_windows_reserved_device_names() {
+        for reserved in ["CON", "con", "NUL", "PRN", "AUX", "COM1", "LPT9"] {
+            let stem = sanitize_file_stem(reserved);
+            assert_ne!(
+                stem.to_ascii_uppercase(),
+                reserved.to_ascii_uppercase(),
+                "{reserved} must not survive unchanged"
+            );
+            assert!(!is_windows_reserved_name(&stem));
+        }
+        // A reserved word as part of a longer title is untouched.
+        assert_eq!(sanitize_file_stem("CONTRA"), "CONTRA");
+    }
+
+    #[test]
+    fn sanitize_file_stem_bounds_byte_length_not_char_count() {
+        // Each 'é' is 2 bytes in UTF-8; 64 of them must not yield 128 bytes,
+        // and the result must still be valid UTF-8 (no char split mid-boundary,
+        // which would make `String::push` itself panic if it ever happened).
+        let stem = sanitize_file_stem(&"é".repeat(64));
+        assert!(stem.len() <= 64, "stem is {} bytes: {stem:?}", stem.len());
+        assert_eq!(stem.chars().count() * 2, stem.len());
+    }
+
+    #[test]
     fn capture_file_names_are_title_then_timestamp() {
         // Shape of the names `App::take_screenshot` / `App::export_spc` build.
         let t = CalendarTime { year: 2026, month: 7, day: 24, hour: 21, minute: 30, second: 45 };
@@ -893,6 +1003,22 @@ mod tests {
         std::fs::write(&first, b"x").expect("write");
         let second = unique_path(&dir, "shot", "png");
         assert_eq!(second, dir.join("shot_2.png"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unique_path_reserves_the_file_atomically() {
+        // `create_new` means the returned path is already claimed (an empty
+        // file exists at it) without the caller having written anything yet:
+        // two back-to-back calls with no intervening write must still yield
+        // two distinct, both-existing paths (review point J: the previous
+        // `exists()`-then-later-`create` sequence was a TOCTOU race).
+        let dir = std::env::temp_dir().join(format!("prisme_unique_atomic_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let first = unique_path(&dir, "shot", "png");
+        let second = unique_path(&dir, "shot", "png");
+        assert_ne!(first, second);
+        assert!(first.exists() && second.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

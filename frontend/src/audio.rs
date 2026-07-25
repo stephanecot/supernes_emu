@@ -36,6 +36,23 @@ struct Ring {
     slots: Box<[UnsafeCell<[f32; 2]>]>,
     write: AtomicUsize,
     read: AtomicUsize,
+    /// Bumped by the producer to request the consumer drop every frame queued
+    /// as of `flush_target` (`Producer::flush`, used when fast-forward
+    /// releases to skip the turbo-silence backlog rather than playing it out
+    /// before real-time audio resumes — see `App::set_fast_forward`). Only
+    /// ever written by the producer and read by the consumer, so — unlike
+    /// `read`/`write`, which must each have exactly one writer to stay
+    /// lock-free-safe — no ownership split is needed for it.
+    flush_requests: AtomicUsize,
+    /// `write` index captured at the moment of the latest `Producer::flush`
+    /// call. The consumer drains up to *this* value rather than whatever
+    /// `write` happens to be when it next checks: frames the producer pushes
+    /// after the flush request (real-time audio resuming) must survive, only
+    /// the backlog that existed at request time must not. Published by the
+    /// `Release` store on `flush_requests` immediately after it (a plain
+    /// `Relaxed` store here is sound because the consumer only reads it after
+    /// observing that `Release`, per the single release-acquire pair below).
+    flush_target: AtomicUsize,
 }
 
 // Only the producer writes a slot before publishing `write`, and only the
@@ -52,6 +69,8 @@ impl Ring {
             slots: slots.into_boxed_slice(),
             write: AtomicUsize::new(0),
             read: AtomicUsize::new(0),
+            flush_requests: AtomicUsize::new(0),
+            flush_target: AtomicUsize::new(0),
         })
     }
 }
@@ -71,6 +90,20 @@ impl Producer {
         unsafe { *self.ring.slots[w].get() = frame };
         self.ring.write.store(next, Ordering::Release);
         true
+    }
+
+    /// Ask the consumer to drop every frame queued as of right now, next time
+    /// it checks (see `Ring::flush_requests`/`flush_target`). Fire-and-forget:
+    /// the producer never touches `read` itself, so the SPSC ownership split
+    /// (`read`: consumer-only, `write`: producer-only) stays intact. Frames
+    /// pushed *after* this call — e.g. real-time audio resuming right after a
+    /// fast-forward release — are unaffected even if the consumer doesn't get
+    /// around to applying the flush until several more frames have been
+    /// pushed.
+    fn flush(&self) {
+        let w = self.ring.write.load(Ordering::Acquire);
+        self.ring.flush_target.store(w, Ordering::Relaxed);
+        self.ring.flush_requests.fetch_add(1, Ordering::Release);
     }
 }
 
@@ -94,6 +127,24 @@ impl Consumer {
         let w = self.ring.write.load(Ordering::Acquire);
         let r = self.ring.read.load(Ordering::Acquire);
         w.wrapping_sub(r) & RING_MASK
+    }
+
+    /// Current value of the producer's flush-request counter (see
+    /// `Ring::flush_requests`); the caller compares this against the last
+    /// value it observed to detect a pending `Producer::flush`.
+    fn flush_seq(&self) -> usize {
+        self.ring.flush_requests.load(Ordering::Acquire)
+    }
+
+    /// Drop every frame queued as of the latest `Producer::flush` by jumping
+    /// `read` up to `flush_target` (not to the producer's *current* `write`,
+    /// which may already include frames pushed after that flush was
+    /// requested — see `Producer::flush`). Only ever called by the consumer
+    /// itself (from `Resampler::process`), so `read` still has exactly one
+    /// writer.
+    fn drain(&self) {
+        let target = self.ring.flush_target.load(Ordering::Relaxed);
+        self.ring.read.store(target, Ordering::Release);
     }
 }
 
@@ -121,10 +172,15 @@ struct Resampler {
     next: [f32; 2],
     /// Fractional read position between `cur` and `next`, in input frames.
     pos: f64,
+    /// Last `Consumer::flush_seq` value observed; a change since then means
+    /// `Producer::flush` fired (fast-forward release) and every frame queued
+    /// up to that point must be dropped before continuing.
+    flush_seen: usize,
 }
 
 impl Resampler {
     fn new(consumer: Consumer, device_rate: u32) -> Resampler {
+        let flush_seen = consumer.flush_seq();
         Resampler {
             consumer,
             base_ratio: DSP_SAMPLE_RATE as f64 / device_rate as f64,
@@ -136,6 +192,21 @@ impl Resampler {
             // initial silence, so exactly one silent output frame is produced at
             // stream start (inaudible), after which output tracks real data.
             pos: 1.0,
+            flush_seen,
+        }
+    }
+
+    /// Apply a pending `Producer::flush` (if any): drop every queued frame and
+    /// reset the interpolation state so no pre-flush sample can be carried
+    /// across (held in `cur`/`next` or blended via `pos`).
+    fn apply_pending_flush(&mut self) {
+        let seq = self.consumer.flush_seq();
+        if seq != self.flush_seen {
+            self.flush_seen = seq;
+            self.consumer.drain();
+            self.cur = [0.0; 2];
+            self.next = [0.0; 2];
+            self.pos = 1.0;
         }
     }
 
@@ -158,6 +229,7 @@ impl Resampler {
         if channels == 0 {
             return;
         }
+        self.apply_pending_flush();
         // One rate decision per callback.
         let ratio = self.current_ratio();
 
@@ -286,6 +358,15 @@ impl AudioOutput {
             self.producer.push(f);
         }
     }
+
+    /// Drop every frame currently queued in the ring (see `App::set_fast_forward`:
+    /// called on turbo release, to skip the intentionally-silent backlog
+    /// enqueued during fast-forward rather than playing it out before
+    /// real-time audio resumes). Async: the drop happens on the audio thread's
+    /// next callback, not synchronously here.
+    pub fn flush(&self) {
+        self.producer.flush();
+    }
 }
 
 /// Clamp a requested gain into `0.0..=1.0`; a non-finite request (which would
@@ -354,6 +435,66 @@ mod tests {
         }
         assert!(!p.push([0.0, 0.0]), "ring must report full");
         assert_eq!(c.fill(), RING_CAPACITY - 1);
+    }
+
+    #[test]
+    fn producer_flush_drops_everything_queued_for_the_consumer() {
+        let ring = Ring::new();
+        let p = Producer { ring: Arc::clone(&ring) };
+        let c = Consumer { ring: Arc::clone(&ring) };
+        for i in 0..5 {
+            assert!(p.push([i as f32, 0.0]));
+        }
+        assert_eq!(c.fill(), 5);
+        let seq_before = c.flush_seq();
+        p.flush();
+        assert_ne!(c.flush_seq(), seq_before, "flush must bump the counter the consumer polls");
+        c.drain();
+        assert_eq!(c.fill(), 0, "drain must catch `read` up to `write`");
+        // Frames pushed after the flush are unaffected.
+        assert!(p.push([9.0, 9.0]));
+        assert_eq!(c.pop(), Some([9.0, 9.0]));
+    }
+
+    #[test]
+    fn resampler_process_applies_a_pending_flush_before_producing_output() {
+        let ring = Ring::new();
+        let p = Producer { ring: Arc::clone(&ring) };
+        let mut rs = Resampler::new(Consumer { ring: Arc::clone(&ring) }, 32_000);
+        // Simulate a fast-forward backlog of intentionally-silent frames
+        // (pushed at gain 0 by `AudioOutput::push` while turbo is held).
+        for _ in 0..50 {
+            p.push([0.0, 0.0]);
+        }
+        p.flush();
+        assert_eq!(rs.consumer.fill(), 50, "flush is only applied inside process(), not eagerly");
+        let mut buf = [0.0f32; 2]; // one stereo frame
+        rs.process(&mut buf, 2);
+        assert_eq!(rs.consumer.fill(), 0, "process() must drop the backlog before producing output");
+    }
+
+    #[test]
+    fn resampler_flush_lets_a_fresh_post_flush_sample_through_immediately() {
+        let ring = Ring::new();
+        let p = Producer { ring: Arc::clone(&ring) };
+        let mut rs = Resampler::new(Consumer { ring: Arc::clone(&ring) }, 32_000); // base ratio 1.0
+        for _ in 0..20 {
+            p.push([1.0, 1.0]); // stand-in for the turbo-silence backlog
+        }
+        p.flush();
+        p.push([0.4, 0.4]); // the first real-time sample after turbo releases
+        // Apply the flush up front and neutralize the rate controller (as
+        // `resampler_interpolates_at_48khz` does below) so the ratio is
+        // exactly 1.0 and the interpolation math is deterministic instead of
+        // depending on the fill-driven trim.
+        rs.apply_pending_flush();
+        rs.target_fill = rs.consumer.fill() as f64;
+        let mut buf = [0.0f32; 4]; // two stereo frames: the first still holds
+                                    // the flush's reset silence, the second
+                                    // reads the fresh post-flush sample
+        rs.process(&mut buf, 2);
+        assert!((buf[2] - 0.4).abs() < 1e-6, "expected the post-flush sample, got {}", buf[2]);
+        assert!((buf[3] - 0.4).abs() < 1e-6);
     }
 
     #[test]

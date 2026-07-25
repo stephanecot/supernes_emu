@@ -54,6 +54,13 @@ fn sibling_dir(rom_path: &Path, name: &str) -> PathBuf {
     }
 }
 
+/// Last-modified time of `path`, or `None` if it doesn't exist or the
+/// platform/filesystem can't report one. Used by `try_resume` to compare a
+/// `.srm` sidecar against a `.resume` snapshot (review point A).
+fn mtime(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).ok()?.modified().ok()
+}
+
 /// Run the windowed frontend (M5): winit event loop + pixels present, paced
 /// to the cartridge region's native field rate (PAL 50.007 Hz / NTSC
 /// 60.0988 Hz, from `Region::frames_per_second`) via an absolute deadline.
@@ -291,7 +298,10 @@ impl ApplicationHandler for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _window_id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            // Routed through the same confirmation path as Esc/menu-Quit
+            // (rather than a bare `event_loop.exit()`) so clicking the
+            // window's close button can't skip `prefs.confirm_on_quit`.
+            WindowEvent::CloseRequested => self.request_quit(event_loop),
             WindowEvent::Resized(size) => {
                 if size.width > 0 && size.height > 0 {
                     if let Some(pixels) = &mut self.pixels {
@@ -457,12 +467,33 @@ impl App {
                     self.save_state();
                     return;
                 }
+                KeyCode::F6 => {
+                    self.reset();
+                    return;
+                }
                 KeyCode::F7 => {
                     self.next_slot();
                     return;
                 }
+                KeyCode::F8 => {
+                    self.export_spc();
+                    return;
+                }
                 KeyCode::F9 => {
                     self.load_state();
+                    return;
+                }
+                // `Émulation > Reprise instantanée` (macOS-only menu):
+                // without this, the option can only be toggled on macOS,
+                // making it silently permanent on other platforms.
+                KeyCode::F10 => {
+                    self.set_resume_on_launch(!self.prefs.resume_on_launch);
+                    return;
+                }
+                // `Fichier > Demander confirmation avant de quitter`
+                // (macOS-only menu): same reachability gap as F10.
+                KeyCode::F11 => {
+                    self.set_confirm_on_quit(!self.prefs.confirm_on_quit);
                     return;
                 }
                 KeyCode::F12 => {
@@ -473,7 +504,24 @@ impl App {
                     self.toggle_show_fps();
                     return;
                 }
-                _ => {}
+                // `Émulation > Accéléré > ×N` (macOS-only menu): steps
+                // through the offered factors one at a time.
+                KeyCode::BracketLeft => {
+                    self.adjust_fast_forward_factor(false);
+                    return;
+                }
+                KeyCode::BracketRight => {
+                    self.adjust_fast_forward_factor(true);
+                    return;
+                }
+                // `Émulation > Slot > N` (macOS-only menu): jump straight to
+                // a slot instead of cycling with F7.
+                other => {
+                    if let Some(slot) = digit_to_slot(other) {
+                        self.set_slot(slot);
+                        return;
+                    }
+                }
             }
         }
         if let Some(name) = input::keycode_to_button(code) {
@@ -481,17 +529,52 @@ impl App {
         }
     }
 
-    /// Flush everything that must outlive the process: the automatic session
-    /// state (instant resume), the battery SRAM of the currently loaded cart,
-    /// then the preferences file. Idempotent — the SRAM baseline is re-synced
-    /// after the write, so the second call (exit hook, then `run`) writes
-    /// nothing new; rewriting the resume state is harmless since no emulation
-    /// happened in between.
+    /// `[`/`]` hotkeys: step `prefs.fast_forward_factor` through
+    /// `prefs::FAST_FORWARD_FACTORS` (the same list the macOS menu's
+    /// `Accéléré` radio group offers), one entry per press.
+    fn adjust_fast_forward_factor(&mut self, up: bool) {
+        let factors = crate::prefs::FAST_FORWARD_FACTORS;
+        let idx = factors.iter().position(|&f| f == self.prefs.fast_forward_factor).unwrap_or(0);
+        let next = if up { (idx + 1).min(factors.len() - 1) } else { idx.saturating_sub(1) };
+        self.set_fast_forward_factor(factors[next]);
+    }
+
+    /// Flush everything that must outlive the process: the battery SRAM of
+    /// the currently loaded cart, the automatic session state (instant
+    /// resume), then the preferences file. Idempotent — the SRAM baseline is
+    /// re-synced after the write, so the second call (exit hook, then `run`)
+    /// writes nothing new; rewriting the resume state is harmless since no
+    /// emulation happened in between.
+    ///
+    /// SRAM is written *before* the resume snapshot on purpose (review point
+    /// A): both are derived from the exact same in-memory state at this
+    /// instant, so their content never disagrees, but `try_resume`'s
+    /// newer-`.srm` mtime guard would otherwise misfire on every ordinary
+    /// launch — `.srm` written second would always read as "newer" than
+    /// `.resume`, even though nothing unusual happened. Writing `.srm` first
+    /// means `.resume`'s mtime is always >= `.srm`'s in the normal case, so
+    /// that guard only ever trips for the genuine out-of-band edit it exists
+    /// to catch.
     fn persist_all(&mut self) {
-        self.write_resume_state();
         save::save_if_dirty(&self.snes.bus.cart, &self.save_path, &self.sram_baseline);
-        self.sram_baseline = self.snes.bus.cart.sram.as_bytes().to_vec();
+        self.write_resume_state();
+        self.resync_sram_baseline();
         self.prefs.save();
+    }
+
+    /// Re-derive `sram_baseline` from the SRAM currently held by `self.snes`.
+    /// Must run after every successful `Snes::load_state` (instant resume,
+    /// manual slot load, a ROM switch that resumes) as well as after a battery
+    /// write, and nowhere else. `load_state` replaces the entire cart —
+    /// including its SRAM — with whatever the blob held at the moment it was
+    /// written; leaving the pre-load baseline in place would make the next
+    /// `save_if_dirty` diff the *post-load* SRAM against *pre-load* bytes,
+    /// see them differ (even though nothing has actually changed since the
+    /// load), and rewrite `.srm` with the state-blob's SRAM copy — which can
+    /// be older than the `.srm` already on disk (see `try_resume`'s
+    /// newer-`.srm` guard for the case that matters most).
+    fn resync_sram_baseline(&mut self) {
+        self.sram_baseline = self.snes.bus.cart.sram.as_bytes().to_vec();
     }
 
     /// Esc / `Fichier > Quitter` / app-menu Quit (Cmd+Q): confirm first when
@@ -592,28 +675,40 @@ impl App {
         }
         self.fast_forward = on;
         self.apply_audio_gain();
+        if !on {
+            // Turbo just released: every frame pushed into the ring while it
+            // was held went in at gain 0 (see `apply_audio_gain`) so the
+            // consumer never gapped to a stuck sample — but that leaves up to
+            // ~256ms (`audio::RING_CAPACITY`'s worth in the worst case) of
+            // enqueued silence that would otherwise have to play out before
+            // real-time audio resumes. Drop it so unmuting is instant.
+            if let Some(audio) = &self.audio {
+                audio.flush();
+            }
+        }
         // Pacing restarts from now: an accelerated pass may have ended well
         // past the deadline it was aiming at, and the frames it ran ahead of
         // must not be counted as a backlog to catch up.
         self.next_deadline = Instant::now() + self.frame_duration;
     }
 
-    /// `Émulation > Accéléré > ×N`: how many frames one Tab-held presentation
-    /// runs. Clamped to the range the preferences file documents.
-    #[cfg(target_os = "macos")]
+    /// `[`/`]` hotkeys / `Émulation > Accéléré > ×N`: how many frames one
+    /// Tab-held presentation runs. Clamped to the range the preferences file
+    /// documents.
     fn set_fast_forward_factor(&mut self, factor: u8) {
-        self.prefs.fast_forward_factor = factor.clamp(2, 8);
+        self.prefs.fast_forward_factor = factor.clamp(2, 4);
         self.prefs.save();
+        #[cfg(target_os = "macos")]
         if let Some(menu) = &self.menu {
             menu.sync_fast_forward(self.prefs.fast_forward_factor);
         }
     }
 
-    /// `Fichier > Demander confirmation avant de quitter`.
-    #[cfg(target_os = "macos")]
+    /// `F11` hotkey / `Fichier > Demander confirmation avant de quitter`.
     fn set_confirm_on_quit(&mut self, on: bool) {
         self.prefs.confirm_on_quit = on;
         self.prefs.save();
+        #[cfg(target_os = "macos")]
         if let Some(menu) = &self.menu {
             menu.confirm_quit.set_checked(on);
         }
@@ -640,7 +735,11 @@ impl App {
         let slot = self.prefs.save_slot;
         let path = crate::state::state_path(&self.current_rom_path, slot);
         let bytes = self.snes.save_state();
-        match std::fs::write(&path, &bytes) {
+        // Atomic (temp file + rename): a crash or power loss mid-write must
+        // never leave a truncated `.state`/`.stateN`, which `Snes::load_state`
+        // would then reject as a corrupt body, costing the whole slot instead
+        // of just this save attempt.
+        match crate::atomic::write(&path, &bytes) {
             Ok(()) => {
                 eprintln!("state: saved {} ({} bytes)", path.display(), bytes.len());
                 self.set_status(format!("SLOT {slot} SAUVE"));
@@ -676,6 +775,9 @@ impl App {
         match self.snes.load_state(&bytes) {
             Ok(()) => {
                 eprintln!("state: loaded {}", path.display());
+                // The slot's snapshot replaced `cart.sram` wholesale; see
+                // `resync_sram_baseline` (review point A).
+                self.resync_sram_baseline();
                 self.set_status(format!("SLOT {slot} CHARGE"));
             }
             Err(e) => {
@@ -703,13 +805,14 @@ impl App {
         self.set_status(format!("SLOT {slot}"));
     }
 
-    /// `Émulation > Reprise instantanée`: whether `<rom>.resume` is restored at
-    /// launch. The session state is written on exit either way, so turning the
-    /// option back on resumes from the last session.
-    #[cfg(target_os = "macos")]
+    /// `F10` hotkey / `Émulation > Reprise instantanée`: whether
+    /// `<rom>.resume` is restored at launch. The session state is written on
+    /// exit either way, so turning the option back on resumes from the last
+    /// session.
     fn set_resume_on_launch(&mut self, on: bool) {
         self.prefs.resume_on_launch = on;
         self.prefs.save();
+        #[cfg(target_os = "macos")]
         if let Some(menu) = &self.menu {
             menu.resume_on_launch.set_checked(on);
         }
@@ -721,7 +824,13 @@ impl App {
     fn write_resume_state(&mut self) {
         let path = crate::state::resume_path(&self.current_rom_path);
         let bytes = self.snes.save_state();
-        match std::fs::write(&path, &bytes) {
+        // Atomic (temp file + rename): this runs unconditionally on every
+        // exit path, so a crash or power loss mid-write must never corrupt
+        // `.resume` — a truncated blob would make the *next* launch's
+        // `try_resume` reject it and silently fall back to power-on, but a
+        // half-written file could in principle also be misread as valid by
+        // an unlucky byte pattern, which atomic replacement rules out.
+        match crate::atomic::write(&path, &bytes) {
             Ok(()) => eprintln!("resume: wrote {} ({} bytes)", path.display(), bytes.len()),
             Err(e) => eprintln!("resume: could not write {}: {e}", path.display()),
         }
@@ -732,6 +841,20 @@ impl App {
     /// an incompatible format is reported and ignored — the game then simply
     /// starts from power-on, which is why `load_state`'s error is not fatal
     /// here (it leaves the console untouched).
+    ///
+    /// Design decision (review point A): `Snes::load_state` overwrites the
+    /// whole cart, including SRAM, with whatever the `.resume` blob held at
+    /// the moment it was written — which can predate the `.srm` sidecar
+    /// already on disk (e.g. the player restored an older `.resume` from a
+    /// backup, or something external touched the `.srm` after that snapshot
+    /// was taken). Silently reverting to the older, embedded SRAM in that
+    /// case would look like *losing* the more recent save. Since a resume can
+    /// only make the game's *progress* older, not the *battery save* (those
+    /// are conceptually independent even though a state blob bundles both),
+    /// this picks the more recent of the two by file mtime: if `.srm` is
+    /// strictly newer than `.resume`, the SRAM this launch already loaded
+    /// from it (`sram_baseline`, captured by `save::load_sram` right before
+    /// `Snes::new`) is re-applied over the resumed cart's SRAM.
     fn try_resume(&mut self) {
         if !self.prefs.resume_on_launch {
             return;
@@ -745,10 +868,25 @@ impl App {
                 return;
             }
         };
+        let srm_is_newer = mtime(&self.save_path)
+            .zip(mtime(&path))
+            .is_some_and(|(srm, resume)| srm > resume);
         match self.snes.load_state(&bytes) {
             Ok(()) => {
                 eprintln!("resume: restored {}", path.display());
+                if srm_is_newer {
+                    // `sram_baseline` is exactly `cart.sram.len()` bytes for
+                    // this ROM (captured from the same cart, same session),
+                    // so re-applying it here can never mis-size.
+                    self.snes.bus.cart.sram.load(&self.sram_baseline);
+                    eprintln!(
+                        "resume: {} is newer than {}; keeping its SRAM instead of the resumed snapshot's",
+                        self.save_path.display(),
+                        path.display()
+                    );
+                }
                 self.set_status("REPRISE");
+                self.resync_sram_baseline();
             }
             Err(e) => {
                 eprintln!("resume: ignoring {} ({e})", path.display());
@@ -853,9 +991,13 @@ impl App {
     /// would undo the reset.
     fn switch_rom(&mut self, path: &Path, resume: bool) -> Result<(), String> {
         // Leaving a game is an exit for that game: its session state and
-        // battery SRAM are written before the console is replaced.
-        self.write_resume_state();
+        // battery SRAM are written before the console is replaced. SRAM
+        // first, resume snapshot second — same reasoning as `persist_all`
+        // (review point A: keeps `.resume`'s mtime >= `.srm`'s in the
+        // ordinary case, so `try_resume`'s newer-`.srm` guard doesn't misfire
+        // next time this ROM is loaded).
         save::save_if_dirty(&self.snes.bus.cart, &self.save_path, &self.sram_baseline);
+        self.write_resume_state();
 
         let bytes = crate::load_rom_bytes(path)?;
         let mut cart = Cartridge::from_bytes(bytes)?;
@@ -883,16 +1025,15 @@ impl App {
         Ok(())
     }
 
-    /// `Emulation > Reset` menu item (Cmd+R): reload the currently running
-    /// ROM in place. Reuses `switch_rom` with the same path rather than
-    /// rebuilding `Snes` from `self.snes.bus.cart` directly (`Cartridge`
-    /// isn't `Clone`): `switch_rom` first flushes the live, possibly-dirty
-    /// SRAM to `save_path`, then reloads that same file into the fresh
-    /// cart, so the net effect is a power-on reset of CPU/PPU/APU state
-    /// that preserves the current battery save — matching the SNES's
-    /// physical reset button, which restarts execution but never erases
-    /// cartridge SRAM.
-    #[cfg(target_os = "macos")]
+    /// `F6` hotkey / `Emulation > Reset` menu item (Cmd+R, macOS only):
+    /// reload the currently running ROM in place. Reuses `switch_rom` with the
+    /// same path rather than rebuilding `Snes` from `self.snes.bus.cart`
+    /// directly (`Cartridge` isn't `Clone`): `switch_rom` first flushes the
+    /// live, possibly-dirty SRAM to `save_path`, then reloads that same file
+    /// into the fresh cart, so the net effect is a power-on reset of
+    /// CPU/PPU/APU state that preserves the current battery save — matching
+    /// the SNES's physical reset button, which restarts execution but never
+    /// erases cartridge SRAM.
     fn reset(&mut self) {
         let path = self.current_rom_path.clone();
         if let Err(e) = self.switch_rom(&path, false) {
@@ -980,6 +1121,26 @@ impl App {
                 self.set_show_fps(checked);
             }
         }
+    }
+}
+
+/// Top-row digit key -> save-state slot number (`Digit0` = slot 0 ... `Digit9`
+/// = slot 9), or `None` for any other key. Numpad digits are deliberately not
+/// aliased: they're needed unmodified for a future 2-player/gamepad-less
+/// numpad layout, and a single unambiguous row is easier to document.
+fn digit_to_slot(code: KeyCode) -> Option<u8> {
+    match code {
+        KeyCode::Digit0 => Some(0),
+        KeyCode::Digit1 => Some(1),
+        KeyCode::Digit2 => Some(2),
+        KeyCode::Digit3 => Some(3),
+        KeyCode::Digit4 => Some(4),
+        KeyCode::Digit5 => Some(5),
+        KeyCode::Digit6 => Some(6),
+        KeyCode::Digit7 => Some(7),
+        KeyCode::Digit8 => Some(8),
+        KeyCode::Digit9 => Some(9),
+        _ => None,
     }
 }
 
@@ -1255,6 +1416,17 @@ mod path_tests {
     use super::*;
 
     #[test]
+    fn mtime_reports_none_for_a_missing_file_and_some_for_an_existing_one() {
+        let path = std::env::temp_dir()
+            .join(format!("prisme_mtime_test_{}.tmp", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(mtime(&path), None);
+        std::fs::write(&path, b"x").expect("write fixture");
+        assert!(mtime(&path).is_some());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn default_capture_folders_sit_next_to_the_rom() {
         assert_eq!(
             sibling_dir(Path::new("/roms/game.sfc"), "Screenshots"),
@@ -1263,6 +1435,34 @@ mod path_tests {
         assert_eq!(sibling_dir(Path::new("/roms/game.zip"), "SPC"), PathBuf::from("/roms/SPC"));
         // A bare file name has no parent directory: fall back to the CWD.
         assert_eq!(sibling_dir(Path::new("game.sfc"), "SPC"), PathBuf::from("SPC"));
+    }
+
+    #[test]
+    fn digit_keys_map_straight_to_their_slot_number() {
+        assert_eq!(digit_to_slot(KeyCode::Digit0), Some(0));
+        assert_eq!(digit_to_slot(KeyCode::Digit9), Some(9));
+        for (n, code) in [
+            KeyCode::Digit0,
+            KeyCode::Digit1,
+            KeyCode::Digit2,
+            KeyCode::Digit3,
+            KeyCode::Digit4,
+            KeyCode::Digit5,
+            KeyCode::Digit6,
+            KeyCode::Digit7,
+            KeyCode::Digit8,
+            KeyCode::Digit9,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(digit_to_slot(code), Some(n as u8));
+        }
+        // Non-digit keys (including numpad digits, deliberately not aliased)
+        // and existing hotkeys must not be misread as a slot number.
+        assert_eq!(digit_to_slot(KeyCode::Numpad5), None);
+        assert_eq!(digit_to_slot(KeyCode::F5), None);
+        assert_eq!(digit_to_slot(KeyCode::KeyA), None);
     }
 
     #[test]

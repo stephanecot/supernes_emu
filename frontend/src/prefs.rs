@@ -14,10 +14,21 @@
 //!   * unknown fields (written by a newer build) are ignored, missing fields
 //!     fall back to the value in `Prefs::default()` (container-level
 //!     `#[serde(default)]`), so old files stay readable as fields are added;
-//!   * writes are atomic (temp file in the same directory + `rename`), so a
-//!     crash mid-write cannot leave a truncated `prefs.json` behind;
+//!   * writes are atomic (temp file in the same directory + `rename`, via
+//!     `crate::atomic`), so a crash mid-write cannot leave a truncated
+//!     `prefs.json` behind;
 //!   * `persist` is false in headless/CLI runs: `save()` is then a no-op, so an
 //!     automated run never rewrites the user's file.
+//!
+//! Every field is declared and round-trips through the file from the start
+//! (see `docs/ROADMAP.md`'s phases) so the format never needs a breaking
+//! migration, but not every field is read by the running emulator yet.
+//! Fields the frontend actually *acts on* today: `mute`, `volume`, `show_fps`,
+//! `fast_forward_factor`, `confirm_on_quit`, `resume_on_launch`, `save_slot`,
+//! `screenshot_dir`. Every other field is annotated below with the roadmap
+//! phase that wires it up (`parental` already carries this note in its own
+//! doc comment) — a value stored there today is preserved for when that phase
+//! lands, but changing it has no effect yet.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -73,30 +84,49 @@ pub struct Prefs {
     pub volume: u8,
     /// On-screen FPS overlay (`F` hotkey / `View > Show FPS`).
     pub show_fps: bool,
-    /// Integer window upscale factor, 1..=8.
+    /// Integer window upscale factor, 1..=8. **Not yet applied** — the window
+    /// is always created at `video::WINDOW_SCALE`; wiring this in is
+    /// `docs/ROADMAP.md` Phase 2 (Affichage: zoom, filtres, ratio).
     pub zoom: u8,
     /// Display filter name: `none` (sharp nearest-neighbour, the default),
     /// `smooth`, `crt`. Unknown names are preserved as written so a file from
-    /// a newer build survives a round trip through an older one.
+    /// a newer build survives a round trip through an older one. **Not yet
+    /// applied** — every present path renders with plain nearest-neighbour
+    /// upscaling regardless of this value; Phase 2, same as `zoom`.
     pub filter: String,
-    /// Aspect handling: `pixel-perfect` (1:1) or `tv` (8:7 PAR, ~4:3).
+    /// Aspect handling: `pixel-perfect` (1:1) or `tv` (8:7 PAR, ~4:3). **Not
+    /// yet applied** — the window is always 1:1 pixel-perfect; Phase 2, same
+    /// as `zoom`.
     pub aspect: String,
     /// Directory for `.srm`/`.state` sidecars; `None` = next to the ROM.
+    /// **Not yet applied** — saves and states always sit next to the ROM
+    /// (`save::default_save_path`/`state::state_path`); Phase 4 (Répertoires
+    /// configurables).
     pub save_dir: Option<PathBuf>,
-    /// Directory for screenshots; `None` = next to the ROM.
+    /// Directory for screenshots; `None` = next to the ROM. Applied by
+    /// `App::take_screenshot`, unlike the other directory/display fields on
+    /// this struct.
     pub screenshot_dir: Option<PathBuf>,
     /// SNES button name (`A B X Y L R Start Select Up Down Left Right`) ->
     /// physical keyboard key. Entries naming a key winit does not know are
-    /// dropped with a warning instead of failing the whole file.
+    /// dropped with a warning instead of failing the whole file. **Not yet
+    /// applied** — `input::keycode_to_button` always reads the hard-coded
+    /// `DEFAULT_KEYMAP` table instead of this map; Phase 3 (Manette +
+    /// remapping).
     #[serde(deserialize_with = "de_keymap")]
     pub keymap: BTreeMap<String, KeyCode>,
     /// SNES button name -> gamepad button name (Phase 3; empty = built-in
-    /// default mapping).
+    /// default mapping). **Not yet applied** — there is no gamepad support at
+    /// all yet (no `gilrs` integration), so this map has nothing to feed.
     pub pad_map: BTreeMap<String, String>,
     pub parental: Parental,
-    /// Directory the ROM picker opens in; `None` = `roms/` if present.
+    /// Directory the ROM picker opens in; `None` = `roms/` if present. **Not
+    /// yet applied** — `picker::pick_rom` always starts in `roms/` (or the
+    /// working directory); Phase 4, same as `save_dir`.
     pub last_rom_dir: Option<PathBuf>,
-    /// Speed multiplier of the fast-forward key, 2..=8.
+    /// Speed multiplier of the fast-forward key, 2..=4 (matches the choices
+    /// `menu::FF_FACTORS`/`prefs::FAST_FORWARD_FACTORS` offer; a value from
+    /// an older file that allowed up to 8 is clamped down by `sanitize`).
     pub fast_forward_factor: u8,
     /// Ask for confirmation before quitting.
     pub confirm_on_quit: bool,
@@ -135,6 +165,13 @@ impl Default for Prefs {
         }
     }
 }
+
+/// Fast-forward factors offered to the player, in order: the keyboard's
+/// `[`/`]` hotkeys (`App::adjust_fast_forward_factor`) step through this exact
+/// list, and it must stay in sync with the macOS menu's `menu::FF_FACTORS`
+/// (checked by a cross-referencing test in `menu.rs`). `Prefs::sanitize`
+/// clamps `fast_forward_factor` to this range.
+pub const FAST_FORWARD_FACTORS: &[u8] = &[2, 3, 4];
 
 /// Built-in keyboard mapping, taken from `input::DEFAULT_KEYMAP` so the file's
 /// defaults and the hard-coded mapping can never drift apart.
@@ -216,29 +253,14 @@ impl Prefs {
         Ok(prefs)
     }
 
-    /// Atomic write: serialize to a sibling temp file, then `rename` over the
-    /// target (same directory, so the rename stays within one filesystem and
-    /// is atomic). A crash before the rename leaves the previous file intact.
+    /// Atomic write (`crate::atomic::write`: sibling temp file + `rename`,
+    /// same directory so the rename stays within one filesystem). A crash
+    /// before the rename leaves the previous file intact.
     pub fn write_to(&self, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
-            }
-        }
         let mut json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("could not serialize preferences: {e}"))?;
         json.push('\n');
-
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let tmp = path.with_file_name(format!(".{name}.tmp{}", std::process::id()));
-        std::fs::write(&tmp, json.as_bytes())
-            .map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
-        if let Err(e) = std::fs::rename(&tmp, path) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(format!("could not replace {}: {e}", path.display()));
-        }
-        Ok(())
+        crate::atomic::write(path, json.as_bytes())
     }
 
     /// Clamp values a hand-edited file could put out of range. Free-form
@@ -247,7 +269,7 @@ impl Prefs {
     fn sanitize(&mut self) {
         self.volume = self.volume.min(100);
         self.zoom = self.zoom.clamp(1, 8);
-        self.fast_forward_factor = self.fast_forward_factor.clamp(2, 8);
+        self.fast_forward_factor = self.fast_forward_factor.clamp(2, 4);
         self.save_slot = self.save_slot.min(9);
     }
 }
@@ -439,6 +461,24 @@ mod tests {
         assert_eq!(p.zoom, 1);
         assert_eq!(p.fast_forward_factor, 2);
         assert_eq!(p.save_slot, 9);
+
+        // A file written by an older build (fast_forward_factor allowed up to
+        // 8, and the macOS menu only ever offered 2/3/4 — review point G) is
+        // clamped down to the now-aligned 2..=4 range instead of leaving a
+        // value the menu's radio group can't represent.
+        let p = Prefs::from_json("{\"fast_forward_factor\": 8}").expect("parse");
+        assert_eq!(p.fast_forward_factor, 4);
+    }
+
+    #[test]
+    fn fast_forward_factors_constant_matches_the_clamp_range() {
+        assert_eq!(FAST_FORWARD_FACTORS, &[2, 3, 4]);
+        let mut p = Prefs::default();
+        for &f in FAST_FORWARD_FACTORS {
+            p.fast_forward_factor = f;
+            p.sanitize();
+            assert_eq!(p.fast_forward_factor, f, "sanitize must not touch an in-range factor");
+        }
     }
 
     #[test]

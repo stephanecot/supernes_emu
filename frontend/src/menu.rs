@@ -8,9 +8,14 @@
 //! (enabled/text/checkmark) can be queried or changed later without
 //! re-querying AppKit.
 //!
-//! Layout: App / Fichier / Émulation / Audio / Affichage. Every item here has
-//! a keyboard equivalent handled directly in `video.rs::handle_key`, so the
-//! whole feature set stays reachable on platforms without this menu.
+//! Layout: App / Fichier / Émulation / Audio / Affichage. Most items double a
+//! keyboard hotkey already handled in `video.rs::handle_key` (Open ROM = `O`,
+//! Pause = `P`, Save/Load State = F5/F9, Show FPS = `F`, Mute = `M`, Volume =
+//! `+`/`-`); the handful that used to be macOS-menu-only also have a
+//! cross-platform hotkey now: Reset = F6, Export SPC = F8, Slot N = digits
+//! 0-9 (F7 still cycles), Reprise instantanée = F10, Accéléré factor =
+//! `[`/`]`, Confirmation avant de quitter = F11. So the whole feature set
+//! stays reachable on platforms without this menu (Windows/Linux).
 //!
 //! Only built for `target_os = "macos"`: this is a macOS-specific menu bar,
 //! not a cross-platform one (Windows/Linux would need `init_for_hwnd`/GTK
@@ -51,6 +56,10 @@ pub const QUIT_ID: &str = "prisme.quit";
 /// Fast-forward factors offered in `Émulation > Accéléré`, paired with the id
 /// of their menu item. `video.rs` maps a click back to the factor with this
 /// table, and `AppMenu::sync_fast_forward` re-derives the checkmarks from it.
+/// The factors themselves must stay in sync with `prefs::FAST_FORWARD_FACTORS`
+/// (the cross-platform `[`/`]` hotkeys' step list and `Prefs::sanitize`'s
+/// clamp range) — checked by `fast_forward_factors_match_the_prefs_constant`
+/// below.
 pub const FF_FACTORS: &[(u8, &str)] = &[(2, FF_X2_ID), (3, FF_X3_ID), (4, FF_X4_ID)];
 
 /// Save-state slots offered in `Émulation > Slot`, paired with their menu-item
@@ -388,6 +397,14 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), FF_FACTORS.len());
+    }
+
+    #[test]
+    fn fast_forward_factors_match_the_prefs_constant() {
+        // The menu's radio group and the cross-platform `[`/`]` hotkeys must
+        // offer exactly the same factors (review point G).
+        let menu_factors: Vec<u8> = FF_FACTORS.iter().map(|&(f, _)| f).collect();
+        assert_eq!(menu_factors, crate::prefs::FAST_FORWARD_FACTORS);
     }
 
     #[test]

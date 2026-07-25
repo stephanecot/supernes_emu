@@ -37,6 +37,16 @@ description: Build, test, lint and run the SNES emulator (Rust workspace) — ru
 | `--load-state FILE` | Headless: `Snes::load_state` from FILE before emulating frame 0 (rejects a state saved from a different ROM) |
 | `--save-state-at FRAME FILE` | Headless: write `Snes::save_state` to FILE right after emulating frame FRAME |
 
+**Output path handling:** only `--trace`/`--trace-spc`/`--trace-gsu`/`--trace-sa1` auto-root a
+relative PATH under `target/debug-out/` (traces can reach gigabytes — this is the output-hygiene
+rule below). Every other output flag — `--dump-frame`, `--dump-frame-every`/`--dump-dir`,
+`--dump-state`, `--dump-spc`, `--dump-audio`, `--save-state-at` — honors PATH exactly as given,
+relative to the current directory; agents should pass an explicit `target/debug-out/...` path for
+those themselves if they want the same hygiene. `.srm`/`.state*`/`.resume` writes (battery saves,
+save states, prefs) are atomic (temp file + `rename`); a `.srm` whose size doesn't exactly match
+the cart's declared SRAM is rejected at load (fresh SRAM is used instead), so don't hand-edit a
+`.srm` to a different length when testing.
+
 # ROMs (all PAL — the emulator must run them at 50 Hz)
 
 Located in `roms/` (paths contain spaces — always quote):

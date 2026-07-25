@@ -75,10 +75,16 @@ Controls:
 | L / R | Q / W |
 | Start / Select | Enter / Right-Shift |
 
-Emulator hotkeys: `P` pause, `N` frame-advance (while paused), `O` open a
-different ROM (native file dialog; saves the current game's SRAM first,
-cancelling keeps the current game running), `F5` save state, `F9` load state,
-`F` toggle the FPS overlay, `Esc` quit.
+Emulator hotkeys (all platforms — these do not depend on the macOS-only menu
+bar below): `P` pause, `N` frame-advance (while paused), `O` open a different
+ROM (native file dialog; saves the current game's SRAM first, cancelling
+keeps the current game running), `F5` save state, `F9` load state, `F7` next
+save-state slot, `0`-`9` jump straight to that slot, `F6` reset (power-on
+reset, keeps battery SRAM), `F8` export the current music as `.spc`, `F10`
+toggle instant-resume-on-launch, `F11` toggle the quit confirmation, `[`/`]`
+step the fast-forward factor (2/3/4×, held with `Tab`), `F` toggle the FPS
+overlay, `M` mute, `+`/`-` volume, `F12` screenshot, `Esc` quit (asks for
+confirmation unless disabled with `F11`).
 
 The FPS overlay (off by default) draws the measured display frame rate in the
 top-right corner, e.g. `FPS60/50` (frames actually presented per wall-second,
@@ -90,19 +96,33 @@ font, no font asset), never into the core's own framebuffer, so it never
 appears in `--dump-frame`/`--dump-frame-every` PNGs or any other headless
 output.
 
-On macOS the windowed build also installs a native menu bar (top of screen):
+On macOS the windowed build also installs a native menu bar (top of screen).
+Every item there also has a plain-keyboard equivalent (listed above) that
+works on every platform, including Windows/Linux where this menu doesn't
+exist:
 
-| Menu | Item | Shortcut | Action |
+| Menu | Item | Shortcut | Also reachable via |
 |---|---|---|---|
-| File | Open ROM… | Cmd+O | same as the `O` hotkey |
-| File | Quit | Cmd+Q | quit (flushes battery SRAM first, same as `Esc`/window-close) |
-| Emulation | Pause / Resume | Cmd+P | same as the `P` hotkey |
-| Emulation | Reset | Cmd+R | reload the running ROM in place (power-on reset; keeps battery SRAM, same as pulling and re-inserting the same cartridge) |
-| Emulation | Save State | Cmd+S | same as `F5` |
-| Emulation | Load State | Cmd+L | same as `F9` |
-| View | Show FPS | Cmd+F | same as the `F` hotkey; checkbox reflects overlay state |
+| File | Open ROM… | Cmd+O | `O` |
+| File | Capture d'écran | — | `F12` |
+| File | Exporter la musique (.spc)… | — | `F8` |
+| File | Demander confirmation avant de quitter | — | `F11` |
+| File | Quit | Cmd+Q | `Esc` |
+| Emulation | Pause / Resume | Cmd+P | `P` |
+| Emulation | Reset | Cmd+R | `F6` |
+| Emulation | Save State | Cmd+S | `F5` |
+| Emulation | Load State | Cmd+L | `F9` |
+| Emulation | Slot N | — | digit key `N` (0-9) |
+| Emulation | Slot suivant | — | `F7` |
+| Emulation | Reprise instantanée | — | `F10` |
+| Emulation | Accéléré > ×N | — | `[`/`]` (with `Tab` held) |
+| Audio | Muet | Cmd+M | `M` |
+| Audio | Volume +/− | Cmd+=/Cmd+- | `+`/`-` |
+| View | Show FPS | Cmd+F | `F` |
 
-Keyboard hotkeys keep working alongside the menu.
+Keyboard hotkeys keep working alongside the menu; the checkable items
+(mute, confirm-on-quit, show FPS, resume-on-launch, the slot and
+fast-forward-factor radio groups) stay in sync whichever path is used.
 
 Save states snapshot the whole console (CPU/PPU/APU/DSP/DMA and all RAM) to a
 `.state` sidecar next to the ROM (e.g. `game.sfc` -> `game.state`; for a
