@@ -43,6 +43,9 @@ pub enum Setting {
     ConfirmOnQuit(bool),
     /// Save-state slot F5/F9 act on, 0..=9.
     Slot(u8),
+    /// Drop every keyboard and controller binding the player made, back to the
+    /// built-in `input::DEFAULT_KEYMAP` / `pad::DEFAULT_PAD_MAP`.
+    ResetInputs,
 }
 
 /// A request produced by the UI, applied by the event loop once the egui
@@ -89,6 +92,10 @@ pub enum Action {
     ChooseScreenshotDir,
     /// Back to the default screenshot folder (beside the ROM).
     ResetScreenshotDir,
+    /// Choose the folder battery saves and save states go to.
+    ChooseSaveDir,
+    /// Back to the default save location (beside the ROM).
+    ResetSaveDir,
     /// Open the pedagogical PDF in the platform's document reader.
     OpenGuide,
 }

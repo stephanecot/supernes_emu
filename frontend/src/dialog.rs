@@ -36,6 +36,8 @@ pub enum Request {
     LibraryDir { current: PathBuf },
     /// Pick the folder screenshots are written to.
     ScreenshotDir { current: PathBuf },
+    /// Pick the folder battery saves and save states are written to.
+    SaveDir { current: PathBuf },
 }
 
 /// What the player answered.
@@ -44,6 +46,7 @@ pub enum Answer {
     Rom(PathBuf),
     LibraryDir(PathBuf),
     ScreenshotDir(PathBuf),
+    SaveDir(PathBuf),
     /// The panel was dismissed without a choice; the caller changes nothing but
     /// still restarts frame pacing, since an arbitrary amount of wall time
     /// passed.
@@ -131,6 +134,12 @@ fn run(request: Request) -> Answer {
         Request::ScreenshotDir { current } => {
             match crate::picker::pick_dir("Dossier des captures", &current) {
                 Some(dir) => Answer::ScreenshotDir(dir),
+                None => Answer::Cancelled,
+            }
+        }
+        Request::SaveDir { current } => {
+            match crate::picker::pick_dir("Dossier des sauvegardes", &current) {
+                Some(dir) => Answer::SaveDir(dir),
                 None => Answer::Cancelled,
             }
         }
@@ -244,13 +253,14 @@ mod tests {
             Answer::Rom(PathBuf::from("/roms/a.sfc")),
             Answer::LibraryDir(PathBuf::from("/roms")),
             Answer::ScreenshotDir(PathBuf::from("/shots")),
+            Answer::SaveDir(PathBuf::from("/saves")),
             Answer::Cancelled,
         ];
         let mut seen = 0;
         for answer in &answers {
             match answer {
                 Answer::Rom(p) => assert!(p.extension().is_some()),
-                Answer::LibraryDir(p) | Answer::ScreenshotDir(p) => {
+                Answer::LibraryDir(p) | Answer::ScreenshotDir(p) | Answer::SaveDir(p) => {
                     assert!(p.is_absolute() || p == Path::new("roms"));
                 }
                 Answer::Cancelled => {}

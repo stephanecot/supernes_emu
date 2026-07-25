@@ -2,19 +2,16 @@
 //! I/O-free by design (see `core/src/cartridge/sram.rs`); loading/saving
 //! the sidecar file is the frontend's job.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use snes_core::Cartridge;
 
 use crate::atomic;
 
-/// Default save path for a ROM: same directory and base name, `.srm`
-/// extension. `PathBuf::with_extension` replaces whatever extension is
-/// present (`.sfc`/`.smc`/`.zip`), so a zipped ROM's sidecar is named after
-/// the zip itself (e.g. `game.zip` -> `game.srm`), matching the spec.
-pub fn default_save_path(rom_path: &Path) -> PathBuf {
-    rom_path.with_extension("srm")
-}
+/// Extension of a battery-save sidecar. Where the file lands — beside the ROM
+/// or in `prefs.save_dir` — is `crate::paths::GamePaths`' job; this module only
+/// reads and writes whatever path it is handed.
+pub const SRM_EXT: &str = "srm";
 
 /// Load a sidecar save into `cart.sram` if the cart has battery SRAM and a
 /// save file exists at `save_path`. Returns the post-load SRAM bytes as a
@@ -93,6 +90,7 @@ mod tests {
     use super::*;
     use snes_core::cartridge::sram::Sram;
     use snes_core::Mapping;
+    use std::path::PathBuf;
 
     /// Minimal cart with `sram_len` bytes of battery SRAM; every other field
     /// is irrelevant to `load_sram`/`save_if_dirty`.
@@ -122,12 +120,6 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("prisme_save_{}_{}", std::process::id(), tag));
         std::fs::create_dir_all(&dir).expect("create scratch dir");
         dir.join("game.srm")
-    }
-
-    #[test]
-    fn default_save_path_replaces_the_extension() {
-        assert_eq!(default_save_path(Path::new("/roms/game.sfc")), PathBuf::from("/roms/game.srm"));
-        assert_eq!(default_save_path(Path::new("/roms/game.zip")), PathBuf::from("/roms/game.srm"));
     }
 
     #[test]
@@ -186,6 +178,25 @@ mod tests {
         cart.sram.set(0, 0xAA); // no-op: `Sram::set` on an empty buffer does nothing
         save_if_dirty(&cart, &path, &[]);
         assert!(!path.exists(), "a cart with no SRAM must never create a .srm file");
+    }
+
+    /// A save folder the player configured may not exist yet (they typed a new
+    /// name in the panel, or moved it since): the write creates it rather than
+    /// dropping the save.
+    #[test]
+    fn a_missing_save_folder_is_created_by_the_write() {
+        // Own directory, and one that does *not* exist yet — that is the point.
+        let root =
+            std::env::temp_dir().join(format!("prisme_save_{}_mkdir", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let path = root.join("nested").join("game.srm");
+        let mut cart = cart_with_sram(4);
+        let baseline = load_sram(&mut cart, &path); // nothing there yet
+        cart.sram.set(0, 0x42);
+        save_if_dirty(&cart, &path, &baseline);
+        assert!(path.is_file(), "the folder must be created on demand");
+        assert_eq!(std::fs::read(&path).unwrap()[0], 0x42);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

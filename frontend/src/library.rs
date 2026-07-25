@@ -513,9 +513,16 @@ impl StateFile {
     }
 }
 
-/// Save states that currently exist for `rom_path`: the automatic resume
-/// snapshot first, then the manual slots in order.
-pub fn save_states(rom_path: &Path) -> Vec<StateFile> {
+/// Save states that currently exist for the game `paths` describes: the
+/// automatic resume snapshot first, then the manual slots in order.
+///
+/// Each slot is looked up exactly where loading it would look
+/// (`paths::GamePaths::state_read`), so a state still sitting beside the ROM
+/// after a folder was configured is listed rather than reported missing. The
+/// caller passes the *running* session's own `GamePaths` for the game that is
+/// loaded (it is frozen at load time, and F9 reads through it) and builds one
+/// from the current preferences for every other entry of the library.
+pub fn save_states(paths: &crate::paths::GamePaths) -> Vec<StateFile> {
     let mut out = Vec::new();
     let mut push = |slot: Option<u8>, path: PathBuf| {
         if let Ok(meta) = std::fs::metadata(&path) {
@@ -529,9 +536,9 @@ pub fn save_states(rom_path: &Path) -> Vec<StateFile> {
             }
         }
     };
-    push(None, crate::state::resume_path(rom_path));
+    push(None, paths.resume_read());
     for slot in 0..crate::state::SLOT_COUNT {
-        push(Some(slot), crate::state::state_path(rom_path, slot));
+        push(Some(slot), paths.state_read(slot));
     }
     out
 }
@@ -1177,12 +1184,13 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("mkdir");
         let rom = dir.join("game.sfc");
         std::fs::write(&rom, b"rom").expect("write");
-        assert!(save_states(&rom).is_empty());
+        let beside = crate::paths::GamePaths::new(&rom, "GAME-0001", None, None);
+        assert!(save_states(&beside).is_empty());
 
-        std::fs::write(crate::state::state_path(&rom, 0), b"s0").expect("write");
-        std::fs::write(crate::state::state_path(&rom, 3), b"s3").expect("write");
-        std::fs::write(crate::state::resume_path(&rom), b"r").expect("write");
-        let states = save_states(&rom);
+        std::fs::write(beside.state_write(0), b"s0").expect("write");
+        std::fs::write(beside.state_write(3), b"s3").expect("write");
+        std::fs::write(beside.resume_write(), b"r").expect("write");
+        let states = save_states(&beside);
         assert_eq!(states.len(), 3);
         assert_eq!(states[0].slot, None);
         assert_eq!(states[0].label(), "Reprise");
@@ -1191,6 +1199,41 @@ mod tests {
         assert_eq!(states[2].label(), "Slot 3");
         assert_eq!(states[1].size, 2);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With a save folder configured, the sheet must list both what that folder
+    /// holds and the states still sitting beside the ROM — exactly the files
+    /// F9 would load (`paths::read_sidecar`'s fallback).
+    #[test]
+    fn save_states_list_the_configured_folder_and_the_legacy_files() {
+        let root = scratch("states-dir");
+        let roms = root.join("roms");
+        let saves = root.join("saves");
+        std::fs::create_dir_all(&roms).expect("mkdir");
+        std::fs::create_dir_all(&saves).expect("mkdir");
+        let rom = roms.join("game.sfc");
+        std::fs::write(&rom, b"rom").expect("write");
+        // Slot 0 only beside the ROM, slot 1 only in the folder (under the
+        // game's own id, the name a save written there takes), slot 2 only in
+        // the folder under the ROM file's name, as an older build wrote it.
+        std::fs::write(roms.join("game.state"), b"old").expect("write");
+        std::fs::write(saves.join("GAME-0001.state1"), b"new").expect("write");
+        std::fs::write(saves.join("game.state2"), b"legacy").expect("write");
+
+        let paths =
+            crate::paths::GamePaths::new(&rom, "GAME-0001", Some(saves.clone()), None);
+        let states = save_states(&paths);
+        let listed: Vec<(Option<u8>, PathBuf)> =
+            states.iter().map(|s| (s.slot, s.path.clone())).collect();
+        assert_eq!(
+            listed,
+            vec![
+                (Some(0), roms.join("game.state")),
+                (Some(1), saves.join("GAME-0001.state1")),
+                (Some(2), saves.join("game.state2")),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

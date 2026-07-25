@@ -1,30 +1,27 @@
-//! Save-state sidecar files (`.state` next to the ROM). The serialized blob
-//! is produced/consumed by snes-core's `Snes::save_state`/`load_state`; the
-//! frontend only chooses the path and does the file I/O (snes-core is
+//! Save-state sidecar files (`.state`/`.stateN`/`.resume`). The serialized
+//! blob is produced/consumed by snes-core's `Snes::save_state`/`load_state`;
+//! the frontend only chooses the path and does the file I/O (snes-core is
 //! I/O-free by design, same split as battery SRAM in `save.rs`).
-
-use std::path::{Path, PathBuf};
-
-/// Sidecar save-state path for a ROM and slot. Slot 0 uses `<rom>.state`;
-/// slot N>0 uses `<rom>.stateN`, so multiple states can coexist. Like the
-/// `.srm` sidecar, the extension is replaced, so a zipped ROM's state is
-/// named after the zip's base name (`game.zip` -> `game.state`).
-pub fn state_path(rom_path: &Path, slot: u8) -> PathBuf {
-    if slot == 0 {
-        rom_path.with_extension("state")
-    } else {
-        rom_path.with_extension(format!("state{slot}"))
-    }
-}
+//!
+//! This module owns the *naming* scheme only; where the files land — beside the
+//! ROM or in `prefs.save_dir` — is `crate::paths::GamePaths`' job.
 
 /// Number of manual save-state slots (`prefs.save_slot` cycles 0..SLOT_COUNT).
 pub const SLOT_COUNT: u8 = 10;
 
-/// Sidecar path of the automatic session state ("instant resume"): `<rom>
-/// .resume`. Deliberately outside the `.state`/`.stateN` series so an
-/// automatic write can never overwrite a state the player saved by hand.
-pub fn resume_path(rom_path: &Path) -> PathBuf {
-    rom_path.with_extension("resume")
+/// Extension of the automatic session state ("instant resume"). Deliberately
+/// outside the `state`/`stateN` series so an automatic write can never
+/// overwrite a state the player saved by hand.
+pub const RESUME_EXT: &str = "resume";
+
+/// Extension of a manual save state: slot 0 uses `state`, slot N>0 uses
+/// `stateN`, so the ten slots coexist as separate files.
+pub fn state_ext(slot: u8) -> String {
+    if slot == 0 {
+        "state".to_string()
+    } else {
+        format!("state{slot}")
+    }
 }
 
 #[cfg(test)]
@@ -32,35 +29,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resume_file_is_distinct_from_every_manual_slot() {
-        let rom = Path::new("/roms/game.sfc");
-        let resume = resume_path(rom);
-        assert_eq!(resume, PathBuf::from("/roms/game.resume"));
-        for slot in 0..SLOT_COUNT {
-            assert_ne!(state_path(rom, slot), resume, "slot {slot} collides with the resume file");
+    fn slot0_is_dot_state_and_the_others_are_numbered() {
+        assert_eq!(state_ext(0), "state");
+        assert_eq!(state_ext(2), "state2");
+        assert_eq!(state_ext(9), "state9");
+    }
+
+    #[test]
+    fn every_slot_has_its_own_extension_and_none_is_the_resume_file() {
+        let mut exts: Vec<String> = (0..SLOT_COUNT).map(state_ext).collect();
+        for ext in &exts {
+            assert_ne!(ext, RESUME_EXT, "a manual slot would overwrite the session state");
         }
-        // Zipped ROMs follow the same base-name rule as `.srm`/`.state`.
-        assert_eq!(resume_path(Path::new("/roms/game.zip")), PathBuf::from("/roms/game.resume"));
-    }
-
-    #[test]
-    fn every_slot_has_its_own_file() {
-        let rom = Path::new("/roms/game.sfc");
-        let mut paths: Vec<PathBuf> = (0..SLOT_COUNT).map(|s| state_path(rom, s)).collect();
-        let count = paths.len();
-        paths.sort();
-        paths.dedup();
-        assert_eq!(paths.len(), count);
-    }
-
-    #[test]
-    fn slot0_is_dot_state() {
-        assert_eq!(state_path(Path::new("/roms/game.sfc"), 0), PathBuf::from("/roms/game.state"));
-        assert_eq!(state_path(Path::new("/roms/game.zip"), 0), PathBuf::from("/roms/game.state"));
-    }
-
-    #[test]
-    fn slotn_is_numbered() {
-        assert_eq!(state_path(Path::new("/roms/game.sfc"), 2), PathBuf::from("/roms/game.state2"));
+        let count = exts.len();
+        exts.sort();
+        exts.dedup();
+        assert_eq!(exts.len(), count);
     }
 }

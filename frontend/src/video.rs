@@ -29,6 +29,7 @@ use crate::input;
 use crate::library::{self, GameEntry, PlayClock, SortMode};
 #[cfg(target_os = "macos")]
 use crate::menu::{self, AppMenu};
+use crate::pad;
 use crate::prefs::Prefs;
 use crate::render::{self, Aspect, Filter};
 use crate::save;
@@ -84,12 +85,13 @@ fn mtime(path: &Path) -> Option<std::time::SystemTime> {
 }
 
 /// A cartridge to start the window on, as prepared by `main::run`.
-/// `save_path`/`sram_baseline` come from `save::load_sram` (already applied to
-/// `cart.sram` by the caller).
+/// `paths` resolves this session's sidecar files (already honoring `--save`
+/// and `prefs.save_dir`) and `sram_baseline` comes from `save::load_sram`,
+/// which the caller already applied to `cart.sram`.
 pub struct Launch {
     pub rom_path: PathBuf,
     pub cart: Cartridge,
-    pub save_path: PathBuf,
+    pub paths: crate::paths::GamePaths,
     pub sram_baseline: Vec<u8>,
 }
 
@@ -151,18 +153,18 @@ impl LibraryState {
 /// native file dialog it used to show, and a cartridge is loaded later through
 /// `Action::PickRom`/`switch_rom`.
 ///
-/// Battery SRAM is written back to the current `save_path` once the event loop
-/// exits, however it exits (window close, quit, or a fatal window/surface
+/// Battery SRAM is written back to the current session's `.srm` once the event
+/// loop exits, however it exits (window close, quit, or a fatal window/surface
 /// creation error), since `app` is still owned here after `run_app` returns.
 /// The `O` hotkey and the home screen can swap in a different ROM mid-session
 /// (see `App::open_rom_dialog`); `App` owns its own current
-/// `save_path`/`sram_baseline` so that exit-time save always targets whichever
+/// `paths`/`sram_baseline` so that exit-time save always targets whichever
 /// game is loaded when the window closes.
 ///
 /// `prefs` carries the persisted user options (loaded by `main`); it is stored
 /// on `App`, written back after every option change and once more on exit.
 pub fn run(launch: Option<Launch>, prefs: Prefs) -> Result<(), String> {
-    let (title, snes, current_rom_path, save_path, sram_baseline, frame_duration, game_id) =
+    let (title, snes, current_rom_path, game_paths, sram_baseline, frame_duration, game_id) =
         match launch {
             Some(l) => {
                 let region = l.cart.region;
@@ -172,7 +174,7 @@ pub fn run(launch: Option<Launch>, prefs: Prefs) -> Result<(), String> {
                     window_title(&l.cart.title),
                     Some(Snes::new(l.cart)),
                     l.rom_path,
-                    l.save_path,
+                    l.paths,
                     l.sram_baseline,
                     Duration::from_secs_f64(1.0 / region.frames_per_second()),
                     Some(game_id),
@@ -182,7 +184,7 @@ pub fn run(launch: Option<Launch>, prefs: Prefs) -> Result<(), String> {
                 home_window_title(),
                 None,
                 PathBuf::new(),
-                PathBuf::new(),
+                crate::paths::GamePaths::default(),
                 Vec::new(),
                 HOME_FRAME_DURATION,
                 None,
@@ -209,7 +211,7 @@ pub fn run(launch: Option<Launch>, prefs: Prefs) -> Result<(), String> {
         title,
         snes,
         current_rom_path,
-        save_path,
+        paths: game_paths,
         sram_baseline,
         frame_duration,
         next_deadline: Instant::now() + frame_duration,
@@ -219,6 +221,8 @@ pub fn run(launch: Option<Launch>, prefs: Prefs) -> Result<(), String> {
         out_h: 0,
         native_buf: vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT * 4],
         pad: JoypadState::default(),
+        pads: pad::Pads::new(),
+        focused: true,
         paused: false,
         frame_advance: false,
         fast_forward: false,
@@ -293,9 +297,13 @@ struct App {
     /// `Emulation > Reset` to reload the same cart. Empty while `snes` is
     /// `None`.
     current_rom_path: PathBuf,
-    /// Sidecar `.srm` path for the currently loaded cart (updated by the `O`
-    /// hotkey when the ROM is switched).
-    save_path: PathBuf,
+    /// Sidecar file locations (`.srm`, `.state`/`.stateN`, `.resume`) of the
+    /// currently loaded cart, resolved once when it was loaded (rebuilt by
+    /// `switch_rom`). Snapshotting `prefs.save_dir` there rather than reading
+    /// it per write is deliberate: a folder chosen mid-session applies to the
+    /// *next* game loaded, so this session can never overwrite a save the new
+    /// folder already holds for the same game (see `paths::GamePaths`).
+    paths: crate::paths::GamePaths,
     /// Post-load SRAM snapshot for the currently loaded cart; see
     /// `save::load_sram`/`save::save_if_dirty`.
     sram_baseline: Vec<u8>,
@@ -322,9 +330,19 @@ struct App {
     /// headless dump paths or the F12 screenshot, which both read
     /// `snes.framebuffer` directly.
     native_buf: Vec<u8>,
-    /// Player-1 pad state accumulated from keyboard events; player 2 is
-    /// unconnected (frontend has no multi-controller UI yet).
+    /// Player-1 pad state accumulated from keyboard events. Merged with
+    /// player 1's controller (`pads`) button by button — see `pad::merge`: the
+    /// keyboard never cancels the controller and vice versa.
     pad: JoypadState,
+    /// Controllers (`gilrs`): controller 1 drives player 1 alongside the
+    /// keyboard, controller 2 drives player 2 on its own. Polled once per
+    /// `about_to_wait`; absent hardware or a failed `gilrs` init simply leaves
+    /// both ports at rest.
+    pads: pad::Pads,
+    /// Window focus, tracked from `WindowEvent::Focused`. A window is focused
+    /// when it opens; controllers only drive the console while this holds (the
+    /// keyboard cannot reach an unfocused window at all).
+    focused: bool,
     paused: bool,
     /// Set by `N` while paused: step exactly one frame, then cleared.
     frame_advance: bool,
@@ -524,11 +542,20 @@ impl ApplicationHandler for App {
         // `consumed` verdict is only honored on the home screen and while the
         // settings panel is up: on the game screen the emulated pad must never
         // lose a key to an overlay.
+        // A pending remapping capture is the one exception: the key that ends
+        // it must reach `handle_key` even if a focused egui widget claims it
+        // (arrows, Tab, Enter and Space are all keys egui consumes and all
+        // legitimate pad bindings). This holds for a *controller* capture too,
+        // where the only key that counts is Escape — the announced way out —
+        // which a focused widget would otherwise swallow; `apply_capture_key`
+        // ignores every other key of a controller capture on its own.
+        let capturing = self.settings.open && self.settings.capture.is_active();
         if let (Some(window), Some(ui)) = (&self.window, &mut self.ui) {
             let response = ui.on_window_event(window, &event);
             if (self.state.is_home() || self.settings.open || self.quit_confirm)
                 && response.consumed
                 && !matches!(event, WindowEvent::CloseRequested | WindowEvent::RedrawRequested)
+                && !(capturing && matches!(event, WindowEvent::KeyboardInput { .. }))
             {
                 return;
             }
@@ -545,9 +572,18 @@ impl ApplicationHandler for App {
             } => self.handle_key(event_loop, code, state, repeat),
             // Key releases are not delivered once the window loses focus, so
             // anything held (pad buttons, the turbo key) would stay stuck.
-            WindowEvent::Focused(false) => {
-                self.pad = JoypadState::default();
-                self.set_fast_forward(false);
+            // Controllers are a different matter: the OS delivers their events
+            // to every process regardless of focus, so `pads` keeps tracking
+            // them (nothing gets stuck there) and `current_pads` simply stops
+            // feeding them to the console while another application is in
+            // front — playing the emulated game from the background would be
+            // surprising.
+            WindowEvent::Focused(focused) => {
+                self.focused = focused;
+                if !focused {
+                    self.pad = JoypadState::default();
+                    self.set_fast_forward(false);
+                }
             }
             WindowEvent::RedrawRequested => {
                 let action = self.redraw();
@@ -574,6 +610,9 @@ impl ApplicationHandler for App {
         // Scan results and finished thumbnails arrive here, one channel drain
         // per frame; the library thread never touches the UI itself.
         self.poll_library();
+        // Controllers, same rule: one non-blocking drain per frame, on every
+        // screen, so a hot-plug is noticed even while the game is suspended.
+        self.poll_pads();
         pace(&mut self.next_deadline, self.frame_duration);
         if self.status.as_ref().is_some_and(|(_, until)| Instant::now() >= *until) {
             self.status = None;
@@ -606,10 +645,10 @@ impl ApplicationHandler for App {
                 1
             };
             let mut frames_run = 0u32;
-            let pad = self.pad;
+            let pads = self.current_pads();
             for i in 0..factor {
                 if let Some(snes) = &mut self.snes {
-                    snes.run_frame([pad, JoypadState::default()]);
+                    snes.run_frame(pads);
                 }
                 frames_run += 1;
                 // Silent degradation: `next_deadline` is already the *next*
@@ -728,6 +767,17 @@ impl App {
         // the window and its own size buttons can be off screen, so F1-F4 and
         // F11 must stay live or the panel would have no way out but Escape.
         if self.settings.open {
+            // A pending capture takes the keyboard before *everything* else,
+            // application shortcuts included: F11 pressed here must be
+            // assigned to the SNES button being remapped, not toggle
+            // fullscreen. Releases are swallowed too, so the key that was just
+            // assigned cannot also act on its way up.
+            if self.settings.capture.is_active() {
+                if pressed && !repeat {
+                    self.apply_capture_key(code);
+                }
+                return;
+            }
             if pressed && !repeat {
                 match code {
                     KeyCode::Escape => self.handle_escape(event_loop),
@@ -898,9 +948,110 @@ impl App {
                 }
             }
         }
-        if let Some(name) = input::keycode_to_button(code) {
+        // Resolved through the player's own bindings (`prefs.keymap`), with
+        // the built-in table as the fallback for every button they left alone
+        // — see `input::resolve_key`.
+        if let Some(name) = input::resolve_key(&self.prefs.keymap, code) {
             let _ = input::set_button(&mut self.pad, name, pressed);
         }
+    }
+
+    /// One key press routed to the settings panel's pending capture: assign
+    /// it, refuse it (application shortcut), or cancel on Escape. The binding
+    /// is persisted immediately and applies to the very next frame, since
+    /// `handle_key` resolves through `prefs.keymap` every time.
+    fn apply_capture_key(&mut self, code: KeyCode) {
+        match self.settings.capture.on_key(code) {
+            input::Captured::Key { button, key } => {
+                let result = input::bind_key(&mut self.prefs.keymap, button, key);
+                self.prefs.save();
+                self.settings.capture.notice = bind_notice(result, &input::key_label(key));
+            }
+            // The refusal already wrote its own explanation, and the capture
+            // stays pending so another key can be tried.
+            input::Captured::Reserved(_) | input::Captured::Cancelled | input::Captured::Ignored => {
+            }
+        }
+    }
+
+    /// Same for a controller button: the first button pressed while the
+    /// `Entrées` section waits for one is assigned to the SNES button that
+    /// asked for it.
+    fn apply_capture_pad(&mut self, button: pad::Button) {
+        // `Unknown` is `gilrs`' catch-all for a control it could not identify;
+        // storing it would bind every unidentified control of that pad at once.
+        if button == pad::Button::Unknown {
+            self.settings.capture.notice =
+                Some("Ce bouton n'est pas reconnu par le système.".to_string());
+            return;
+        }
+        let Some(name) = self.settings.capture.take_gamepad() else { return };
+        let result = pad::bind_button(&mut self.prefs.pad_map, name, button);
+        self.prefs.save();
+        self.settings.capture.notice = bind_notice(result, pad::pad_label(button));
+    }
+
+    /// Drop every binding the player made, on both devices.
+    fn reset_input_bindings(&mut self) {
+        self.settings.capture.cancel();
+        self.prefs.keymap = crate::prefs::default_keymap();
+        self.prefs.pad_map.clear();
+        self.prefs.save();
+        self.settings.capture.notice = None;
+    }
+
+    /// Drain the controllers' event queue and report the hot-plug changes.
+    /// Non-blocking (see `pad::Pads::poll`), so it costs nothing when no
+    /// controller is attached; called on every screen so plugging a pad in
+    /// from the home screen is noticed too.
+    ///
+    /// A controller appearing or disappearing is never fatal: the notice is a
+    /// stderr line plus the same discreet bottom-left status message a
+    /// screenshot or a slot save uses.
+    fn poll_pads(&mut self) {
+        let polled = self.pads.poll();
+        for notice in polled.notices {
+            let state = if notice.connected { "connected" } else { "disconnected" };
+            eprintln!(
+                "pad: player {} {state} ({}); {} controller(s) in use",
+                notice.player + 1,
+                notice.name,
+                self.pads.connected()
+            );
+            self.set_status(notice.status());
+        }
+        // A controller button pressed while the `Entrées` section waits for
+        // one is a binding, not a game input — and it cannot be one anyway,
+        // since both ports are held at rest while the panel is up
+        // (`current_pads`).
+        if self.settings.open && self.settings.capture.waiting_for(input::Device::Gamepad).is_some()
+        {
+            if let Some(&button) = polled.pressed.first() {
+                self.apply_capture_pad(button);
+            }
+        }
+    }
+
+    /// The two `JoypadState`s to feed the console this frame.
+    ///
+    /// Player 1 is the keyboard OR'ed with controller 1 (`pad::merge`), so
+    /// both can be used at once — a second player on the keyboard is not
+    /// possible, by design: the keyboard always stays on player 1. Player 2 is
+    /// controller 2 alone.
+    ///
+    /// While the settings panel or the quit confirmation is up, both ports are
+    /// held at rest: those overlays already take the keyboard (`self.pad` is
+    /// cleared when they open), and the emulation keeps running behind them,
+    /// so a controller left leaning on the desk must not play the game either.
+    /// Same when the window is not focused (see `WindowEvent::Focused`).
+    fn current_pads(&self) -> [JoypadState; 2] {
+        if self.settings.open || self.quit_confirm || !self.focused {
+            return [JoypadState::default(); 2];
+        }
+        [
+            pad::merge(self.pad, self.pads.player(0, &self.prefs.pad_map)),
+            self.pads.player(1, &self.prefs.pad_map),
+        ]
     }
 
     /// Escape, resolved by `ui::escape_action`:
@@ -967,7 +1118,7 @@ impl App {
         // `try_resume`'s newer-`.srm` guard doesn't misfire), then the play
         // time with the rest of the preferences.
         if let Some(snes) = &self.snes {
-            save::save_if_dirty(&snes.bus.cart, &self.save_path, &self.sram_baseline);
+            save::save_if_dirty(&snes.bus.cart, &self.paths.srm_write(), &self.sram_baseline);
             self.write_resume_state();
             self.resync_sram_baseline();
         }
@@ -1064,6 +1215,18 @@ impl App {
                 self.prefs.save();
                 self.library.sheet = SheetData::default();
             }
+            Action::ChooseSaveDir => {
+                // Opens where saves go today: the configured folder, else the
+                // ROM's own directory (which is where the sidecars are).
+                let current = self.prefs.save_dir.clone().unwrap_or_else(|| {
+                    match self.current_rom_path.parent() {
+                        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+                        _ => library::library_dir(&self.prefs),
+                    }
+                });
+                self.dialogs.request(dialog::Request::SaveDir { current });
+            }
+            Action::ResetSaveDir => self.set_save_dir(None),
             Action::OpenGuide => self.open_guide(),
         }
     }
@@ -1085,6 +1248,7 @@ impl App {
             Setting::ResumeOnLaunch(on) => self.set_resume_on_launch(on),
             Setting::ConfirmOnQuit(on) => self.set_confirm_on_quit(on),
             Setting::Slot(slot) => self.set_slot(slot),
+            Setting::ResetInputs => self.reset_input_bindings(),
         }
     }
 
@@ -1097,6 +1261,8 @@ impl App {
         }
         self.settings.open = true;
         self.settings.notice = None;
+        self.settings.folder_notice = None;
+        self.settings.capture = input::Capture::default();
         // Resolved once per opening rather than per frame: this touches the
         // file system (`is_file`) and the answer cannot change mid-panel.
         self.settings.guide = crate::guide::find();
@@ -1104,9 +1270,46 @@ impl App {
         self.set_fast_forward(false);
     }
 
+    /// `Réglages > Dossiers > Dossier des sauvegardes`: where `.srm`, save
+    /// states and the session state are written from now on. The folder is
+    /// created and probed first (`paths::prepare_dir`) — an unusable one is
+    /// reported in the panel and the preference is left untouched, since a
+    /// stored folder that cannot be written to would silently cost saves.
+    ///
+    /// Takes effect at the next ROM load: the running session keeps the files
+    /// it read from (see the `paths` field), so this can never overwrite a save
+    /// the new folder already holds for the same game.
+    ///
+    /// The folder being replaced is remembered in `prefs.previous_save_dir`:
+    /// the saves it holds keep being *read* (see `paths::read_sidecar`), so
+    /// clearing the setting cannot silently hand the player back an older file
+    /// left beside the ROM. Nothing is ever written there again.
+    fn set_save_dir(&mut self, dir: Option<PathBuf>) {
+        if let Some(dir) = &dir {
+            if let Err(e) = crate::paths::prepare_dir(dir) {
+                eprintln!("save dir: {e}");
+                self.settings.folder_notice = Some(ui::settings::FolderNotice::Error(format!(
+                    "Dossier inutilisable, réglage inchangé : {e}"
+                )));
+                return;
+            }
+        }
+        move_save_dir(&mut self.prefs.save_dir, &mut self.prefs.previous_save_dir, dir);
+        self.prefs.save();
+        self.settings.folder_notice = Some(ui::settings::FolderNotice::Info(
+            save_dir_notice(self.snes.is_some(), self.prefs.previous_save_dir.as_deref()),
+        ));
+        // The sheet lists this game's save states from that folder.
+        self.library.sheet = SheetData::default();
+    }
+
     fn close_settings(&mut self) {
         self.settings.open = false;
         self.settings.notice = None;
+        self.settings.folder_notice = None;
+        // Nothing may stay pending behind a closed panel: the next key would
+        // otherwise be eaten as a binding.
+        self.settings.capture = input::Capture::default();
         self.pad = JoypadState::default();
     }
 
@@ -1264,8 +1467,8 @@ impl App {
                 let entry = self.library.entries.iter().find(|e| e.id == id).cloned();
                 self.library.sheet = match entry {
                     Some(entry) => SheetData {
+                        states: library::save_states(&self.sheet_paths(&entry)),
                         id,
-                        states: library::save_states(&entry.path),
                         screenshots: library::screenshots(
                             &library::screenshot_dir(&entry.path, &self.prefs),
                             &entry.title,
@@ -1279,6 +1482,27 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Sidecar layout the game sheet must list the save states of.
+    ///
+    /// For the game currently loaded this is the session's own frozen
+    /// `GamePaths` — that is where F9 reads from, and it can differ from the
+    /// current preference (the folder is read at load time and never
+    /// retargeted mid-session). Every other entry of the library is resolved
+    /// against the preferences as they stand, which is where its next load
+    /// would look.
+    fn sheet_paths(&self, entry: &GameEntry) -> crate::paths::GamePaths {
+        if self.paths.id() == entry.id && self.current_rom_path == entry.path {
+            return self.paths.clone();
+        }
+        crate::paths::GamePaths::new(
+            &entry.path,
+            &entry.id,
+            self.prefs.save_dir.clone(),
+            None,
+        )
+        .with_previous_dir(self.prefs.previous_save_dir.clone())
     }
 
     /// Start counting play time for `id`, and record the launch instant that
@@ -1457,7 +1681,7 @@ impl App {
     /// no SRAM and no session to snapshot: only the preferences are written.
     fn persist_all(&mut self) {
         if let Some(snes) = &self.snes {
-            save::save_if_dirty(&snes.bus.cart, &self.save_path, &self.sram_baseline);
+            save::save_if_dirty(&snes.bus.cart, &self.paths.srm_write(), &self.sram_baseline);
             self.write_resume_state();
             self.resync_sram_baseline();
         }
@@ -1502,6 +1726,9 @@ impl App {
             return;
         }
         self.quit_confirm = true;
+        // The confirmation is the outermost modal and answers to Enter/Escape:
+        // a capture left pending under it would never see them.
+        self.settings.capture.cancel();
         self.quit_saved_pause = self.paused;
         self.paused = true;
         self.pad = JoypadState::default();
@@ -1689,6 +1916,7 @@ impl App {
                     // next frame instead of showing the old one's captures.
                     self.library.sheet = SheetData::default();
                 }
+                dialog::Answer::SaveDir(dir) => self.set_save_dir(Some(dir)),
                 dialog::Answer::Cancelled => {}
             }
         }
@@ -1696,12 +1924,14 @@ impl App {
     }
 
     /// F5 / `Émulation > Sauvegarder l'état` (Cmd+S): snapshot the whole
-    /// console (`Snes::save_state`) into the current slot's sidecar next to the
-    /// loaded ROM. Never fails the run: an I/O error is reported and emulation
-    /// continues.
+    /// console (`Snes::save_state`) into the current slot's sidecar — in
+    /// `prefs.save_dir` when the session was started with one configured, else
+    /// next to the loaded ROM (`paths::GamePaths`). Never fails the run: an I/O
+    /// error is reported (missing folder created on the fly, unwritable one
+    /// shown as `SLOT n ERREUR`) and emulation continues.
     fn save_state(&mut self) {
         let slot = self.prefs.save_slot;
-        let path = crate::state::state_path(&self.current_rom_path, slot);
+        let path = self.paths.state_write(slot);
         let Some(bytes) = self.snes.as_mut().map(|s| s.save_state()) else { return };
         // Atomic (temp file + rename): a crash or power loss mid-write must
         // never leave a truncated `.state`/`.stateN`, which `Snes::load_state`
@@ -1729,7 +1959,9 @@ impl App {
             return;
         }
         let slot = self.prefs.save_slot;
-        let path = crate::state::state_path(&self.current_rom_path, slot);
+        // Read resolution, not write resolution: a slot saved before a save
+        // folder was configured is still beside the ROM, and must keep loading.
+        let path = self.paths.state_read(slot);
         let bytes = match std::fs::read(&path) {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -1785,7 +2017,7 @@ impl App {
     /// manual `.state`/`.stateN` series so it can never overwrite a slot. Runs
     /// on every exit path (see `persist_all`) and before a ROM switch.
     fn write_resume_state(&mut self) {
-        let path = crate::state::resume_path(&self.current_rom_path);
+        let path = self.paths.resume_write();
         let Some(bytes) = self.snes.as_mut().map(|s| s.save_state()) else { return };
         // Atomic (temp file + rename): this runs unconditionally on every
         // exit path, so a crash or power loss mid-write must never corrupt
@@ -1822,7 +2054,7 @@ impl App {
         if !self.prefs.resume_on_launch || self.snes.is_none() {
             return;
         }
-        let path = crate::state::resume_path(&self.current_rom_path);
+        let path = self.paths.resume_read();
         let bytes = match std::fs::read(&path) {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
@@ -1831,9 +2063,9 @@ impl App {
                 return;
             }
         };
-        let srm_is_newer = mtime(&self.save_path)
-            .zip(mtime(&path))
-            .is_some_and(|(srm, resume)| srm > resume);
+        let srm_path = self.paths.srm_read();
+        let srm_is_newer =
+            mtime(&srm_path).zip(mtime(&path)).is_some_and(|(srm, resume)| srm > resume);
         match self.snes.as_mut().map(|s| s.load_state(&bytes)).unwrap_or(Ok(())) {
             Ok(()) => {
                 eprintln!("resume: restored {}", path.display());
@@ -1846,7 +2078,7 @@ impl App {
                     }
                     eprintln!(
                         "resume: {} is newer than {}; keeping its SRAM instead of the resumed snapshot's",
-                        self.save_path.display(),
+                        srm_path.display(),
                         path.display()
                     );
                 }
@@ -2059,7 +2291,7 @@ impl App {
     }
 
     /// Replace `self.snes` with a freshly constructed console for the ROM at
-    /// `path`. Persists the outgoing cart's SRAM (via its own `save_path`)
+    /// `path`. Persists the outgoing cart's SRAM (via its own `paths`)
     /// before replacing it, then loads the new cart's `.srm` sidecar the
     /// same way startup does, resets pad/pause/frame-advance state, and
     /// retargets pacing at the new cart's region field rate (a game switch
@@ -2078,7 +2310,7 @@ impl App {
         // ordinary case, so `try_resume`'s newer-`.srm` guard doesn't misfire
         // next time this ROM is loaded).
         if let Some(snes) = &self.snes {
-            save::save_if_dirty(&snes.bus.cart, &self.save_path, &self.sram_baseline);
+            save::save_if_dirty(&snes.bus.cart, &self.paths.srm_write(), &self.sram_baseline);
             self.write_resume_state();
         }
 
@@ -2090,14 +2322,21 @@ impl App {
 
         let bytes = crate::load_rom_bytes(path)?;
         let mut cart = Cartridge::from_bytes(bytes)?;
-        let save_path = save::default_save_path(path);
-        let sram_baseline = save::load_sram(&mut cart, &save_path);
-
         let game_id = library::game_id(cart.title.trim(), cart.header_checksum, &cart.rom);
+        // The folder preference is read here — at load time — and then frozen
+        // for the whole session (see the `paths` field): a game loaded now
+        // follows whatever `Réglages > Dossiers` currently says. The game id is
+        // what names its sidecars inside a shared folder, so two ROM files of
+        // the same name keep separate saves.
+        let game_paths =
+            crate::paths::GamePaths::new(path, &game_id, self.prefs.save_dir.clone(), None)
+                .with_previous_dir(self.prefs.previous_save_dir.clone());
+        let sram_baseline = save::load_sram(&mut cart, &game_paths.srm_read());
+
         self.title = window_title(&cart.title);
         self.frame_duration = Duration::from_secs_f64(1.0 / cart.region.frames_per_second());
         self.snes = Some(Snes::new(cart));
-        self.save_path = save_path;
+        self.paths = game_paths;
         self.sram_baseline = sram_baseline;
         self.pad = JoypadState::default();
         self.paused = false;
@@ -2123,7 +2362,7 @@ impl App {
     /// reload the currently running ROM in place. Reuses `switch_rom` with the
     /// same path rather than rebuilding `Snes` from `self.snes.bus.cart`
     /// directly (`Cartridge` isn't `Clone`): `switch_rom` first flushes the
-    /// live, possibly-dirty SRAM to `save_path`, then reloads that same file
+    /// live, possibly-dirty SRAM to its `.srm`, then reloads that same file
     /// into the fresh cart, so the net effect is a power-on reset of
     /// CPU/PPU/APU state that preserves the current battery save — matching
     /// the SNES's physical reset button, which restarts execution but never
@@ -2197,6 +2436,72 @@ impl App {
 fn picture_for(prefs: &Prefs, id: &str) -> Option<PathBuf> {
     let custom = prefs.games.get(id).and_then(|s| s.thumbnail.clone());
     library::resolve_picture(custom.as_deref(), thumbs::thumb_path(id).as_deref())
+}
+
+/// What the `Entrées` section says after a binding was written. A plain
+/// assignment needs no comment; a swap does, since the *other* button changed
+/// too and the player did not ask for that directly.
+fn bind_notice(result: input::BindResult, label: &str) -> Option<String> {
+    match result {
+        input::BindResult::Swapped(other) => Some(format!(
+            "{label} servait déjà pour {} : les deux boutons ont été échangés.",
+            ui::settings::button_label(other)
+        )),
+        // The other button had nothing to receive in exchange (it was claiming
+        // the same key/button, which is why one of the two was mute): it goes
+        // back to its default rather than keeping a binding it no longer has.
+        input::BindResult::Reverted(other) => Some(format!(
+            "{label} servait déjà pour {} : ce bouton revient à son réglage par défaut.",
+            ui::settings::button_label(other)
+        )),
+        input::BindResult::Bound | input::BindResult::Unchanged => None,
+    }
+}
+
+/// Point `save_dir` at `dir`, keeping the folder being replaced in `previous`.
+///
+/// `previous` is a read-only fallback (`paths::GamePaths::with_previous_dir`):
+/// the saves left in a folder the player stops using must keep being found, or
+/// clearing the setting would hand back whatever older file sits beside the
+/// ROM and look like lost progress. Only a folder actually being left is
+/// recorded — re-picking the same one changes nothing — and the folder now in
+/// use is never also the "previous" one.
+fn move_save_dir(
+    save_dir: &mut Option<PathBuf>,
+    previous: &mut Option<PathBuf>,
+    dir: Option<PathBuf>,
+) {
+    let left_behind = save_dir.take().filter(|old| Some(old) != dir.as_ref());
+    if left_behind.is_some() {
+        *previous = left_behind;
+    }
+    if dir.is_some() && *previous == dir {
+        *previous = None;
+    }
+    *save_dir = dir;
+}
+
+/// What the `Dossiers` section says after the save folder changed: when the new
+/// setting takes effect, and what became of the files in the folder being
+/// replaced. Both facts matter — the running game keeps writing where it read
+/// from, and a save left in the abandoned folder is still *read*
+/// (`paths::read_sidecar`), which is what stops the change from looking like
+/// lost progress.
+fn save_dir_notice(game_running: bool, previous: Option<&Path>) -> String {
+    let mut text = String::from("Pris en compte au prochain chargement de jeu");
+    if game_running {
+        text.push_str(" : la partie en cours garde ses fichiers actuels.");
+    } else {
+        text.push('.');
+    }
+    if let Some(previous) = previous {
+        text.push_str(&format!(
+            " Les sauvegardes restées dans {} sont toujours relues ; rien n'a été déplacé ni \
+             supprimé.",
+            previous.display()
+        ));
+    }
+    text
 }
 
 /// Top-row digit key -> save-state slot number (`Digit0` = slot 0 ... `Digit9`
@@ -2429,6 +2734,10 @@ mod overlay_tests {
             "CAPTURE IMPOSSIBLE",
             "MUSIQUE SPC EXPORTEE",
             "EXPORT SPC ERREUR",
+            "MANETTE 1 CONNECTEE",
+            "MANETTE 1 DECONNECTEE",
+            "MANETTE 2 CONNECTEE",
+            "MANETTE 2 DECONNECTEE",
         ];
         for msg in messages {
             for c in msg.chars().filter(|c| *c != ' ') {
@@ -2438,6 +2747,18 @@ mod overlay_tests {
                 text_box_size(msg, SCREEN_WIDTH, SCREEN_HEIGHT).is_some(),
                 "{msg:?} does not fit in a 256x224 buffer"
             );
+        }
+        // The hot-plug notices are built by `pad::PadNotice::status`, not
+        // written out here: check the real strings, for every port and both
+        // directions, so the two can't drift apart.
+        for player in 0..pad::PLAYERS {
+            for connected in [true, false] {
+                let text = pad::PadNotice { player, connected, name: String::new() }.status();
+                assert!(messages.contains(&text.as_str()), "unlisted status {text:?}");
+                for c in text.chars().filter(|c| *c != ' ') {
+                    assert_ne!(glyph(c), [0; GLYPH_H], "no glyph for {c:?} in {text:?}");
+                }
+            }
         }
         // Lowercase folds to uppercase rather than rendering blank.
         assert_eq!(glyph('a'), glyph('A'));
@@ -2610,6 +2931,132 @@ mod path_tests {
         // a plain 60 Hz, within a microsecond of 1/60 s.
         let hz = 1.0 / HOME_FRAME_DURATION.as_secs_f64();
         assert!((hz - 60.0).abs() < 1e-3, "{hz}");
+    }
+
+    /// Every key `handle_key` consumes as an application hotkey on the game
+    /// screen must be refused by the remapping capture: it acts and `return`s
+    /// before the pad mapping is reached, so a button bound to it would never
+    /// press anything. This list mirrors that dispatch — a hotkey added there
+    /// without being added to `input::RESERVED_KEYS` fails here.
+    #[test]
+    fn every_game_screen_hotkey_is_refused_as_a_pad_binding() {
+        let hotkeys = [
+            KeyCode::Tab,
+            KeyCode::KeyM,
+            KeyCode::Equal,
+            KeyCode::NumpadAdd,
+            KeyCode::Minus,
+            KeyCode::NumpadSubtract,
+            KeyCode::KeyP,
+            KeyCode::KeyN,
+            KeyCode::KeyO,
+            KeyCode::Comma,
+            KeyCode::KeyC,
+            KeyCode::KeyF,
+            KeyCode::KeyV,
+            KeyCode::KeyR,
+            KeyCode::BracketLeft,
+            KeyCode::BracketRight,
+            KeyCode::F1,
+            KeyCode::F2,
+            KeyCode::F3,
+            KeyCode::F4,
+            KeyCode::F5,
+            KeyCode::F6,
+            KeyCode::F7,
+            KeyCode::F8,
+            KeyCode::F9,
+            KeyCode::F10,
+            KeyCode::F11,
+            KeyCode::F12,
+        ];
+        for code in hotkeys {
+            assert!(input::reserved_for(code).is_some(), "{code:?} is a hotkey but bindable");
+        }
+        // The slot digits go through `digit_to_slot`, so the two lists are
+        // cross-checked instead of restated.
+        for &(code, _) in input::RESERVED_KEYS {
+            if let Some(slot) = digit_to_slot(code) {
+                assert!(slot < crate::state::SLOT_COUNT);
+            }
+        }
+        for code in [KeyCode::Digit0, KeyCode::Digit5, KeyCode::Digit9] {
+            assert!(digit_to_slot(code).is_some());
+            assert!(input::reserved_for(code).is_some(), "{code:?}");
+        }
+        // Escape is handled by `handle_escape` and is what cancels a capture,
+        // so it can never be assigned either — and must not be listed as a
+        // refusal, which would make the capture answer with a message instead
+        // of backing out.
+        assert_eq!(input::reserved_for(KeyCode::Escape), None);
+    }
+
+    #[test]
+    fn a_binding_is_only_commented_when_it_took_one_from_another_button() {
+        assert_eq!(bind_notice(input::BindResult::Bound, "Espace"), None);
+        assert_eq!(bind_notice(input::BindResult::Unchanged, "Espace"), None);
+        let notice = bind_notice(input::BindResult::Swapped("B"), "Z").expect("a swap is explained");
+        assert!(notice.contains('Z'), "{notice}");
+        assert!(notice.contains("échangés"), "{notice}");
+        // A button that had nothing to receive back is told apart from a swap:
+        // it went back to its default instead of taking the other's binding.
+        let notice =
+            bind_notice(input::BindResult::Reverted("X"), "Z").expect("a takeover is explained");
+        assert!(notice.contains("par défaut"), "{notice}");
+        assert!(notice.contains("X"), "{notice}");
+    }
+
+    /// The folder a player stops using has to stay known, or the saves it holds
+    /// become invisible the moment the setting changes.
+    #[test]
+    fn changing_the_save_folder_remembers_the_one_it_replaces() {
+        let a = PathBuf::from("/a");
+        let b = PathBuf::from("/b");
+        let (mut dir, mut previous) = (None, None);
+
+        // First folder: nothing was left behind yet.
+        move_save_dir(&mut dir, &mut previous, Some(a.clone()));
+        assert_eq!((dir.clone(), previous.clone()), (Some(a.clone()), None));
+
+        // Re-picking the same folder changes nothing.
+        move_save_dir(&mut dir, &mut previous, Some(a.clone()));
+        assert_eq!((dir.clone(), previous.clone()), (Some(a.clone()), None));
+
+        // Moving to another one: the first is the fallback.
+        move_save_dir(&mut dir, &mut previous, Some(b.clone()));
+        assert_eq!((dir.clone(), previous.clone()), (Some(b.clone()), Some(a.clone())));
+
+        // "Par défaut": beside the ROM again, and the folder just left is the
+        // fallback — this is what stops the recent saves from disappearing.
+        move_save_dir(&mut dir, &mut previous, None);
+        assert_eq!((dir.clone(), previous.clone()), (None, Some(b.clone())));
+
+        // Clearing twice keeps the last real folder rather than losing it.
+        move_save_dir(&mut dir, &mut previous, None);
+        assert_eq!((dir.clone(), previous.clone()), (None, Some(b.clone())));
+
+        // Picking the fallback back means there is no fallback any more.
+        move_save_dir(&mut dir, &mut previous, Some(b.clone()));
+        assert_eq!((dir, previous), (Some(b), None));
+    }
+
+    /// Changing the save folder must always say when it takes effect, and name
+    /// the folder left behind when there is one — its saves are still read, and
+    /// silence there is what would look like lost progress.
+    #[test]
+    fn changing_the_save_folder_says_when_it_applies_and_what_was_left_behind() {
+        let running = save_dir_notice(true, None);
+        assert!(running.contains("prochain chargement"), "{running}");
+        assert!(running.contains("partie en cours"), "{running}");
+
+        let idle = save_dir_notice(false, None);
+        assert!(idle.contains("prochain chargement"), "{idle}");
+        assert!(!idle.contains("partie en cours"), "{idle}");
+
+        let left = save_dir_notice(false, Some(Path::new("/old-saves")));
+        assert!(left.contains("/old-saves"), "{left}");
+        assert!(left.contains("toujours relues"), "{left}");
+        assert!(left.contains("rien n'a été déplacé"), "{left}");
     }
 
     #[test]

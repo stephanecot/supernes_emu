@@ -25,8 +25,8 @@
 //! migration, but not every field is read by the running emulator yet.
 //! Fields the frontend actually *acts on* today: `mute`, `volume`, `show_fps`,
 //! `fast_forward_factor`, `confirm_on_quit`, `resume_on_launch`, `save_slot`,
-//! `screenshot_dir`, `zoom`, `filter`, `aspect`, `library_dir`,
-//! `library_sort`, `games`. Every other field is
+//! `save_dir`, `screenshot_dir`, `zoom`, `filter`, `aspect`, `library_dir`,
+//! `library_sort`, `games`, `keymap`, `pad_map`. Every other field is
 //! annotated below with the roadmap phase that wires it up (`parental`
 //! already carries this note in its own doc comment) — a value stored there
 //! today is preserved for when that phase lands, but changing it has no
@@ -132,26 +132,49 @@ pub struct Prefs {
     /// `render::compose_frame`; letterboxed/pillarboxed with black bars
     /// rather than stretched at any window size.
     pub aspect: String,
-    /// Directory for `.srm`/`.state` sidecars; `None` = next to the ROM.
-    /// **Not yet applied** — saves and states always sit next to the ROM
-    /// (`save::default_save_path`/`state::state_path`); Phase 4 (Répertoires
-    /// configurables).
+    /// Directory for the `.srm`/`.state`/`.stateN`/`.resume` sidecars of every
+    /// game; `None` = next to the ROM (the original layout). Files there are
+    /// named after the *game* (`library::game_id`), not after the ROM file, so
+    /// two homonymous dumps cannot share one save. Applied by
+    /// `paths::GamePaths`, which a game's session is built with when it is
+    /// loaded — so a change here takes effect at the *next* load, never
+    /// retargeting the files the running game read from. A save left beside
+    /// the ROM keeps being read while the folder holds none for that game
+    /// (`paths::read_sidecar`), so configuring a folder never loses one.
+    /// The CLI `--save PATH` overrides it for that run's `.srm`; headless runs
+    /// never read this file at all.
     pub save_dir: Option<PathBuf>,
+    /// Folder `save_dir` held before the player last changed or cleared it.
+    /// Written by `video::App::set_save_dir`, and read by
+    /// `paths::GamePaths` as a **read-only** fallback: a save left in the
+    /// abandoned folder keeps being loaded (and, with no folder configured,
+    /// wins over an older file beside the ROM) instead of the session silently
+    /// reverting to a frozen copy. Nothing is ever written there.
+    pub previous_save_dir: Option<PathBuf>,
     /// Directory for screenshots; `None` = next to the ROM. Applied by
     /// `App::take_screenshot`, unlike the other directory/display fields on
     /// this struct.
     pub screenshot_dir: Option<PathBuf>,
     /// SNES button name (`A B X Y L R Start Select Up Down Left Right`) ->
-    /// physical keyboard key. Entries naming a key winit does not know are
-    /// dropped with a warning instead of failing the whole file. **Not yet
-    /// applied** — `input::keycode_to_button` always reads the hard-coded
-    /// `DEFAULT_KEYMAP` table instead of this map; Phase 3 (Manette +
-    /// remapping).
+    /// physical keyboard key. Entries naming a key winit does not know — or a
+    /// key the application handles itself (`input::RESERVED_KEYS`), which would
+    /// never reach the console — are dropped with a warning instead of failing
+    /// the whole file, so the button falls back to its built-in key. Applied by
+    /// `input::resolve_key` on every key event of the game screen: a button
+    /// named here uses that key, a button the file omits falls back to
+    /// `input::DEFAULT_KEYMAP`, and an explicit binding always wins over a
+    /// default one. Written by the `Réglages > Entrées` section
+    /// (`input::bind_key`), which also settles conflicts.
     #[serde(deserialize_with = "de_keymap")]
     pub keymap: BTreeMap<String, KeyCode>,
-    /// SNES button name -> gamepad button name (Phase 3; empty = built-in
-    /// default mapping). **Not yet applied** — there is no gamepad support at
-    /// all yet (no `gilrs` integration), so this map has nothing to feed.
+    /// SNES button name -> `gilrs` button name (`South`, `LeftTrigger2`…, see
+    /// `pad::PAD_BUTTONS`); empty = the built-in `pad::DEFAULT_PAD_MAP`.
+    /// Applied by `pad::PadState::joypad`, with the same rule as `keymap`:
+    /// an entry replaces the default binding of that button (including both
+    /// halves of L/R, which default to a shoulder button *and* a trigger), a
+    /// missing entry keeps the default, and a name no `gilrs` version here
+    /// knows is ignored in favour of the default rather than leaving the
+    /// button dead.
     pub pad_map: BTreeMap<String, String>,
     pub parental: Parental,
     /// Folder the player last picked a ROM in, written by
@@ -200,6 +223,7 @@ impl Default for Prefs {
             filter: "none".to_string(),
             aspect: "pixel-perfect".to_string(),
             save_dir: None,
+            previous_save_dir: None,
             screenshot_dir: None,
             keymap: default_keymap(),
             pad_map: BTreeMap::new(),
@@ -233,6 +257,12 @@ pub fn default_keymap() -> BTreeMap<String, KeyCode> {
 /// Lenient keymap decoding: a key name winit doesn't know (typo in a
 /// hand-edited file, key from a newer winit) drops that one entry with a
 /// warning instead of invalidating the whole preferences file.
+///
+/// A key the application acts on itself (`input::RESERVED_KEYS`: Tab, F1-F12,
+/// the digits…) is dropped the same way. `video::App::handle_key` dispatches
+/// those before the emulated pad and returns, so such a binding could never
+/// press anything: the capture already refuses them, and this is the same
+/// refusal applied to a file written by hand or by another build.
 fn de_keymap<'de, D>(d: D) -> Result<BTreeMap<String, KeyCode>, D::Error>
 where
     D: Deserializer<'de>,
@@ -242,9 +272,15 @@ where
     for (button, key) in raw {
         // KeyCode's serde impl encodes unit variants as their name ("KeyZ").
         match serde_json::from_value::<KeyCode>(serde_json::Value::String(key.clone())) {
-            Ok(code) => {
-                map.insert(button, code);
-            }
+            Ok(code) => match input::reserved_for(code) {
+                Some(what) => eprintln!(
+                    "prefs: key {key:?} for button {button:?} is an application shortcut ({what}); \
+                     ignored, the button keeps its default key"
+                ),
+                None => {
+                    map.insert(button, code);
+                }
+            },
             Err(_) => eprintln!("prefs: unknown key name {key:?} for button {button:?}; ignored"),
         }
     }
@@ -382,6 +418,7 @@ mod tests {
         assert_eq!(p.filter, "none");
         assert_eq!(p.aspect, "pixel-perfect");
         assert_eq!(p.save_dir, None);
+        assert_eq!(p.previous_save_dir, None);
         assert_eq!(p.screenshot_dir, None);
         assert_eq!(p.fast_forward_factor, 2);
         assert!(p.confirm_on_quit);
@@ -402,8 +439,64 @@ mod tests {
         assert_eq!(map.len(), input::DEFAULT_KEYMAP.len());
         for &(name, code) in input::DEFAULT_KEYMAP {
             assert_eq!(map.get(name), Some(&code), "button {name}");
-            assert_eq!(input::keycode_to_button(code), Some(name));
+            // The stored defaults and the built-in fallback must resolve the
+            // same way, whether the file lists them or not.
+            assert_eq!(input::resolve_key(&map, code), Some(name));
+            assert_eq!(input::resolve_key(&BTreeMap::new(), code), Some(name));
         }
+    }
+
+    /// A remapped keyboard and controller must survive the file and still
+    /// resolve afterwards: a binding that only round-trips as text would be a
+    /// setting shown but not applied.
+    #[test]
+    fn a_remapped_keyboard_and_pad_round_trip_and_still_resolve() {
+        let mut p = Prefs::default();
+        p.keymap.insert("A".to_string(), KeyCode::Space);
+        p.keymap.insert("B".to_string(), KeyCode::KeyX);
+        p.pad_map.insert("A".to_string(), "North".to_string());
+        p.pad_map.insert("L".to_string(), "LeftTrigger2".to_string());
+        let json = serde_json::to_string_pretty(&p).expect("serialize");
+        let back = Prefs::from_json(&json).expect("parse");
+        assert_eq!(back, p);
+        assert_eq!(input::resolve_key(&back.keymap, KeyCode::Space), Some("A"));
+        assert_eq!(input::resolve_key(&back.keymap, KeyCode::KeyX), Some("B"));
+        // The key A used to hold is now free, not shared with B.
+        assert_eq!(input::resolve_key(&back.keymap, KeyCode::KeyZ), None);
+        assert_eq!(
+            crate::pad::resolve_button(&back.pad_map, crate::pad::Button::North),
+            Some("A")
+        );
+        assert_eq!(
+            crate::pad::current_buttons(&back.pad_map, "L"),
+            vec![crate::pad::Button::LeftTrigger2]
+        );
+    }
+
+    /// The save folder must survive the file *and* still drive path
+    /// resolution afterwards — a folder that only round-trips as text would be
+    /// a setting shown but not applied.
+    #[test]
+    fn a_configured_save_folder_round_trips_and_still_resolves() {
+        let mut p = Prefs::default();
+        p.save_dir = Some(PathBuf::from("/saves"));
+        let json = serde_json::to_string_pretty(&p).expect("serialize");
+        let back = Prefs::from_json(&json).expect("parse");
+        assert_eq!(back.save_dir, Some(PathBuf::from("/saves")));
+        let paths = crate::paths::GamePaths::new(
+            Path::new("/roms/game.sfc"),
+            "GAME-0001",
+            back.save_dir.clone(),
+            None,
+        );
+        // Named after the game, not after the ROM file (see `paths`).
+        assert_eq!(paths.srm_write(), PathBuf::from("/saves/GAME-0001.srm"));
+        assert_eq!(paths.state_write(1), PathBuf::from("/saves/GAME-0001.state1"));
+        assert_eq!(paths.resume_write(), PathBuf::from("/saves/GAME-0001.resume"));
+        // Cleared: back beside the ROM, under the ROM file's own name.
+        let paths =
+            crate::paths::GamePaths::new(Path::new("/roms/game.sfc"), "GAME-0001", None, None);
+        assert_eq!(paths.srm_write(), PathBuf::from("/roms/game.srm"));
     }
 
     #[test]
@@ -416,6 +509,7 @@ mod tests {
         p.filter = "crt".to_string();
         p.aspect = "tv".to_string();
         p.save_dir = Some(PathBuf::from("/tmp/saves"));
+        p.previous_save_dir = Some(PathBuf::from("/tmp/old-saves"));
         p.screenshot_dir = Some(PathBuf::from("/tmp/shots"));
         p.keymap.insert("A".to_string(), KeyCode::Space);
         p.pad_map.insert("A".to_string(), "South".to_string());
@@ -534,10 +628,53 @@ mod tests {
 
     #[test]
     fn unknown_key_names_drop_only_their_own_entry() {
-        let p = Prefs::from_json("{\"keymap\": {\"A\": \"KeyM\", \"B\": \"NoSuchKey\"}}")
+        let p = Prefs::from_json("{\"keymap\": {\"A\": \"Space\", \"B\": \"NoSuchKey\"}}")
             .expect("parse");
-        assert_eq!(p.keymap.get("A"), Some(&KeyCode::KeyM));
+        assert_eq!(p.keymap.get("A"), Some(&KeyCode::Space));
         assert_eq!(p.keymap.get("B"), None);
+    }
+
+    /// A key the application handles itself would leave the button dead: the
+    /// entry is dropped on read, so the button falls back to its built-in key
+    /// and the player can still use it.
+    #[test]
+    fn a_binding_on_an_application_shortcut_is_dropped_on_read() {
+        let p = Prefs::from_json(
+            "{\"keymap\": {\"A\": \"F11\", \"B\": \"Tab\", \"X\": \"Digit3\", \"Y\": \"Space\"}}",
+        )
+        .expect("parse");
+        assert_eq!(p.keymap.get("A"), None);
+        assert_eq!(p.keymap.get("B"), None);
+        assert_eq!(p.keymap.get("X"), None);
+        assert_eq!(p.keymap.get("Y"), Some(&KeyCode::Space));
+        // Dropped means "back to the built-in key", not "dead".
+        assert_eq!(input::resolve_key(&p.keymap, KeyCode::KeyX), Some("A"));
+        assert_eq!(input::resolve_key(&p.keymap, KeyCode::KeyZ), Some("B"));
+        assert_eq!(input::resolve_key(&p.keymap, KeyCode::KeyS), Some("X"));
+        // The built-in mapping itself must survive the filter untouched.
+        let json = serde_json::to_string(&Prefs::default()).expect("serialize");
+        assert_eq!(Prefs::from_json(&json).expect("parse").keymap, default_keymap());
+    }
+
+    /// The abandoned save folder is remembered so a save left there is still
+    /// found; it must survive the file like any other path.
+    #[test]
+    fn the_previous_save_folder_round_trips_and_feeds_the_read_fallback() {
+        let mut p = Prefs::default();
+        p.save_dir = None;
+        p.previous_save_dir = Some(PathBuf::from("/old-saves"));
+        let json = serde_json::to_string_pretty(&p).expect("serialize");
+        let back = Prefs::from_json(&json).expect("parse");
+        assert_eq!(back.previous_save_dir, Some(PathBuf::from("/old-saves")));
+        // It is a read fallback only: writes stay beside the ROM.
+        let paths = crate::paths::GamePaths::new(
+            Path::new("/roms/game.sfc"),
+            "GAME-0001",
+            back.save_dir.clone(),
+            None,
+        )
+        .with_previous_dir(back.previous_save_dir.clone());
+        assert_eq!(paths.srm_write(), PathBuf::from("/roms/game.srm"));
     }
 
     #[test]

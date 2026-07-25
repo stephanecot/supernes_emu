@@ -16,7 +16,7 @@ description: Build, test, lint and run the SNES emulator (Rust workspace) — ru
 
 `cargo run --release -p prisme -- <rom> [flags]`
 
-`<rom>` accepts `.sfc`/`.smc` raw or `.zip` (first ROM entry inside). If omitted and `--headless` is not set, the app opens a window on its **home screen** (egui shell, Phase 8) with no cartridge loaded — not usable from a headless/agent shell; agents must always pass `<rom>` explicitly. The home screen scans a ROM folder (`library_dir` preference, else `last_rom_dir`, else `roms/`) on a background thread and generates a thumbnail per game by emulating it headless; both results are cached under the app's config directory (`…/Prisme/library.json`, `…/Prisme/Thumbnails/*.png`) and can be deleted at any time — they are derived data, never player data. The exception is `--info`/`--disasm` without `<rom>`, which still show a native file-open dialog (rfd, filtered to `.sfc`/`.smc`/`.zip`, starting in `roms/` if present). `--headless` still requires `<rom>` explicitly (errors otherwise). Every user option (display, audio, emulation, folders) lives in the windowed **settings panel** (`,` hotkey, `Réglages…`/Cmd+, in the macOS menu, `Réglages…` button on the home screen), not in the native menu, which now carries actions only; the panel reads and writes `prefs.json` exclusively, so a headless run is unaffected by it. **This contract is what all agents rely on — if you change a flag, update this file in the same change.**
+`<rom>` accepts `.sfc`/`.smc` raw or `.zip` (first ROM entry inside). If omitted and `--headless` is not set, the app opens a window on its **home screen** (egui shell, Phase 8) with no cartridge loaded — not usable from a headless/agent shell; agents must always pass `<rom>` explicitly. The home screen scans a ROM folder (`library_dir` preference, else `last_rom_dir`, else `roms/`) on a background thread and generates a thumbnail per game by emulating it headless; both results are cached under the app's config directory (`…/Prisme/library.json`, `…/Prisme/Thumbnails/*.png`) and can be deleted at any time — they are derived data, never player data. The exception is `--info`/`--disasm` without `<rom>`, which still show a native file-open dialog (rfd, filtered to `.sfc`/`.smc`/`.zip`, starting in `roms/` if present). `--headless` still requires `<rom>` explicitly (errors otherwise). Every user option (display, audio, inputs/remapping, emulation, folders) lives in the windowed **settings panel** (`,` hotkey, `Réglages…`/Cmd+, in the macOS menu, `Réglages…` button on the home screen), not in the native menu, which now carries actions only; the panel reads and writes `prefs.json` exclusively, so a headless run is unaffected by it. **This contract is what all agents rely on — if you change a flag, update this file in the same change.**
 
 | Flag | Behavior |
 |---|---|
@@ -42,7 +42,14 @@ relative PATH under `target/debug-out/` (traces can reach gigabytes — this is 
 rule below). Every other output flag — `--dump-frame`, `--dump-frame-every`/`--dump-dir`,
 `--dump-state`, `--dump-spc`, `--dump-audio`, `--save-state-at` — honors PATH exactly as given,
 relative to the current directory; agents should pass an explicit `target/debug-out/...` path for
-those themselves if they want the same hygiene. `.srm`/`.state*`/`.resume` writes (battery saves,
+those themselves if they want the same hygiene. `.srm`/`.state*`/`.resume` sidecars sit **beside the ROM** by default; a windowed run puts them in
+the `save_dir` preference's folder instead when the player set one (`Réglages > Dossiers`), named
+after the *game* there (`library::game_id` = cartridge title + header checksum, e.g.
+`SUPER_MARIOWORLD-A0DA.srm`) so two ROM files of the same name cannot share one save, and still
+reading the ROM-file-named file of that folder, then the folder configured before it
+(`previous_save_dir`), then the beside-the-ROM file, as fallbacks. `--save` keeps
+priority over both for the `.srm`, and a **headless run never reads the preferences file**, so its
+paths are exactly `--save` or `<rom>.srm`. Those writes (battery saves,
 save states, prefs) are atomic (temp file + `rename`); a `.srm` whose size doesn't exactly match
 the cart's declared SRAM is rejected at load (fresh SRAM is used instead), so don't hand-edit a
 `.srm` to a different length when testing.

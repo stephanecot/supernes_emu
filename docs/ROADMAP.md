@@ -11,14 +11,15 @@ Effort : **S** ≈ une passe courte · **M** ≈ une demi-journée d'agent · **
 
 **Livré :** Phases **0** (préférences JSON), **1** (version, muet/volume, captures, slots de save
 state, confirmation de sortie, accéléré, reprise instantanée, export SPC), **2** (fenêtre
-redimensionnable, plein écran, filtres, ratio), **7** (identité « Prisme - SuperNes ») et **8**
-(refonte de l'interface : accueil, bibliothèque, favoris, fiches de jeu, panneaux de réglages).
+redimensionnable, plein écran, filtres, ratio), **3** (manettes gilrs 2 joueurs + remapping clavier
+et manette), **4** (répertoires configurables : ROMs, captures, sauvegardes), **7** (identité
+« Prisme - SuperNes ») et **8** (refonte de l'interface : accueil, bibliothèque, favoris, fiches de
+jeu, panneaux de réglages).
 
-**Reste :** Phases **3** (manette + remapping), **4** (répertoires), **5** (rewind), **6** (mode
-enfant), **9** (triches par IA), **10** (canal agent), **11** (enregistrement vidéo), **12**
-(amélioration des captures par IA).
+**Reste :** Phases **5** (rewind), **6** (mode enfant), **9** (triches par IA),
+**10** (canal agent), **11** (enregistrement vidéo), **12** (amélioration des captures par IA).
 
-**Chiffres :** 332 tests cœur + 196 tests frontend. Émulation prouvée **inchangée** par la Phase 8
+**Chiffres :** 332 tests cœur + 260 tests frontend. Émulation prouvée **inchangée** par la Phase 8
 (les 7 jeux rendent des images identiques au bit près à une baseline pré-Phase 8).
 
 **À confirmer par l'utilisateur** (non vérifiable sans écran) : « À propos », la confirmation de
@@ -121,28 +122,44 @@ un choix explicite.
 
 ---
 
-## Phase 3 — Manette + remapping **[M/L]**
+## Phase 3 — Manette + remapping **[✅ FAIT]**
 
 Le plus gros gain d'usage réel (le clavier est frustrant pour un jeu de console).
 
-- **Manette** : ajouter `gilrs`, détecter les manettes branchées (USB/Bluetooth), mapper les boutons
-  vers `JoypadState`. Mapping par défaut sensé (croix/stick → D-pad, A/B/X/Y, L/R, Start/Select),
-  branchement/débranchement à chaud géré proprement.
-- **Remapping** : redéfinir clavier **et** manette, mémorisé (Phase 0). Interface : commencer par
-  une entrée de menu « Configurer les touches » qui capture les appuis un par un (simple), plutôt
-  qu'un éditeur complet.
-- Bonus naturel une fois la manette là : support **2 joueurs** (le cœur gère déjà 2 manettes).
+- **Manette** (`frontend/src/pad.rs`, `gilrs`) : manettes USB/Bluetooth détectées au lancement et à
+  chaud, mapping par défaut positionnel (South→B, East→A, West→Y, North→X ; croix, hat et stick
+  gauche → directions ; LB/LT et RB/RT → L/R), 2 joueurs (manette 1 OR'ée avec le clavier sur le
+  joueur 1, manette 2 sur le joueur 2).
+- **Remapping** (`frontend/src/input.rs`, section « Entrées » de `ui/settings.rs`) : les douze
+  boutons SNES sont réaffectables au clavier **et** à la manette, mémorisés dans `prefs.keymap` /
+  `prefs.pad_map` et appliqués sans redémarrage. Capture bouton par bouton (« appuyez sur une
+  touche… »), Échap pour annuler, échange automatique en cas de conflit, refus des touches déjà
+  utilisées par un raccourci de l'application, et bouton « Rétablir les entrées par défaut ».
 
 ---
 
-## Phase 4 — Répertoires configurables **[S/M]**
+## Phase 4 — Répertoires configurables **[✅ FAIT]**
 
-- Réglages « Dossier des sauvegardes » et « Dossier des captures » (sélecteur natif `rfd`), mémorisés.
-- Comportement : si défini → `<dossier>/<jeu>.srm` / `.state` ; sinon comportement actuel (à côté de
-  la ROM). Le flag CLI `--save` reste prioritaire.
-- Points d'attention : créer le dossier s'il manque, collisions de noms entre jeux homonymes,
-  et **ne pas perdre les sauvegardes existantes** (au minimum : les lire à l'ancien emplacement en
-  repli, ou proposer une migration).
+- Section « Dossiers » du panneau de réglages : **dossier des ROMs** (relance le scan de la
+  bibliothèque), **dossier des captures**, **dossier des sauvegardes** — sélecteur natif via
+  `dialog.rs` (jamais depuis un callback winit), mémorisés dans `prefs.json`.
+- Comportement (`frontend/src/paths.rs`) : si `save_dir` est défini → `<dossier>/<id du jeu>.srm`
+  et `.state`/`.stateN`/`.resume`, où l'id est celui de `library::game_id` (titre cartouche +
+  somme de contrôle d'en-tête, la clé de `prefs.games`) ; sinon à côté de la ROM. Nommer par le
+  **jeu** et non par le **fichier** est ce qui empêche deux ROMs homonymes rangées dans des dossiers
+  différents de partager un `.srm` (l'une chargeait la sauvegarde de l'autre, la jugeait invalide et
+  l'écrasait). Le flag CLI `--save` reste **prioritaire** (et un run **headless ne lit aucune
+  préférence**).
+- Non-perte : une lecture parcourt, dans l'ordre, `<dossier>/<id>.<ext>`, `<dossier>/<nom de la
+  ROM>.<ext>` (ce qu'écrivaient les versions précédentes), les mêmes noms dans `previous_save_dir`
+  (le dossier configuré juste avant), puis le fichier resté **à côté de la ROM** ; rien n'est déplacé
+  ni supprimé (migration paresseuse : la première écriture suivante atterrit dans le dossier). Sans
+  dossier configuré, une sauvegarde restée dans le dossier abandonné est relue quand elle est **plus
+  récente** que celle à côté de la ROM, pour qu'un retour à « Par défaut » ne renvoie pas
+  silencieusement une copie gelée. Le dossier manquant est créé, un dossier non inscriptible est
+  refusé et signalé dans le panneau. Le réglage est pris en compte **au chargement d'un jeu** : la
+  partie en cours garde ses fichiers, pour ne jamais écraser une sauvegarde déjà présente dans le
+  nouveau dossier.
 
 ---
 
@@ -416,7 +433,7 @@ Phase 0 (socle prefs JSON)                                    ← débloque 7 au
         │      ├─ Phase 3 (manette + remapping)                ← plus gros gain d'usage
         │      └─ Phase 6 (mode enfant)
         ├─ Phase 2 (zoom + filtres + ratio)
-        ├─ Phase 4 (répertoires)
+        ├─ Phase 4 (répertoires)                               ✅ FAIT
         │      ├─ Phase 5 (rewind)
         │      └─ Phase 11 (enregistrement video)          ← via rejeu deterministe
         │             └─ Phase 12 (amelioration IA des CAPTURES seulement, option)

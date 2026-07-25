@@ -8,6 +8,8 @@ mod guide;
 mod input;
 mod library;
 mod menu;
+mod pad;
+mod paths;
 mod picker;
 mod prefs;
 mod render;
@@ -83,7 +85,8 @@ const USAGE: &str = "usage: prisme [rom.sfc|.smc|.zip] [flags]
   --dump-state DIR                      dump wram/vram/cgram/oam/apuram on exit
   --dump-audio PATH.wav                 headless: write 32kHz 16-bit stereo WAV
   --dump-spc PATH.spc                   write the APU state as an .spc music file on exit
-  --save PATH                           battery SRAM file (default: <rom>.srm)
+  --save PATH                           battery SRAM file (default: <rom>.srm, or the
+                                        windowed save folder preference if set)
   --load-state FILE                     headless: load a save-state before frame 0
   --save-state-at FRAME FILE            headless: write a save-state after FRAME
 
@@ -224,12 +227,34 @@ fn run(args: Args) -> Result<(), String> {
     let bytes = load_rom_bytes(rom_path)?;
     let mut cart = Cartridge::from_bytes(bytes)?;
 
+    // Preferences take part in *no* CLI behavior: a headless run must be
+    // reproducible whatever the user's `prefs.json` says (and its warnings must
+    // not mix into `--log-mmio` output), so they are read only on the path that
+    // opens a window. `--info`/`--disasm` print and exit before that, so they
+    // are excluded too. The one preference needed this early is `save_dir`,
+    // which decides where the `.srm` loaded just below comes from.
+    let windowed = !args.headless && !args.info && !args.disasm;
+    let prefs = windowed.then(|| prefs::Prefs::load(true));
+
     // Sidecar SRAM save: loaded before Snes::new so the game's own init code
     // (which typically reads its save-flag byte early) sees restored state.
     // `sram_baseline` is the post-load snapshot; save::save_if_dirty diffs
     // against it on exit so an untouched cart is never rewritten.
-    let save_path = args.save.clone().unwrap_or_else(|| save::default_save_path(rom_path));
-    let sram_baseline = save::load_sram(&mut cart, &save_path);
+    // `--save` overrides both the folder preference and the default location.
+    // In a shared save folder the sidecars are named after the game itself
+    // (`library::game_id`), so two ROM files of the same name cannot share one
+    // save; with no folder configured (every headless/CLI run, which never
+    // reads the preferences) the id is unused and the files sit beside the ROM.
+    let game_id = library::game_id(cart.title.trim(), cart.header_checksum, &cart.rom);
+    let game_paths = paths::GamePaths::new(
+        rom_path,
+        &game_id,
+        prefs.as_ref().and_then(|p| p.save_dir.clone()),
+        args.save.clone(),
+    )
+    .with_previous_dir(prefs.as_ref().and_then(|p| p.previous_save_dir.clone()));
+    let save_path = game_paths.srm_write();
+    let sram_baseline = save::load_sram(&mut cart, &game_paths.srm_read());
 
     if args.info {
         print_info(&cart);
@@ -255,19 +280,16 @@ fn run(args: Args) -> Result<(), String> {
         if args.dump_spc.is_some() {
             eprintln!("--dump-spc requires --headless; ignoring (use Fichier > Exporter la musique)");
         }
-        // Preferences are only ever read by the windowed path (no preference
-        // takes part in the CLI contract, and headless behavior must stay
-        // unchanged): loading them here, rather than unconditionally above,
-        // means a malformed prefs.json warning never mixes into a headless
-        // run's stderr (e.g. alongside --log-mmio output). `persist: true`
-        // since this is exactly the windowed run that writes option changes
-        // back.
-        let prefs = prefs::Prefs::load(true);
+        // `windowed` is true on exactly this branch, so the preferences were
+        // loaded above (with `persist: true`, since this is the run that
+        // writes option changes back); the fallback keeps the load total
+        // rather than unwrapping.
+        let prefs = prefs.unwrap_or_else(|| prefs::Prefs::load(true));
         return video::run(
             Some(video::Launch {
                 rom_path: rom_path.clone(),
                 cart,
-                save_path,
+                paths: game_paths,
                 sram_baseline,
             }),
             prefs,

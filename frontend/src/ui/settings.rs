@@ -20,6 +20,8 @@ use std::path::{Path, PathBuf};
 
 use egui::{Align, Layout, RichText, Vec2};
 
+use crate::input::{self, Capture, Device};
+use crate::pad;
 use crate::prefs::{Prefs, FAST_FORWARD_FACTORS};
 use crate::render::{Aspect, Filter};
 use crate::state::SLOT_COUNT;
@@ -48,6 +50,11 @@ const PANEL_W: f32 = 560.0;
 const NAV_W: f32 = 150.0;
 /// Width reserved for a setting's label, so the controls of a section line up.
 const LABEL_W: f32 = 190.0;
+/// Width of the button-name column of the bindings list (`Entrées`).
+const BUTTON_COL_W: f32 = 70.0;
+/// Width of its keyboard column; the controller column takes what is left,
+/// since its labels are the longest ("Gâchette L2 (LT)").
+const BIND_COL_W: f32 = 130.0;
 /// Longest folder path shown before its middle is elided.
 const PATH_MAX_CHARS: usize = 52;
 /// Narrowest the panel is ever drawn; a window narrower than this shows it
@@ -55,10 +62,11 @@ const PATH_MAX_CHARS: usize = 52;
 const MIN_PANEL_W: f32 = 300.0;
 /// Narrowest the controls column is ever drawn.
 const MIN_CONTENT_W: f32 = 130.0;
-/// Height of the content area, enough for the tallest section (Dossiers) not to
+/// Height of the content area, enough for the tallest section (Dossiers, whose
+/// three folders each carry a path, two buttons and an explanation) not to
 /// scroll. Fixed rather than content-driven so the modal keeps one size when the
 /// player walks the section list.
-const CONTENT_H: f32 = 400.0;
+const CONTENT_H: f32 = 470.0;
 /// Vertical space the panel's own chrome takes outside the content area (title
 /// row, separators, frame margins), subtracted from the window height before
 /// `CONTENT_H` is clamped to it.
@@ -73,22 +81,81 @@ pub enum Section {
     #[default]
     Display,
     Audio,
+    Inputs,
     Emulation,
     Folders,
     About,
 }
 
 impl Section {
-    pub const ALL: [Section; 5] =
-        [Section::Display, Section::Audio, Section::Emulation, Section::Folders, Section::About];
+    pub const ALL: [Section; 6] = [
+        Section::Display,
+        Section::Audio,
+        Section::Inputs,
+        Section::Emulation,
+        Section::Folders,
+        Section::About,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Section::Display => "Affichage",
             Section::Audio => "Audio",
+            Section::Inputs => "Entrées",
             Section::Emulation => "Émulation",
             Section::Folders => "Dossiers",
             Section::About => "À propos",
+        }
+    }
+}
+
+/// Name shown for a SNES button in the bindings list. The four directions are
+/// named in French; the eight others carry the legend printed on a real SNES
+/// pad, which is also what the `--script` contract calls them.
+pub fn button_label(name: &str) -> &'static str {
+    match name {
+        "Up" => "Haut",
+        "Down" => "Bas",
+        "Left" => "Gauche",
+        "Right" => "Droite",
+        "A" => "A",
+        "B" => "B",
+        "X" => "X",
+        "Y" => "Y",
+        "L" => "L",
+        "R" => "R",
+        "Start" => "Start",
+        "Select" => "Select",
+        _ => "?",
+    }
+}
+
+/// Text a binding cell shows: the current binding, or the prompt while that
+/// very cell is waiting for a press.
+pub fn binding_cell(current: &str, capturing: bool, device: Device) -> String {
+    if !capturing {
+        return current.to_string();
+    }
+    match device {
+        Device::Keyboard => "Appuyez sur une touche…".to_string(),
+        Device::Gamepad => "Appuyez sur un bouton…".to_string(),
+    }
+}
+
+/// A line the `Dossiers` section shows after a folder change. Two kinds, drawn
+/// apart: a refusal is a failure the player must act on, a remark is not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FolderNotice {
+    /// Nothing was changed and here is why (unusable folder).
+    Error(String),
+    /// The change was applied; this says when it shows.
+    Info(String),
+}
+
+impl FolderNotice {
+    pub fn text(&self) -> &str {
+        match self {
+            FolderNotice::Error(t) | FolderNotice::Info(t) => t,
         }
     }
 }
@@ -104,6 +171,17 @@ pub struct SettingsUi {
     pub guide: Option<PathBuf>,
     /// Last failure worth showing in place (guide that would not open).
     pub notice: Option<String>,
+    /// What to say about the last folder change, in the section that made it
+    /// rather than only on stderr: a folder that could not be created or
+    /// written to (the preference is then left alone), or when a change will
+    /// take effect.
+    pub folder_notice: Option<FolderNotice>,
+    /// "Press a key…" state of the Entrées section. Lives here rather than in
+    /// the widget because the press that ends a capture is intercepted by the
+    /// event loop, *before* the application's own shortcuts
+    /// (`video::App::handle_key`) — otherwise F11 pressed in capture would go
+    /// fullscreen instead of being assigned.
+    pub capture: Capture,
 }
 
 /// Everything the panel displays, borrowed for one UI frame.
@@ -143,6 +221,14 @@ pub fn escape_closes_settings(open: bool, fullscreen: bool) -> bool {
 /// what the player asked for.
 pub fn show(ctx: &egui::Context, model: &mut SettingsModel) -> Action {
     let mut action = Action::None;
+    // While the Entrées section waits for a press, the key belongs to the
+    // binding and to nothing else: dropping the key events before any widget
+    // is built stops a focused button from treating Space/Enter as a click
+    // (the event loop routes the press to `input::Capture` instead — see
+    // `video::App::handle_key`).
+    if model.state.capture.is_active() {
+        ctx.input_mut(|input| input.events.retain(|e| !matches!(e, egui::Event::Key { .. })));
+    }
     let response = egui::Modal::new(egui::Id::new("prisme-settings"))
         .frame(
             egui::Frame::new()
@@ -183,6 +269,11 @@ pub fn show(ctx: &egui::Context, model: &mut SettingsModel) -> Action {
                                 .clicked()
                             {
                                 model.state.section = section;
+                                // Leaving the bindings list abandons whatever
+                                // it was waiting for: a capture left pending
+                                // would keep swallowing keys on a section that
+                                // does not show it.
+                                model.state.capture.cancel();
                             }
                         }
                     },
@@ -208,6 +299,7 @@ pub fn show(ctx: &egui::Context, model: &mut SettingsModel) -> Action {
                             let produced = match model.state.section {
                                 Section::Display => display_section(ui, model),
                                 Section::Audio => audio_section(ui, model),
+                                Section::Inputs => inputs_section(ui, model),
                                 Section::Emulation => emulation_section(ui, model),
                                 Section::Folders => folders_section(ui, model),
                                 Section::About => about_section(ui, model),
@@ -305,6 +397,128 @@ fn audio_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
     action
 }
 
+/// `Entrées`: the twelve SNES buttons, each with the key and the controller
+/// button that press it.
+///
+/// Clicking a cell starts a capture (`input::Capture`): the very next key —
+/// or controller button — is assigned, Escape gives up, and a key that is
+/// already an application shortcut is refused with a reason instead of being
+/// stored as a binding that would never reach the console. A conflict with
+/// another SNES button is settled by swapping the two, so no button is ever
+/// left unbound; the swap is announced under the list.
+fn inputs_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
+    let mut action = Action::None;
+
+    // The prompt, the notice and the reset button sit *above* the list: the
+    // twelve rows are taller than the panel's content area at a small window
+    // size, and a capture prompt the player has to scroll to find would be
+    // useless.
+    if let Some((button, device)) = model.state.capture.pending() {
+        let what = match device {
+            Device::Keyboard => "une touche",
+            Device::Gamepad => "un bouton de manette",
+        };
+        ui.label(
+            RichText::new(format!(
+                "Appuyez sur {what} pour {} — Échap pour annuler.",
+                button_label(button)
+            ))
+            .size(theme::SIZE_BODY)
+            .color(theme::ACCENT),
+        );
+    } else {
+        hint(ui, "Cliquez sur une case pour réaffecter la touche ou le bouton.");
+    }
+    if let Some(notice) = &model.state.capture.notice {
+        ui.label(RichText::new(notice).size(theme::SIZE_SMALL).color(theme::RED));
+    }
+    ui.add_space(4.0);
+    if ui.button("Rétablir les entrées par défaut").clicked() {
+        action = Action::Set(Setting::ResetInputs);
+    }
+    ui.add_space(8.0);
+
+    ui.horizontal(|ui| {
+        ui.allocate_ui_with_layout(
+            Vec2::new(BUTTON_COL_W, 0.0),
+            Layout::left_to_right(Align::Min),
+            |ui| {
+                ui.label(RichText::new("Bouton").size(theme::SIZE_SMALL).color(theme::TEXT_DIM));
+            },
+        );
+        ui.allocate_ui_with_layout(
+            Vec2::new(BIND_COL_W, 0.0),
+            Layout::left_to_right(Align::Min),
+            |ui| {
+                ui.label(RichText::new("Clavier").size(theme::SIZE_SMALL).color(theme::TEXT_DIM));
+            },
+        );
+        ui.label(RichText::new("Manette").size(theme::SIZE_SMALL).color(theme::TEXT_DIM));
+    });
+
+    // Tighter than the panel's default spacing: twelve rows have to fit in the
+    // same content area as a five-control section.
+    ui.spacing_mut().item_spacing.y = 2.0;
+    for name in input::BUTTONS {
+        // `shown_key`, not `effective_key`: a binding another button won is
+        // shown as a dash, since this one does not answer to it (see
+        // `input::shown_key`).
+        let key = input::shown_key(&model.prefs.keymap, name)
+            .map(input::key_label)
+            .unwrap_or_else(|| "—".to_string());
+        let pad_binding = pad::binding_label(&model.prefs.pad_map, name);
+        let capturing_key = model.state.capture.waiting_for(Device::Keyboard) == Some(name);
+        let capturing_pad = model.state.capture.waiting_for(Device::Gamepad) == Some(name);
+        ui.horizontal(|ui| {
+            ui.allocate_ui_with_layout(
+                Vec2::new(BUTTON_COL_W, 0.0),
+                Layout::left_to_right(Align::Min),
+                |ui| {
+                    ui.label(
+                        RichText::new(button_label(name))
+                            .size(theme::SIZE_BODY)
+                            .color(theme::TEXT),
+                    );
+                },
+            );
+            ui.allocate_ui_with_layout(
+                Vec2::new(BIND_COL_W, 0.0),
+                Layout::left_to_right(Align::Min),
+                |ui| {
+                    let text = binding_cell(&key, capturing_key, Device::Keyboard);
+                    let response = ui.selectable_label(capturing_key, text);
+                    if response.clicked() {
+                        model.state.capture.start(name, Device::Keyboard);
+                        // The clicked cell keeps egui's keyboard focus, where
+                        // Space and Enter count as a click: binding either of
+                        // them would immediately re-open the capture on the
+                        // same row.
+                        response.surrender_focus();
+                    }
+                },
+            );
+            let text = binding_cell(&pad_binding, capturing_pad, Device::Gamepad);
+            let response = ui.selectable_label(capturing_pad, text);
+            if response.clicked() {
+                model.state.capture.start(name, Device::Gamepad);
+                response.surrender_focus();
+            }
+        });
+    }
+
+    ui.add_space(8.0);
+    hint(
+        ui,
+        "Une touche déjà prise par un autre bouton est échangée avec lui ; les raccourcis de l'application (F1-F12, Tab, P, M…) sont refusés.",
+    );
+    hint(
+        ui,
+        "Clavier et manette 1 pilotent le joueur 1, manette 2 le joueur 2. Les sticks et la croix restent toujours actifs sur les directions.",
+    );
+
+    action
+}
+
 fn emulation_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
     let mut action = Action::None;
     let prefs = model.prefs;
@@ -381,23 +595,34 @@ fn folders_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
     hint(ui, "Destination de F12 ; la galerie de la fiche de jeu lit le même dossier.");
 
     ui.add_space(12.0);
-    // Shown disabled on purpose: the preference exists and round-trips, but
-    // nothing reads it yet (`save::default_save_path`/`state::state_path`
-    // always write beside the ROM) — Phase 4 of `docs/ROADMAP.md`. An enabled
-    // picker here would look like a working setting.
-    ui.add_enabled_ui(false, |ui| {
-        ui.label(
-            RichText::new("Dossier des sauvegardes").size(theme::SIZE_BODY).color(theme::TEXT_DIM),
-        );
-        path_line(ui, &save_dir_label(model.prefs.save_dir.as_deref()));
-        ui.horizontal(|ui| {
-            let _ = ui.button("Choisir…");
-        });
+    ui.label(RichText::new("Dossier des sauvegardes").size(theme::SIZE_BODY).color(theme::TEXT));
+    path_line(ui, &save_dir_label(model.prefs.save_dir.as_deref()));
+    ui.horizontal(|ui| {
+        if ui.button("Choisir…").clicked() {
+            action = Action::ChooseSaveDir;
+        }
+        if ui
+            .add_enabled(model.prefs.save_dir.is_some(), egui::Button::new("Par défaut"))
+            .clicked()
+        {
+            action = Action::ResetSaveDir;
+        }
     });
-    hint(
-        ui,
-        "Pas encore branché (phase 4) : sauvegardes de cartouche et états restent à côté de la ROM.",
-    );
+    hint(ui, SAVE_DIR_HINT);
+    if let Some(previous) = &model.prefs.previous_save_dir {
+        ui.label(
+            RichText::new(previous_save_dir_line(previous))
+                .size(theme::SIZE_SMALL)
+                .color(theme::TEXT_DIM),
+        );
+    }
+    if let Some(notice) = &model.state.folder_notice {
+        let color = match notice {
+            FolderNotice::Error(_) => theme::RED,
+            FolderNotice::Info(_) => theme::TEXT_DIM,
+        };
+        ui.label(RichText::new(notice.text()).size(theme::SIZE_SMALL).color(color));
+    }
 
     action
 }
@@ -476,24 +701,53 @@ fn path_line(ui: &mut egui::Ui, text: &str) {
 }
 
 /// What the screenshot folder shows: the chosen one, or where captures go
-/// without it (`App::take_screenshot`'s own fallback).
+/// without it (`App::take_screenshot`'s own fallback). A long path is elided in
+/// its middle so the line never widens the panel.
 pub fn screenshot_dir_label(dir: Option<&Path>) -> String {
     match dir {
-        Some(dir) => dir.to_string_lossy().into_owned(),
+        Some(dir) => super::home::shorten_path(dir, PATH_MAX_CHARS),
         None => "À côté de la ROM, dans Screenshots/".to_string(),
     }
 }
 
-/// Same for the (not yet wired) save folder.
+/// Same for the save folder (`.srm` battery saves, `.state`/`.stateN` slots and
+/// the `.resume` session state).
 pub fn save_dir_label(dir: Option<&Path>) -> String {
     match dir {
-        Some(dir) => format!("{} (ignoré pour l'instant)", dir.to_string_lossy()),
+        Some(dir) => super::home::shorten_path(dir, PATH_MAX_CHARS),
         None => "À côté de la ROM".to_string(),
     }
 }
 
+/// What the save folder does and when. Three facts matter: the folder is read
+/// at *load* time (`video::App::switch_rom` freezes it for the session, so the
+/// running game keeps writing where it read from), an existing save left beside
+/// the ROM is still read when the folder has none (`paths::read_sidecar`) —
+/// nothing is moved or deleted — and the files there are named after the game
+/// (`library::game_id`), which is what keeps two ROM files of the same name
+/// from sharing one save.
+pub const SAVE_DIR_HINT: &str =
+    "Sauvegardes de cartouche (.srm), slots et reprise. Pris en compte au chargement d'un jeu. \
+     Dans un dossier commun, chaque fichier porte le nom du jeu (titre de la cartouche et somme \
+     de contrôle), jamais celui du fichier ROM : deux ROMs homonymes gardent des sauvegardes \
+     distinctes. Une sauvegarde restée à côté de la ROM est toujours relue tant que le dossier \
+     n'en a pas : rien n'est déplacé ni supprimé.";
+
+/// Line shown under the save folder when a folder was configured before the
+/// current setting (`prefs.previous_save_dir`): what it still holds is read,
+/// never written to again, so clearing or changing the folder cannot look like
+/// lost progress.
+pub fn previous_save_dir_line(previous: &Path) -> String {
+    format!(
+        "Dossier précédent, toujours relu : {}",
+        super::home::shorten_path(previous, PATH_MAX_CHARS)
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    use winit::keyboard::KeyCode;
+
     use super::*;
 
     #[test]
@@ -539,11 +793,11 @@ mod tests {
 
     #[test]
     fn every_section_is_listed_once_with_its_own_label() {
-        assert_eq!(Section::ALL.len(), 5);
+        assert_eq!(Section::ALL.len(), 6);
         let mut labels: Vec<&str> = Section::ALL.iter().map(|s| s.label()).collect();
         assert_eq!(
             labels,
-            vec!["Affichage", "Audio", "Émulation", "Dossiers", "À propos"]
+            vec!["Affichage", "Audio", "Entrées", "Émulation", "Dossiers", "À propos"]
         );
         labels.sort_unstable();
         labels.dedup();
@@ -591,8 +845,12 @@ mod tests {
         );
         assert_eq!(screenshot_dir_label(Some(Path::new("/shots"))), "/shots");
         assert_eq!(save_dir_label(None), "À côté de la ROM");
-        // A save folder stored by hand must be shown as inert, not as applied.
-        assert!(save_dir_label(Some(Path::new("/saves"))).contains("ignoré"));
+        assert_eq!(save_dir_label(Some(Path::new("/saves"))), "/saves");
+        // A long folder is elided in its middle rather than widening the panel.
+        let long = PathBuf::from("/Volumes/Backup").join("a".repeat(80));
+        let label = save_dir_label(Some(&long));
+        assert!(label.chars().count() <= PATH_MAX_CHARS, "{label}");
+        assert!(label.contains('…'), "{label}");
     }
 
     /// Every string the panel actually painted, one per line. Used to assert
@@ -675,9 +933,20 @@ mod tests {
     #[test]
     fn every_section_paints_the_settings_it_owns() {
         let prefs = Prefs::default();
-        let expected: [(Section, &[&str]); 5] = [
+        let expected: [(Section, &[&str]); 6] = [
             (Section::Display, &["Taille de la fenêtre", "Filtre", "Ratio", "Plein écran", "×3"]),
             (Section::Audio, &["Muet", "Volume"]),
+            (
+                Section::Inputs,
+                &[
+                    "Bouton",
+                    "Clavier",
+                    "Manette",
+                    "Haut",
+                    "Droite",
+                    "Rétablir les entrées par défaut",
+                ],
+            ),
             (
                 Section::Emulation,
                 &["Accéléré (Tab)", "Reprise instantanée", "Confirmation", "Slot de sauvegarde"],
@@ -697,15 +966,97 @@ mod tests {
         }
     }
 
-    /// The save folder is stored but not applied yet (Phase 4): the section
-    /// must say so, so no setting looks active without being it.
+    /// The save folder is a live setting now: its picker must be offered, its
+    /// current value shown, and the two rules a player has to know about it
+    /// (when it takes effect, what happens to saves left beside the ROM)
+    /// stated in the section itself.
     #[test]
-    fn the_save_folder_is_shown_as_not_wired_yet() {
+    fn the_save_folder_offers_a_picker_and_states_its_rules() {
+        let mut prefs = Prefs::default();
+        let mut state = SettingsUi::default();
+        let (_, text) = draw(Section::Folders, &prefs, &mut state);
+        assert!(text.contains("À côté de la ROM"), "{text}");
+        assert!(!text.contains("phase 4"), "the setting is wired now: {text}");
+        assert!(!text.contains("ignoré"), "{text}");
+        assert!(text.contains("Pris en compte au chargement"), "{text}");
+        assert!(text.contains("toujours relue"), "{text}");
+
+        // A configured folder is shown as the plain path it is.
+        prefs.save_dir = Some(PathBuf::from("/saves"));
+        let mut state = SettingsUi::default();
+        let (_, text) = draw(Section::Folders, &prefs, &mut state);
+        assert!(text.contains("/saves"), "{text}");
+    }
+
+    /// A shared folder names its files after the *game*, so two homonymous ROM
+    /// files keep separate saves. The section has to say so — it is the rule
+    /// that decides whether a player can gather every save in one place.
+    #[test]
+    fn the_shared_folder_states_that_files_are_named_after_the_game() {
         let prefs = Prefs::default();
         let mut state = SettingsUi::default();
         let (_, text) = draw(Section::Folders, &prefs, &mut state);
-        assert!(text.contains("phase 4"), "{text}");
-        assert!(text.contains("à côté de la ROM") || text.contains("À côté de la ROM"), "{text}");
+        assert!(text.contains("nom du jeu"), "{text}");
+        assert!(text.contains("homonymes"), "{text}");
+    }
+
+    /// The folder the player just left is named, since its saves are still
+    /// read: without that line, clearing the setting looks like lost progress.
+    #[test]
+    fn the_previous_save_folder_is_named_when_there_is_one() {
+        let mut prefs = Prefs::default();
+        let mut state = SettingsUi::default();
+        let (_, text) = draw(Section::Folders, &prefs, &mut state);
+        assert!(!text.contains("Dossier précédent"), "there is none yet: {text}");
+
+        prefs.previous_save_dir = Some(PathBuf::from("/old-saves"));
+        let mut state = SettingsUi::default();
+        let (_, text) = draw(Section::Folders, &prefs, &mut state);
+        assert!(text.contains("Dossier précédent"), "{text}");
+        assert!(text.contains("old-saves"), "{text}");
+        assert!(previous_save_dir_line(Path::new("/old-saves")).contains("toujours relu"));
+    }
+
+    /// A binding another button won must not be printed as this one's: the row
+    /// shows a dash, which is also what invites the player to rebind it.
+    #[test]
+    fn a_masked_binding_is_shown_as_a_dash_not_as_the_key_it_lost() {
+        let mut prefs = Prefs::default();
+        // X takes the key B holds by default, and B's own entry is gone (a
+        // hand-edited file, or an entry dropped on read).
+        prefs.keymap.remove("B");
+        prefs.keymap.insert("X".to_string(), KeyCode::KeyZ);
+        let mut state = SettingsUi::default();
+        let (_, text) = draw(Section::Inputs, &prefs, &mut state);
+        assert!(text.contains('—'), "the masked button must show a dash: {text}");
+        assert_eq!(
+            text.matches(&input::key_label(KeyCode::KeyZ)).count(),
+            1,
+            "Z must be printed once, on the button that really answers to it: {text}"
+        );
+    }
+
+    /// A folder that could not be used is reported in the section that offered
+    /// it, not only on stderr.
+    #[test]
+    fn an_unusable_folder_is_reported_in_the_section() {
+        let prefs = Prefs::default();
+        let mut state = SettingsUi {
+            folder_notice: Some(FolderNotice::Error(
+                "Dossier inutilisable, réglage inchangé : test".to_string(),
+            )),
+            ..Default::default()
+        };
+        let (_, text) = draw(Section::Folders, &prefs, &mut state);
+        assert!(text.contains("Dossier inutilisable"), "{text}");
+
+        // …and a remark about a change that only shows at the next load.
+        let mut state = SettingsUi {
+            folder_notice: Some(FolderNotice::Info("au prochain chargement".to_string())),
+            ..Default::default()
+        };
+        let (_, text) = draw(Section::Folders, &prefs, &mut state);
+        assert!(text.contains("au prochain chargement"), "{text}");
     }
 
     /// Every choice the panel offers must be representable in `prefs.json`:
@@ -737,6 +1088,118 @@ mod tests {
         }
     }
 
+    #[test]
+    fn every_snes_button_has_a_name_and_a_binding_cell() {
+        for name in input::BUTTONS {
+            assert_ne!(button_label(name), "?", "no label for {name}");
+        }
+        assert_eq!(button_label("Turbo"), "?");
+        // Outside a capture the cell shows the binding itself…
+        assert_eq!(binding_cell("Z", false, Device::Keyboard), "Z");
+        assert_eq!(binding_cell("Bouton bas", false, Device::Gamepad), "Bouton bas");
+        // …and during one, the prompt naming the device it waits for.
+        assert_eq!(binding_cell("Z", true, Device::Keyboard), "Appuyez sur une touche…");
+        assert_eq!(
+            binding_cell("Bouton bas", true, Device::Gamepad),
+            "Appuyez sur un bouton…"
+        );
+    }
+
+    /// The list must show what the *player* bound, not the built-in table: a
+    /// remapped button that still displayed its default key would be a setting
+    /// shown but not applied.
+    #[test]
+    fn the_bindings_list_shows_the_players_own_bindings() {
+        let mut prefs = Prefs::default();
+        prefs.keymap.insert("A".to_string(), KeyCode::Space);
+        prefs.pad_map.insert("A".to_string(), "North".to_string());
+        let mut state = SettingsUi::default();
+        let (_, text) = draw(Section::Inputs, &prefs, &mut state);
+        assert!(text.contains("Espace"), "the rebound key is missing: {text}");
+        assert!(text.contains(crate::pad::pad_label(crate::pad::Button::North)), "{text}");
+        // A button left alone still shows its built-in key.
+        assert!(text.contains(&input::key_label(KeyCode::KeyZ)), "{text}");
+    }
+
+    /// A press that belongs to a pending capture must not also drive the
+    /// panel: Space and Enter are legitimate bindings, and they are exactly
+    /// what egui turns into a click on the focused widget.
+    #[test]
+    fn a_pending_capture_takes_the_keys_away_from_the_panel() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let prefs = Prefs::default();
+        let mut state = SettingsUi { open: true, section: Section::Inputs, ..Default::default() };
+        state.capture.start("A", Device::Keyboard);
+        let mut input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1024.0, 896.0),
+            )),
+            ..Default::default()
+        };
+        for key in [egui::Key::Space, egui::Key::Enter, egui::Key::Escape, egui::Key::Tab] {
+            input.events.push(egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            });
+        }
+        let mut produced = Action::Quit;
+        for _ in 0..3 {
+            let _ = ctx.run(input.clone(), |ctx| {
+                produced = show(
+                    ctx,
+                    &mut SettingsModel {
+                        app_name: "Prisme",
+                        version: "0.0.0",
+                        prefs: &prefs,
+                        fullscreen: false,
+                        library_dir: Path::new("roms"),
+                        config_dir: None,
+                        state: &mut state,
+                    },
+                );
+            });
+            assert_eq!(produced, Action::None, "a captured key must not act on the panel");
+        }
+        assert!(state.capture.is_active(), "only the event loop ends a capture");
+        assert_eq!(state.section, Section::Inputs);
+    }
+
+    /// A pending capture must be visible: the row it waits on shows the prompt
+    /// and the panel says which button is being remapped.
+    #[test]
+    fn a_pending_capture_is_announced_in_the_panel() {
+        let prefs = Prefs::default();
+        let mut state = SettingsUi::default();
+        state.capture.start("Start", Device::Keyboard);
+        let (action, text) = draw(Section::Inputs, &prefs, &mut state);
+        assert_eq!(action, Action::None, "drawing must not change a binding");
+        assert!(text.contains("Appuyez sur une touche pour Start"), "{text}");
+        assert!(text.contains("Échap pour annuler"), "{text}");
+        assert!(state.capture.is_active(), "drawing must not end the capture");
+
+        // The waiting row itself shows the prompt in place of its binding
+        // (checked on the first row, the only one the fixed-height content
+        // area is guaranteed to paint without scrolling).
+        let mut state = SettingsUi::default();
+        state.capture.start("Up", Device::Keyboard);
+        let (_, text) = draw(Section::Inputs, &prefs, &mut state);
+        assert!(text.contains("Appuyez sur une touche…"), "{text}");
+        assert!(!text.contains("Flèche haut"), "the row must show the prompt: {text}");
+
+        let mut state = SettingsUi::default();
+        state.capture.start("Up", Device::Gamepad);
+        state.capture.notice = Some("conflit de test".to_string());
+        let (_, text) = draw(Section::Inputs, &prefs, &mut state);
+        assert!(text.contains("Appuyez sur un bouton…"), "{text}");
+        assert!(text.contains("Appuyez sur un bouton de manette pour Haut"), "{text}");
+        assert!(text.contains("conflit de test"), "{text}");
+    }
+
     /// The About section has two shapes (guide found / not found) and both must
     /// draw; a missing PDF must not offer a button that would do nothing.
     #[test]
@@ -750,6 +1213,8 @@ mod tests {
                 section: Section::About,
                 guide,
                 notice: Some("erreur de test".to_string()),
+                folder_notice: None,
+                capture: Capture::default(),
             };
             let mut produced = Action::Quit;
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
