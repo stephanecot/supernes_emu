@@ -103,6 +103,37 @@ Libellés à l'infinitif ou à l'impératif, en minuscules-capitale de phrase, s
 
 ---
 
+## Échelle de fenêtre : décaler les crans (défaut signalé)
+
+**Le problème.** Aujourd'hui `×1` = 256×224 pixels natifs, soit un timbre-poste sur un écran moderne :
+**inutilisable**. Une échelle dont le premier cran ne sert à rien est mal conçue. L'utilisateur
+attend que le premier cran soit **la taille de base exploitable**.
+
+**Correctif — décaler l'échelle et rendre le défaut adaptatif :**
+
+1. **Taille par défaut adaptative** : au premier lancement (aucune préférence enregistrée), la
+   fenêtre prend le **plus grand multiple entier** de 256×224 qui tient confortablement dans la zone
+   utile de l'écran — cible : environ **70 % de la hauteur disponible**. Sur un écran courant cela
+   donne ×3 ou ×4 ; sur un 4K, davantage. Le défaut s'adapte donc au matériel au lieu d'être figé.
+2. **Crans décalés** : la liste ne commence plus à 256×224. Elle propose des tailles **réellement
+   utilisables**, libellées par leurs **dimensions en pixels** pour lever toute ambiguïté —
+   par exemple `768 × 672`, `1024 × 896`, `1280 × 1120`, `1536 × 1344` — plutôt que des multiplicateurs
+   dont le sens dépend d'une base implicite.
+3. **La taille native reste accessible, mais pas en tête** : une entrée explicite
+   `Taille native (256 × 224)`, en fin de liste, pour qui la veut vraiment. Ce n'est plus le premier
+   cran ni le défaut.
+4. `F1`–`F4` s'appliquent à l'échelle **décalée** (donc à des tailles utilisables), et la fenêtre
+   reste par ailleurs **librement redimensionnable** à la souris.
+5. Bornage inchangé : ne jamais proposer une taille qui dépasse l'écran ; retomber sur le plus grand
+   cran qui tient.
+
+**Migration.** Une préférence `zoom` déjà enregistrée par une version antérieure peut valoir `1` et
+produirait de nouveau une fenêtre minuscule : au chargement, une valeur correspondant à l'ancienne
+échelle native doit être **réinterprétée** vers le nouveau défaut adaptatif plutôt qu'appliquée
+telle quelle. C'est exactement ce qui a fait apparaître le problème chez l'utilisateur.
+
+---
+
 ## Écran de réglages (défauts signalés)
 
 **« Trop petit »** — le panneau doit cesser d'être une petite fenêtre à l'étroit. Il devient une
@@ -177,4 +208,6 @@ jugées :
 4. hiérarchie typographique lisible ;
 5. **écran de réglages pleine largeur**, rien de comprimé ni de tronqué ;
 6. **manette dessinée** présente dans la section Entrées, avec la mise en évidence du bouton en
-   cours de configuration.
+   cours de configuration ;
+7. **taille de fenêtre par défaut immédiatement exploitable** (jamais 256×224), crans libellés en
+   pixels, et une préférence héritée ne doit pas ramener une fenêtre minuscule.
