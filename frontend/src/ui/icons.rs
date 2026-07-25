@@ -362,9 +362,6 @@ mod tests {
             .collect()
     }
 
-    /// Every icon must draw something at every size the shell uses it at — an
-    /// icon that silently emitted nothing would leave a hole in a button.
-    #[test]
     /// `ALL` is what every other test in this module walks, so an icon missing
     /// from it is an icon nothing checks — which is exactly what happened when
     /// `Plus` was added and the list was not. The match below is the guard: a
@@ -390,6 +387,8 @@ mod tests {
         assert_eq!(named, 10, "every icon named in the match must be listed in ALL");
     }
 
+    /// Every icon must draw something at every size the shell uses it at — an
+    /// icon that silently emitted nothing would leave a hole in a button.
     #[test]
     fn every_icon_draws_at_every_size_the_shell_uses() {
         for icon in Icon::ALL {

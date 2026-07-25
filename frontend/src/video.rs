@@ -728,6 +728,12 @@ impl ApplicationHandler for App {
                 aspect,
             );
             let (buf_w, buf_h) = (self.out_w as usize, self.out_h as usize);
+            // Sized from the monitor, not from the picture: the readout is
+            // meant to be read, so it keeps one apparent size whatever the
+            // window does (see `font_scale`).
+            let scale = font_scale(
+                self.window.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0),
+            );
             let frame = pixels.frame_mut();
             if self.prefs.show_fps {
                 let measured = self.fps_counter.fps();
@@ -743,10 +749,10 @@ impl ApplicationHandler for App {
                 // Space between the "FPS" label and the numbers so the
                 // readout doesn't read as one run-together token.
                 let text = format!("FPS {:.0}/{:.0}", measured, target);
-                draw_overlay_text(frame, buf_w, buf_h, &text, color);
+                draw_overlay_text(frame, buf_w, buf_h, scale, &text, color);
             }
             if let Some((text, _)) = &self.status {
-                draw_status_text(frame, buf_w, buf_h, text, STATUS_COLOR);
+                draw_status_text(frame, buf_w, buf_h, scale, text, STATUS_COLOR);
             }
         }
         // Always request a redraw, even while paused, so the compositor keeps
@@ -2761,28 +2767,56 @@ fn pace(deadline: &mut Instant, frame_duration: Duration) {
 // no effect on headless `--dump-frame`/`--dump-frame-every` output, which
 // reads straight from the core, nor on the F12 screenshot.
 //
-// Drawing after scaling (not before) is deliberate: at a `FONT_SCALE` fixed
-// in *output* pixels, the overlay's on-screen size stays constant regardless
-// of the window's zoom/size — a glyph drawn into the native 256x224 buffer
-// before scaling would instead have grown proportionally with zoom (e.g. 4x
-// too big at zoom x4, worse in a maximized/fullscreen window), which is what
-// made the previous native-resolution placement look oversized.
+// Drawing after scaling (not before) is deliberate: a glyph drawn into the
+// native 256x224 buffer would grow with the zoom (4x too big at zoom x4,
+// worse still maximized), which is what made the first placement oversized.
+// Its size then comes from `font_scale`, in points rather than in pixels —
+// see the reasoning there, which settles the opposite complaint.
 
 /// Glyph cell size before scaling: 3 columns x 5 rows.
 const GLYPH_W: usize = 3;
 const GLYPH_H: usize = 5;
-/// Each on-screen glyph pixel is drawn as a `FONT_SCALE`x`FONT_SCALE` block
-/// of *output* pixels (the overlay is drawn post-scale — see the module
-/// comment above), so 1x keeps the whole overlay small and unobtrusive at
-/// any window size instead of scaling up with zoom.
-const FONT_SCALE: usize = 1;
+/// Height of one glyph pixel, in *points* — the unit the display is actually
+/// read in. Five of them stack into a glyph, so the readout stands about 13
+/// points tall, the size of ordinary interface text.
+///
+/// This constant is the answer to two opposite reports. The overlay was once
+/// drawn into the native 256x224 buffer and scaled with the picture, so it
+/// ballooned at large zooms ("trop gros"); it was then pinned to one *output*
+/// pixel per glyph pixel, which fixed that and introduced the mirror defect
+/// ("beaucoup trop petit") — an output pixel is half a point on a HiDPI
+/// screen, so the readout shrank to two points and vanished. Neither unit was
+/// the right one: a thing meant to be read is sized in points, and converted
+/// to pixels through the monitor's own scale factor.
+const GLYPH_POINT_SIZE: f64 = 2.6;
+/// Bounds on the resulting glyph-pixel size, in output pixels.
+const FONT_SCALE_MIN: usize = 2;
+const FONT_SCALE_MAX: usize = 8;
+
+/// Glyph-pixel size in output pixels for a monitor of `scale_factor` pixels
+/// per point. Independent of the window size and of the zoom: the readout has
+/// no business growing when the picture does.
+fn font_scale(scale_factor: f64) -> usize {
+    let px = (GLYPH_POINT_SIZE * scale_factor).round();
+    (px as usize).clamp(FONT_SCALE_MIN, FONT_SCALE_MAX)
+}
+
 /// Horizontal distance (in output pixels) from one glyph's left edge to the
 /// next: glyph width + 1 column of inter-glyph spacing, both scaled.
-const CHAR_ADVANCE: usize = (GLYPH_W + 1) * FONT_SCALE;
-/// Gap between the framebuffer edge and the overlay's background box.
-const OVERLAY_MARGIN: usize = 3;
-/// Gap between the background box edge and the glyphs it contains.
-const OVERLAY_PAD: usize = 2;
+fn char_advance(scale: usize) -> usize {
+    (GLYPH_W + 1) * scale
+}
+
+/// Gap between the framebuffer edge and the overlay's background box, and
+/// between that box and its glyphs. Both follow the glyph scale: a box padded
+/// by two fixed pixels around 20-pixel glyphs reads as a mistake.
+fn overlay_margin(scale: usize) -> usize {
+    3 * scale
+}
+
+fn overlay_pad(scale: usize) -> usize {
+    2 * scale
+}
 
 /// 3x5 bitmap glyph for one overlay character. Each row is a `u8` using its
 /// low 3 bits as the left/middle/right pixel columns (bit 2 = leftmost, bit
@@ -2854,28 +2888,29 @@ fn fill_rect(frame: &mut [u8], buf_w: usize, buf_h: usize, x: usize, y: usize, w
 /// Paints `text` into the top-right corner of a `buf_w`x`buf_h` RGBA8 buffer
 /// over a solid black background box, so the overlay stays legible against
 /// any game content behind it.
-fn draw_overlay_text(frame: &mut [u8], buf_w: usize, buf_h: usize, text: &str, color: [u8; 4]) {
-    let Some((box_w, _)) = text_box_size(text, buf_w, buf_h) else { return };
-    draw_text_box(frame, buf_w, buf_h, buf_w.saturating_sub(OVERLAY_MARGIN + box_w), OVERLAY_MARGIN, text, color);
+fn draw_overlay_text(frame: &mut [u8], buf_w: usize, buf_h: usize, scale: usize, text: &str, color: [u8; 4]) {
+    let Some((box_w, _)) = text_box_size(text, buf_w, buf_h, scale) else { return };
+    let margin = overlay_margin(scale);
+    draw_text_box(frame, buf_w, buf_h, scale, buf_w.saturating_sub(margin + box_w), margin, text, color);
 }
 
 /// Paints `text` in the bottom-left corner: the transient status messages
 /// (screenshot taken, slot saved/loaded, SPC exported) go there so they never
 /// collide with the FPS readout in the opposite corner.
-fn draw_status_text(frame: &mut [u8], buf_w: usize, buf_h: usize, text: &str, color: [u8; 4]) {
-    let Some((_, box_h)) = text_box_size(text, buf_w, buf_h) else { return };
-    draw_text_box(frame, buf_w, buf_h, OVERLAY_MARGIN, buf_h.saturating_sub(OVERLAY_MARGIN + box_h), text, color);
+fn draw_status_text(frame: &mut [u8], buf_w: usize, buf_h: usize, scale: usize, text: &str, color: [u8; 4]) {
+    let Some((_, box_h)) = text_box_size(text, buf_w, buf_h, scale) else { return };
+    let margin = overlay_margin(scale);
+    draw_text_box(frame, buf_w, buf_h, scale, margin, buf_h.saturating_sub(margin + box_h), text, color);
 }
 
 /// Background-box size for `text` in a `buf_w`x`buf_h` buffer, or `None` when
 /// it cannot fit (the caller then skips drawing rather than doing
-/// out-of-bounds math). Independent of `buf_w`/`buf_h` except for that fit
-/// check: the box itself is always the same size in output pixels, at any
-/// window size (see the module comment above) — only whether it *fits* can
-/// depend on the buffer.
-fn text_box_size(text: &str, buf_w: usize, buf_h: usize) -> Option<(usize, usize)> {
-    let box_w = text.chars().count() * CHAR_ADVANCE + OVERLAY_PAD * 2;
-    let box_h = GLYPH_H * FONT_SCALE + OVERLAY_PAD * 2;
+/// out-of-bounds math). The box scales with the picture height (see
+/// `font_scale`), so both its size and whether it fits depend on the buffer.
+fn text_box_size(text: &str, buf_w: usize, buf_h: usize, scale: usize) -> Option<(usize, usize)> {
+    let pad = overlay_pad(scale);
+    let box_w = text.chars().count() * char_advance(scale) + pad * 2;
+    let box_h = GLYPH_H * scale + pad * 2;
     if box_w > buf_w || box_h > buf_h {
         return None;
     }
@@ -2883,25 +2918,25 @@ fn text_box_size(text: &str, buf_w: usize, buf_h: usize) -> Option<(usize, usize
 }
 
 /// Blits `text` at `(x0, y0)` over a solid black background box.
-fn draw_text_box(frame: &mut [u8], buf_w: usize, buf_h: usize, x0: usize, y0: usize, text: &str, color: [u8; 4]) {
-    let Some((box_w, box_h)) = text_box_size(text, buf_w, buf_h) else { return };
+fn draw_text_box(frame: &mut [u8], buf_w: usize, buf_h: usize, scale: usize, x0: usize, y0: usize, text: &str, color: [u8; 4]) {
+    let Some((box_w, box_h)) = text_box_size(text, buf_w, buf_h, scale) else { return };
 
     fill_rect(frame, buf_w, buf_h, x0, y0, box_w, box_h, [0, 0, 0, 255]);
 
-    let mut cx = x0 + OVERLAY_PAD;
-    let cy = y0 + OVERLAY_PAD;
+    let mut cx = x0 + overlay_pad(scale);
+    let cy = y0 + overlay_pad(scale);
     for ch in text.chars() {
         let rows = glyph(ch);
         for (row, bits) in rows.iter().enumerate() {
             for col in 0..GLYPH_W {
                 if bits & (1 << (GLYPH_W - 1 - col)) != 0 {
-                    let px = cx + col * FONT_SCALE;
-                    let py = cy + row * FONT_SCALE;
-                    fill_rect(frame, buf_w, buf_h, px, py, FONT_SCALE, FONT_SCALE, color);
+                    let px = cx + col * scale;
+                    let py = cy + row * scale;
+                    fill_rect(frame, buf_w, buf_h, px, py, scale, scale, color);
                 }
             }
         }
-        cx += CHAR_ADVANCE;
+        cx += char_advance(scale);
     }
 }
 
@@ -2947,7 +2982,7 @@ mod overlay_tests {
                 assert_ne!(glyph(c), [0; GLYPH_H], "no glyph for {c:?} in {msg:?}");
             }
             assert!(
-                text_box_size(msg, SCREEN_WIDTH, SCREEN_HEIGHT).is_some(),
+                text_box_size(msg, SCREEN_WIDTH, SCREEN_HEIGHT, FONT_SCALE_MIN).is_some(),
                 "{msg:?} does not fit in a 256x224 buffer"
             );
         }
@@ -2972,23 +3007,26 @@ mod overlay_tests {
     #[test]
     fn status_text_is_drawn_bottom_left_and_fps_top_right() {
         let mut frame = vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT * 4];
-        draw_status_text(&mut frame, SCREEN_WIDTH, SCREEN_HEIGHT, "SLOT 3 SAUVE", STATUS_COLOR);
-        let (_, box_h) = text_box_size("SLOT 3 SAUVE", SCREEN_WIDTH, SCREEN_HEIGHT).expect("fits");
+        let scale = FONT_SCALE_MIN;
+        draw_status_text(&mut frame, SCREEN_WIDTH, SCREEN_HEIGHT, scale, "SLOT 3 SAUVE", STATUS_COLOR);
+        let (_, box_h) =
+            text_box_size("SLOT 3 SAUVE", SCREEN_WIDTH, SCREEN_HEIGHT, scale).expect("fits");
         // Bottom-left corner of the box is the black background fill.
-        let y = SCREEN_HEIGHT - OVERLAY_MARGIN - box_h;
-        let idx = (y * SCREEN_WIDTH + OVERLAY_MARGIN) * 4;
+        let margin = overlay_margin(scale);
+        let y = SCREEN_HEIGHT - margin - box_h;
+        let idx = (y * SCREEN_WIDTH + margin) * 4;
         assert_eq!(&frame[idx..idx + 4], &[0, 0, 0, 255]);
         // The opposite corner (where the FPS overlay lives) is untouched.
-        let top_right = (OVERLAY_MARGIN * SCREEN_WIDTH + (SCREEN_WIDTH - OVERLAY_MARGIN - 1)) * 4;
+        let top_right = (margin * SCREEN_WIDTH + (SCREEN_WIDTH - margin - 1)) * 4;
         assert_eq!(&frame[top_right..top_right + 4], &[0, 0, 0, 0]);
         assert!(frame.chunks_exact(4).any(|p| p == STATUS_COLOR));
     }
 
     #[test]
     fn text_too_wide_for_the_buffer_is_skipped_instead_of_drawn() {
-        assert_eq!(text_box_size(&"W".repeat(64), SCREEN_WIDTH, SCREEN_HEIGHT), None);
+        assert_eq!(text_box_size(&"W".repeat(64), SCREEN_WIDTH, SCREEN_HEIGHT, FONT_SCALE_MIN), None);
         let mut frame = vec![7u8; SCREEN_WIDTH * SCREEN_HEIGHT * 4];
-        draw_status_text(&mut frame, SCREEN_WIDTH, SCREEN_HEIGHT, &"W".repeat(64), STATUS_COLOR);
+        draw_status_text(&mut frame, SCREEN_WIDTH, SCREEN_HEIGHT, FONT_SCALE_MIN, &"W".repeat(64), STATUS_COLOR);
         assert!(frame.iter().all(|&b| b == 7), "nothing should have been drawn");
     }
 
@@ -3027,9 +3065,11 @@ mod overlay_tests {
     fn draw_overlay_text_paints_top_right_box_and_leaves_rest_untouched() {
         let mut frame = vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT * 4];
         let text_color = [80, 255, 80, 255];
-        draw_overlay_text(&mut frame, SCREEN_WIDTH, SCREEN_HEIGHT, "FPS 60/50", text_color);
+        let scale = FONT_SCALE_MIN;
+        draw_overlay_text(&mut frame, SCREEN_WIDTH, SCREEN_HEIGHT, scale, "FPS 60/50", text_color);
         // Background box corner near the top-right edge is the black box fill.
-        let idx = (OVERLAY_MARGIN * SCREEN_WIDTH + (SCREEN_WIDTH - OVERLAY_MARGIN - 1)) * 4;
+        let margin = overlay_margin(scale);
+        let idx = (margin * SCREEN_WIDTH + (SCREEN_WIDTH - margin - 1)) * 4;
         assert_eq!(&frame[idx..idx + 4], &[0, 0, 0, 255]);
         // Top-left corner of the buffer is untouched by a top-right overlay.
         assert_eq!(&frame[0..4], &[0, 0, 0, 0]);
@@ -3046,21 +3086,35 @@ mod overlay_tests {
     /// get the exact same box in output pixels, not a scaled-up one.
     #[test]
     fn overlay_box_size_is_independent_of_the_buffer_size() {
-        let native = text_box_size("FPS 60/50", SCREEN_WIDTH, SCREEN_HEIGHT).expect("fits");
+        let scale = FONT_SCALE_MIN;
+        let native =
+            text_box_size("FPS 60/50", SCREEN_WIDTH, SCREEN_HEIGHT, scale).expect("fits");
         // A window several times larger than the native picture (e.g. zoom
         // x8 or a maximized 4K display).
-        let large = text_box_size("FPS 60/50", 3840, 2160).expect("fits");
+        let large = text_box_size("FPS 60/50", 3840, 2160, scale).expect("fits");
         assert_eq!(native, large);
     }
 
     #[test]
-    fn font_scale_is_1x_so_the_overlay_stays_small_in_output_pixels() {
-        // Regression guard for the "l'affichage des FPS est trop gros"
-        // report: each glyph pixel must draw as a single output pixel, not a
-        // multi-pixel block (drawing after scaling — see the module comment —
-        // already keeps the *apparent* size constant across window sizes;
-        // this keeps the *absolute* size small to begin with).
-        assert_eq!(FONT_SCALE, 1);
+    fn the_overlay_keeps_one_apparent_size_on_every_monitor() {
+        // This rule is the settlement of two opposite reports. The overlay
+        // once scaled with the picture ("trop gros" at high zoom), and was
+        // then pinned to one *output* pixel per glyph pixel — which is half a
+        // point on a HiDPI screen, hence "beaucoup trop petit". Points are the
+        // unit a reader cares about, so the size follows the monitor's scale
+        // factor and nothing else.
+        assert!(
+            font_scale(2.0) >= 2 * font_scale(1.0) - 1,
+            "a 2x monitor needs about twice the pixels for the same apparent size"
+        );
+        // The window and the zoom are not arguments: they cannot move it.
+        for factor in [0.5, 1.0, 1.5, 2.0, 3.0, 10.0] {
+            let scale = font_scale(factor);
+            assert!(
+                (FONT_SCALE_MIN..=FONT_SCALE_MAX).contains(&scale),
+                "scale factor {factor} gave {scale}"
+            );
+        }
     }
 }
 
