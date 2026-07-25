@@ -77,7 +77,14 @@ Petits, indépendants, forte valeur perçue. À enchaîner dans une seule passe.
 
 Les trois touchent la même zone (surface `pixels`) → à faire ensemble.
 
-- **Zoom ×1/×2/×3/×4** : redimensionne la fenêtre et la surface. ×1 pixel-perfect par défaut.
+- **Taille de la fenêtre** (c'est le sens premier de « zoom » ici) : la fenêtre doit être
+  **librement redimensionnable à la souris**. Les paliers ×1/×2/×3/×4 sont des raccourcis de confort
+  qui fixent une taille, pas le seul moyen d'agrandir. À toute taille, l'image est mise à l'échelle
+  **sans déformation**, avec bandes noires (letterbox/pillarbox) ; en mode pixel-perfect on retient
+  le plus grand facteur **entier** qui tienne, pour garder des pixels nets.
+- **Plein écran** : bascule fenêtré ↔ plein écran (`F11`, plus Ctrl+Cmd+F sur macOS et une entrée de
+  menu), même règle de mise à l'échelle sans déformation. `Échap` en plein écran doit **sortir du
+  plein écran**, pas quitter l'application.
 - **Filtres** (indépendant du zoom) : `Aucun` (plus proche voisin, net) / `Lissé` (bilinéaire) /
   `CRT` (scanlines + léger flou/vignettage) — c'est le « rendu dégradé rétro » souhaité.
   Implémentation : shader sur la surface `pixels` (wgpu), ou post-traitement CPU si plus simple pour
