@@ -207,6 +207,11 @@ pub struct Prefs {
     /// Folder the library screen scans for ROMs; `None` falls back to
     /// `last_rom_dir`, then to `roms/` (see `library::library_dir`).
     pub library_dir: Option<PathBuf>,
+    /// Interface language: `fr`, `en`, or anything else — including the
+    /// default `system` — to follow the host. Storing the fallback as an
+    /// unrecognised string rather than as an absent key keeps the file
+    /// self-explanatory to anyone who opens it.
+    pub language: String,
     /// Games added one by one, wherever they live. The scanned folder cannot
     /// hold these: it rebuilds its list from the directory, so a game outside
     /// it would appear once and be gone at the next scan. Listed after the
@@ -251,6 +256,7 @@ impl Default for Prefs {
             resume_on_launch: true,
             save_slot: 0,
             library_dir: None,
+            language: "system".to_string(),
             extra_roms: Vec::new(),
             library_sort: "title".to_string(),
             library_tab: "library".to_string(),
@@ -292,9 +298,12 @@ where
         // KeyCode's serde impl encodes unit variants as their name ("KeyZ").
         match serde_json::from_value::<KeyCode>(serde_json::Value::String(key.clone())) {
             Ok(code) => match input::reserved_for(code) {
+                // Diagnostic output stays English (see `i18n`), so the
+                // shortcut is named in English whatever the interface speaks.
                 Some(what) => eprintln!(
-                    "prefs: key {key:?} for button {button:?} is an application shortcut ({what}); \
-                     ignored, the button keeps its default key"
+                    "prefs: key {key:?} for button {button:?} is an application shortcut ({}); \
+                     ignored, the button keeps its default key",
+                    what.text(crate::i18n::Lang::En)
                 ),
                 None => {
                     map.insert(button, code);
@@ -401,6 +410,15 @@ impl Prefs {
             seen.push(p.clone());
             true
         });
+    }
+
+    /// Language the interface is drawn in: the stored choice, or the host's
+    /// when none was made. Resolved on every call rather than cached, so
+    /// changing it applies to the very next frame — the interface is rebuilt
+    /// from scratch each time anyway, and making the player restart for a label
+    /// swap would be theatre.
+    pub fn lang(&self) -> crate::i18n::Lang {
+        crate::i18n::Lang::from_pref(&self.language).unwrap_or_else(crate::i18n::system_lang)
     }
 
     /// Remember a game added by hand. Returns whether the list changed: adding
@@ -697,6 +715,24 @@ mod tests {
             .expect("parse");
         assert_eq!(p.keymap.get("A"), Some(&KeyCode::Space));
         assert_eq!(p.keymap.get("B"), None);
+    }
+
+    #[test]
+    fn a_stored_language_wins_and_anything_else_follows_the_host() {
+        let mut p = Prefs::default();
+        assert_eq!(p.language, "system", "no choice is the default, not French");
+
+        p.language = "en".to_string();
+        assert_eq!(p.lang(), crate::i18n::Lang::En);
+        p.language = "fr".to_string();
+        assert_eq!(p.lang(), crate::i18n::Lang::Fr);
+
+        // A value nobody wrote on purpose — a hand-edit, a file from a future
+        // build — must fall back to the host rather than blank the interface.
+        for value in ["system", "", "klingon"] {
+            p.language = value.to_string();
+            assert_eq!(p.lang(), crate::i18n::system_lang(), "{value}");
+        }
     }
 
     #[test]

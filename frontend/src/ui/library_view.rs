@@ -34,6 +34,7 @@ use std::path::{Path, PathBuf};
 
 use egui::{Align, Color32, Layout, Rect, RichText, Sense, Stroke, StrokeKind, Vec2};
 
+use crate::i18n::{self, Lang, Msg};
 use crate::library::{self, GameEntry, SortMode};
 use crate::prefs::GameStats;
 
@@ -105,6 +106,8 @@ pub struct LibraryModel<'a> {
     pub pending: &'a HashSet<String>,
     pub state: &'a mut LibraryUi,
     pub textures: &'a mut TextureStore,
+    /// Language every string of the grid is rendered in.
+    pub lang: Lang,
 }
 
 /// The games one tab shows, in display order.
@@ -185,6 +188,7 @@ fn text_block_height(ctx: &egui::Context) -> f32 {
 pub fn show(ui: &mut egui::Ui, model: &mut LibraryModel) -> Action {
     let mut action = Action::None;
     let tab = model.state.tab;
+    let lang = model.lang;
 
     ui.horizontal(|ui| {
         // The magnifier belongs *in* the field, not floating beside it: outside
@@ -198,7 +202,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut LibraryModel) -> Action {
                     top: 5,
                     bottom: 5,
                 })
-                .hint_text("titre ou nom de fichier"),
+                .hint_text(Msg::SearchPlaceholder.text(lang)),
         );
         Icon::Search.draw(
             ui.painter(),
@@ -213,7 +217,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut LibraryModel) -> Action {
         );
         if !model.state.query.is_empty()
             && icons::ghost_button(ui, Icon::Close, icons::SIZE, theme::TEXT_DIM)
-                .on_hover_text("Effacer")
+                .on_hover_text(Msg::Clear.text(lang))
                 .clicked()
         {
             model.state.query.clear();
@@ -222,10 +226,12 @@ pub fn show(ui: &mut egui::Ui, model: &mut LibraryModel) -> Action {
         // would be a control that contradicts the tab it sits under.
         if tab != Tab::Recent {
             ui.add_space(12.0);
-            ui.label(RichText::new("Trier par").size(theme::SIZE_SMALL).color(theme::TEXT_DIM));
+            ui.label(
+                RichText::new(Msg::SortBy.text(lang)).size(theme::SIZE_SMALL).color(theme::TEXT_DIM),
+            );
             for mode in SortMode::ALL {
                 let selected = model.state.sort == mode;
-                if ui.selectable_label(selected, mode.label()).clicked() {
+                if ui.selectable_label(selected, mode.label(lang)).clicked() {
                     model.state.sort = mode;
                 }
             }
@@ -236,19 +242,19 @@ pub fn show(ui: &mut egui::Ui, model: &mut LibraryModel) -> Action {
             // A game living outside the scanned folder can only get here by
             // being named explicitly — or dropped on the window, which the
             // hover text advertises since nothing on screen could suggest it.
-            if icons::button(ui, Icon::Plus, "Ajouter un jeu…")
-                .on_hover_text("Ajouter un jeu situé hors du dossier — ou déposez son fichier sur la fenêtre")
+            if icons::button(ui, Icon::Plus, Msg::AddGame.text(lang))
+                .on_hover_text(Msg::AddGameHint.text(lang))
                 .clicked()
             {
                 action = Action::AddGame { replacing: None };
             }
-            if icons::button(ui, Icon::Folder, "Dossier…")
+            if icons::button(ui, Icon::Folder, Msg::ChooseFolder.text(lang))
                 .on_hover_text(super::home::shorten_path(model.dir, 72))
                 .clicked()
             {
                 action = Action::ChooseLibraryDir;
             }
-            if ui.button("Actualiser").clicked() {
+            if ui.button(Msg::Refresh.text(lang)).clicked() {
                 action = Action::Rescan;
             }
         });
@@ -258,7 +264,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut LibraryModel) -> Action {
     // A status line only while something is actually happening. The game count
     // and the folder path used to sit here on every frame: a third band of
     // chrome, above every card, saying what the grid itself already shows.
-    if let Some(status) = activity(model.state.scanning, model.pending.len()) {
+    if let Some(status) = activity(lang, model.state.scanning, model.pending.len()) {
         ui.add_space(6.0);
         ui.label(RichText::new(status).font(theme::font(theme::SIZE_SMALL)).color(theme::TEXT_DIM));
     }
@@ -271,7 +277,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut LibraryModel) -> Action {
 
     if shown.is_empty() && !model.state.scanning {
         let state = empty_state(tab, model.entries.is_empty(), !model.state.query.is_empty());
-        return empty_screen(ui, state, &mut model.state.query);
+        return empty_screen(ui, state, &mut model.state.query, lang);
     }
 
     let metrics = grid_metrics(
@@ -311,7 +317,8 @@ pub fn show(ui: &mut egui::Ui, model: &mut LibraryModel) -> Action {
                     let stats = model.games.get(&entry.id);
                     let picture = model.thumbs.get(&entry.id).map(|p| p.as_path());
                     let pending = model.pending.contains(&entry.id);
-                    let hit = card(ui, rect, entry, stats, picture, pending, model.textures);
+                    let hit =
+                        card(ui, rect, entry, stats, picture, pending, model.textures, lang);
                     if hit.favorite {
                         action = Action::ToggleFavorite(entry.id.clone());
                     } else if hit.play {
@@ -330,14 +337,13 @@ pub fn show(ui: &mut egui::Ui, model: &mut LibraryModel) -> Action {
 /// it is not: a scan in flight, or thumbnails still being emulated. Written out
 /// properly rather than with a parenthesised plural — this is prose, and the
 /// grid says how many games there are by showing them.
-pub fn activity(scanning: bool, pending: usize) -> Option<String> {
+pub fn activity(lang: Lang, scanning: bool, pending: usize) -> Option<String> {
     if scanning {
-        return Some("Analyse du dossier…".to_string());
+        return Some(Msg::ScanningFolder.text(lang).to_string());
     }
     match pending {
         0 => None,
-        1 => Some("1 miniature en cours…".to_string()),
-        n => Some(format!("{n} miniatures en cours…")),
+        n => Some(i18n::thumbnails_pending(lang, n)),
     }
 }
 
@@ -367,6 +373,7 @@ fn card(
     picture: Option<&Path>,
     pending: bool,
     textures: &mut TextureStore,
+    lang: Lang,
 ) -> CardHit {
     let mut hit = CardHit::default();
     let favorite = stats.is_some_and(|s| s.favorite);
@@ -415,6 +422,7 @@ fn card(
         textures,
         ui.ctx(),
         Placeholder::game_pending(pending),
+        lang,
     );
     if lit > 0.0 {
         // The picture brightens rather than the card only: it is the part of
@@ -445,7 +453,7 @@ fn card(
     painter.text(
         egui::pos2(content.left(), subtitle_top),
         egui::Align2::LEFT_TOP,
-        subtitle(entry, stats),
+        subtitle(entry, stats, lang),
         theme::mono(theme::SIZE_SMALL),
         if entry.missing { theme::RED } else { theme::TEXT_DIM },
     );
@@ -498,7 +506,7 @@ fn card(
         ui.painter().text(
             egui::pos2(icon_rect.right() + 6.0, play_rect.center().y),
             egui::Align2::LEFT_CENTER,
-            "Jouer",
+            Msg::Play.text(lang),
             theme::font(theme::SIZE_BUTTON),
             label_colour,
         );
@@ -558,15 +566,15 @@ pub fn elided_galley(
 /// in it: it is the coloured pill stamped on the picture
 /// (`icons::paint_chip_badge`), where its accent identifies it before its name
 /// is read.
-fn subtitle(entry: &GameEntry, stats: Option<&GameStats>) -> String {
+fn subtitle(entry: &GameEntry, stats: Option<&GameStats>, lang: Lang) -> String {
     if entry.missing {
         // Region and play time describe a cartridge we can no longer read; the
         // only fact worth the line is that the file is not where it was.
-        return "Fichier introuvable".to_string();
+        return Msg::FileMissing.text(lang).to_string();
     }
     let mut parts = vec![entry.region.clone()];
     if let Some(played) = stats.map(|s| s.play_seconds).filter(|s| *s > 0) {
-        parts.push(library::format_play_time(played));
+        parts.push(library::format_play_time(lang, played));
     }
     parts.join(" · ")
 }
@@ -595,11 +603,11 @@ impl Placeholder {
         }
     }
 
-    fn caption(self) -> &'static str {
+    fn caption(self, lang: Lang) -> &'static str {
         match self {
-            Placeholder::NoPicture => "pas de miniature",
-            Placeholder::Pending => "miniature en cours…",
-            Placeholder::NoPreview => "pas d'aperçu",
+            Placeholder::NoPicture => Msg::NoPicture.text(lang),
+            Placeholder::Pending => Msg::PictureRunning.text(lang),
+            Placeholder::NoPreview => Msg::NoPreview.text(lang),
         }
     }
 }
@@ -618,6 +626,7 @@ pub fn paint_picture(
     textures: &mut TextureStore,
     ctx: &egui::Context,
     placeholder: Placeholder,
+    lang: Lang,
 ) {
     if let Some(path) = path {
         if let Some(handle) = textures.get(ctx, path) {
@@ -633,7 +642,7 @@ pub fn paint_picture(
             return;
         }
     }
-    paint_placeholder(painter, rect, placeholder);
+    paint_placeholder(painter, rect, placeholder, lang);
 }
 
 /// The largest rectangle of `source`'s ratio that fits inside `box_rect`,
@@ -651,7 +660,7 @@ pub fn letterbox(box_rect: Rect, source: Vec2) -> Rect {
 /// not an empty rectangle — a game whose thumbnail is still being generated
 /// must look like it, not like a failure — and deliberately the same size as
 /// the picture it stands in for.
-fn paint_placeholder(painter: &egui::Painter, rect: Rect, kind: Placeholder) {
+fn paint_placeholder(painter: &egui::Painter, rect: Rect, kind: Placeholder, lang: Lang) {
     painter.rect_filled(rect, 4.0, theme::BG_DEEP);
     let size = rect.size();
 
@@ -683,7 +692,7 @@ fn paint_placeholder(painter: &egui::Painter, rect: Rect, kind: Placeholder) {
     painter.text(
         egui::pos2(rect.center().x, rect.max.y - size.y * 0.08),
         egui::Align2::CENTER_BOTTOM,
-        kind.caption(),
+        kind.caption(lang),
         theme::font(theme::SIZE_SMALL),
         theme::TEXT_DIM,
     );
@@ -701,11 +710,12 @@ pub fn thumbnail(
     placeholder: Placeholder,
     textures: &mut TextureStore,
     size: Vec2,
+    lang: Lang,
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
     if ui.is_rect_visible(rect) {
         let ctx = ui.ctx().clone();
-        paint_picture(ui.painter(), rect, path, textures, &ctx, placeholder);
+        paint_picture(ui.painter(), rect, path, textures, &ctx, placeholder, lang);
     }
     response
 }
@@ -727,8 +737,8 @@ pub enum EmptyCall {
 /// when the player can do something about it, what to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmptyState {
-    pub title: &'static str,
-    pub hint: &'static str,
+    pub title: Msg,
+    pub hint: Msg,
     pub call: EmptyCall,
 }
 
@@ -738,39 +748,44 @@ pub struct EmptyState {
 pub fn empty_state(tab: Tab, library_empty: bool, searching: bool) -> EmptyState {
     if library_empty {
         return EmptyState {
-            title: "Aucun jeu ici.",
-            hint: "Choisissez le dossier qui contient vos ROMs.",
+            title: Msg::EmptyLibrary,
+            hint: Msg::EmptyLibraryHint,
             call: EmptyCall::ChooseFolder,
         };
     }
     if searching {
         return EmptyState {
-            title: "Aucun jeu ne correspond à cette recherche.",
-            hint: "Essayez un autre mot, ou effacez la recherche.",
+            title: Msg::EmptySearch,
+            hint: Msg::EmptySearchHint,
             call: EmptyCall::ClearSearch,
         };
     }
     match tab {
         Tab::Favorites => EmptyState {
-            title: "Aucun favori.",
-            hint: "L'étoile d'une tuile épingle un jeu ici.",
+            title: Msg::EmptyFavorites,
+            hint: Msg::EmptyFavoritesHint,
             call: EmptyCall::None,
         },
         Tab::Recent => EmptyState {
-            title: "Aucune partie récente.",
-            hint: "Lancez un jeu : il apparaîtra ici.",
+            title: Msg::EmptyRecent,
+            hint: Msg::EmptyRecentHint,
             call: EmptyCall::None,
         },
         _ => EmptyState {
-            title: "Aucun jeu ici.",
-            hint: "Choisissez le dossier qui contient vos ROMs.",
+            title: Msg::EmptyLibrary,
+            hint: Msg::EmptyLibraryHint,
             call: EmptyCall::ChooseFolder,
         },
     }
 }
 
 /// Draw the empty screen and its call to action.
-fn empty_screen(ui: &mut egui::Ui, state: EmptyState, query: &mut String) -> Action {
+fn empty_screen(
+    ui: &mut egui::Ui,
+    state: EmptyState,
+    query: &mut String,
+    lang: Lang,
+) -> Action {
     let mut action = Action::None;
     ui.add_space(24.0);
     ui.vertical_centered(|ui| {
@@ -782,22 +797,27 @@ fn empty_screen(ui: &mut egui::Ui, state: EmptyState, query: &mut String) -> Act
         icons::show(ui, icon, 56.0, theme::TEXT_DIM);
         ui.add_space(12.0);
         ui.label(
-            RichText::new(state.title).font(theme::strong(theme::SIZE_HEADING)).color(theme::TEXT),
+            RichText::new(state.title.text(lang))
+                .font(theme::strong(theme::SIZE_HEADING))
+                .color(theme::TEXT),
         );
         ui.add_space(4.0);
         ui.label(
-            RichText::new(state.hint).font(theme::font(theme::SIZE_BODY)).color(theme::TEXT_DIM),
+            RichText::new(state.hint.text(lang))
+                .font(theme::font(theme::SIZE_BODY))
+                .color(theme::TEXT_DIM),
         );
         ui.add_space(14.0);
         match state.call {
             EmptyCall::ChooseFolder => {
-                if icons::primary_button(ui, Icon::Folder, "Choisir un dossier de ROMs…").clicked()
+                if icons::primary_button(ui, Icon::Folder, Msg::ChooseRomFolder.text(lang))
+                    .clicked()
                 {
                     action = Action::ChooseLibraryDir;
                 }
             }
             EmptyCall::ClearSearch => {
-                if icons::button(ui, Icon::Close, "Effacer la recherche").clicked() {
+                if icons::button(ui, Icon::Close, Msg::ClearSearch.text(lang)).clicked() {
                     query.clear();
                 }
             }
@@ -834,8 +854,9 @@ mod tests {
     fn an_empty_screen_names_what_is_missing_and_what_to_do() {
         // The brief's own words, and the button that goes with them.
         let empty = empty_state(Tab::Library, true, false);
-        assert_eq!(empty.title, "Aucun jeu ici.");
-        assert_eq!(empty.hint, "Choisissez le dossier qui contient vos ROMs.");
+        assert_eq!(empty.title.text(Lang::Fr), "Aucun jeu ici.");
+        assert_eq!(empty.hint.text(Lang::Fr), "Choisissez le dossier qui contient vos ROMs.");
+        assert_eq!(empty.title.text(Lang::En), "No game here.");
         assert_eq!(empty.call, EmptyCall::ChooseFolder);
         // An empty folder wins over every other reason, on every tab.
         for tab in [Tab::Library, Tab::Favorites, Tab::Recent] {
@@ -843,14 +864,18 @@ mod tests {
         }
         // A search that matched nothing offers to drop the search.
         let none = empty_state(Tab::Library, false, true);
-        assert!(none.title.contains("recherche"));
+        assert!(none.title.text(Lang::Fr).contains("recherche"));
+        assert!(none.title.text(Lang::En).contains("search"));
         assert_eq!(none.call, EmptyCall::ClearSearch);
         // The two filtered tabs fill themselves: nothing to click, but never a
         // mute void either.
         for (tab, word) in [(Tab::Favorites, "favori"), (Tab::Recent, "récente")] {
             let state = empty_state(tab, false, false);
-            assert!(state.title.to_lowercase().contains(word), "{:?}: {}", tab, state.title);
-            assert!(!state.hint.is_empty());
+            let title = state.title.text(Lang::Fr);
+            assert!(title.to_lowercase().contains(word), "{tab:?}: {title}");
+            for lang in Lang::ALL {
+                assert!(!state.hint.text(lang).is_empty());
+            }
             assert_eq!(state.call, EmptyCall::None);
         }
     }
@@ -858,17 +883,17 @@ mod tests {
     #[test]
     fn the_card_subtitle_lists_region_and_play_time() {
         let mut e = entry();
-        assert_eq!(subtitle(&e, None), "PAL");
+        assert_eq!(subtitle(&e, None, Lang::Fr), "PAL");
         // The coprocessor is not in the line: it is the coloured pill stamped
         // on the picture, so the subtitle stays the same length whatever the
         // chip.
         e.coprocessor = Some("SuperFX".to_string());
-        assert_eq!(subtitle(&e, None), "PAL");
+        assert_eq!(subtitle(&e, None, Lang::Fr), "PAL");
         let stats = GameStats { play_seconds: 3600, ..Default::default() };
-        assert_eq!(subtitle(&e, Some(&stats)), "PAL · 1 h 00");
+        assert_eq!(subtitle(&e, Some(&stats), Lang::Fr), "PAL · 1 h 00");
         // A never-played game shows no time at all rather than "0".
         let stats = GameStats::default();
-        assert_eq!(subtitle(&e, Some(&stats)), "PAL");
+        assert_eq!(subtitle(&e, Some(&stats), Lang::Fr), "PAL");
     }
 
     /// The toolbar says something only while the library is working, and says
@@ -876,17 +901,21 @@ mod tests {
     /// carry the game count and the folder path above every single card.
     #[test]
     fn the_toolbar_speaks_only_while_the_library_is_working() {
-        assert_eq!(activity(false, 0), None);
-        assert_eq!(activity(true, 0).as_deref(), Some("Analyse du dossier…"));
+        assert_eq!(activity(Lang::Fr, false, 0), None);
+        assert_eq!(activity(Lang::Fr, true, 0).as_deref(), Some("Analyse du dossier…"));
         // A scan in flight wins: the count of queued thumbnails is not settled
         // until it ends.
-        assert_eq!(activity(true, 3).as_deref(), Some("Analyse du dossier…"));
-        assert_eq!(activity(false, 1).as_deref(), Some("1 miniature en cours…"));
-        assert_eq!(activity(false, 7).as_deref(), Some("7 miniatures en cours…"));
-        // No parenthesised plural anywhere in the line.
-        for n in 0..12 {
-            if let Some(line) = activity(false, n) {
-                assert!(!line.contains("(s)"), "{line}");
+        assert_eq!(activity(Lang::Fr, true, 3).as_deref(), Some("Analyse du dossier…"));
+        assert_eq!(activity(Lang::Fr, false, 1).as_deref(), Some("1 miniature en cours…"));
+        assert_eq!(activity(Lang::Fr, false, 7).as_deref(), Some("7 miniatures en cours…"));
+        assert_eq!(activity(Lang::En, false, 1).as_deref(), Some("1 thumbnail being built…"));
+        assert_eq!(activity(Lang::En, false, 7).as_deref(), Some("7 thumbnails being built…"));
+        // No parenthesised plural anywhere in the line, in either language.
+        for lang in Lang::ALL {
+            for n in 0..12 {
+                if let Some(line) = activity(lang, false, n) {
+                    assert!(!line.contains("(s)"), "{line}");
+                }
             }
         }
     }
@@ -1033,6 +1062,7 @@ mod tests {
         thumbs: &HashMap<String, PathBuf>,
         state: &mut LibraryUi,
         textures: &mut TextureStore,
+        lang: Lang,
     ) -> egui::FullOutput {
         let pending = HashSet::new();
         ctx.run(input, |ctx| {
@@ -1047,6 +1077,7 @@ mod tests {
                         pending: &pending,
                         state,
                         textures,
+                        lang,
                     },
                 );
             });
@@ -1088,6 +1119,7 @@ mod tests {
             &HashMap::new(),
             &mut state,
             &mut textures,
+            Lang::Fr,
         );
         assert!(painted_text(&output).contains("SuperFX"), "{}", painted_text(&output));
     }
@@ -1157,6 +1189,7 @@ mod tests {
                 &thumbs,
                 &mut state,
                 &mut textures,
+                Lang::Fr,
             );
         }
         let drawn = textures.len();
@@ -1199,6 +1232,7 @@ mod tests {
                 &HashMap::new(),
                 &mut state,
                 &mut textures,
+                Lang::Fr,
             ));
         }
         let output = output.expect("no frame");
@@ -1273,6 +1307,7 @@ mod tests {
                 &HashMap::new(),
                 &mut state,
                 &mut textures,
+                Lang::Fr,
             ));
         }
         assert!(ctx.memory(|m| m.has_focus(card_id)), "the card refused the keyboard focus");
@@ -1308,6 +1343,7 @@ mod tests {
             &HashMap::new(),
             &mut state,
             &mut textures,
+            Lang::Fr,
         );
         let text = painted_text(&output);
         assert!(text.contains("Aucun jeu ici."), "{text}");

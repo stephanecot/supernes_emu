@@ -5,6 +5,7 @@ mod atomic;
 mod audio;
 mod dialog;
 mod guide;
+mod i18n;
 mod input;
 mod library;
 mod menu;
@@ -64,9 +65,11 @@ struct Args {
     save_state_at: Option<(u32, PathBuf)>,
     load_state: Option<PathBuf>,
     dump_spc: Option<PathBuf>,
-    /// `--ui-shot VIEW`: render that screen of the shell offscreen instead of
-    /// running anything, with the positional argument as the output PNG.
-    ui_shot: Option<ui::shot::View>,
+    /// `--ui-shot VIEW[@LANG]`: render that screen of the shell offscreen
+    /// instead of running anything, with the positional argument as the output
+    /// PNG. The language is part of the view name because a screen in French
+    /// and the same screen in English are two different pictures.
+    ui_shot: Option<(ui::shot::View, i18n::Lang)>,
     ui_shot_size: (u32, u32),
 }
 
@@ -93,11 +96,12 @@ const USAGE: &str = "usage: prisme [rom.sfc|.smc|.zip] [flags]
                                         windowed save folder preference if set)
   --load-state FILE                     headless: load a save-state before frame 0
   --save-state-at FRAME FILE            headless: write a save-state after FRAME
-  --ui-shot VIEW out.png                render a screen of the interface offscreen and exit
+  --ui-shot VIEW[@LANG] out.png         render a screen of the interface offscreen and exit
                                         (VIEW: library, favorites, game-sheet, empty,
                                         library-hover, settings-display, settings-audio,
                                         settings-emulation, settings-inputs, settings-folders,
                                         settings-about; `settings` = settings-display.
+                                        LANG: fr (default) or en, e.g. settings-display@en.
                                         No window, no ROM)
   --ui-shot-size WxH                    size of that capture, in points (default 1280x800)
 
@@ -197,7 +201,9 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                 let file = value(&mut it, "--save-state-at")?;
                 a.save_state_at = Some((frame, file.into()));
             }
-            "--ui-shot" => a.ui_shot = Some(ui::shot::View::parse(&value(&mut it, "--ui-shot")?)?),
+            "--ui-shot" => {
+                a.ui_shot = Some(ui::shot::View::parse_spec(&value(&mut it, "--ui-shot")?)?)
+            }
             "--ui-shot-size" => {
                 a.ui_shot_size = ui::shot::parse_size(&value(&mut it, "--ui-shot-size")?)?
             }
@@ -244,13 +250,14 @@ fn run(args: Args) -> Result<(), String> {
     // `--ui-shot` renders a screen of the shell to a PNG and exits: no window,
     // no cartridge, no preferences read. Answered before anything else so its
     // positional argument (the output file) is never taken for a ROM.
-    if let Some(view) = args.ui_shot {
+    if let Some((view, lang)) = args.ui_shot {
         let out = args.rom.clone().ok_or("--ui-shot requires an output PNG path")?;
-        ui::shot::capture(view, args.ui_shot_size, &out)?;
+        ui::shot::capture(view, lang, args.ui_shot_size, &out)?;
         println!(
-            "wrote {} — {} {}x{}",
+            "wrote {} — {}@{} {}x{}",
             out.display(),
             view.name(),
+            lang,
             args.ui_shot_size.0,
             args.ui_shot_size.1
         );
@@ -1131,7 +1138,7 @@ mod tests {
     fn ui_shot_takes_a_view_a_size_and_an_output_path() {
         let args = ["--ui-shot", "library", "shot.png"].map(String::from).to_vec();
         let parsed = parse_args(&args).expect("parse");
-        assert_eq!(parsed.ui_shot, Some(ui::shot::View::Library));
+        assert_eq!(parsed.ui_shot, Some((ui::shot::View::Library, i18n::Lang::Fr)));
         // The positional argument is the *output*, not a ROM to run.
         assert_eq!(parsed.rom, Some(PathBuf::from("shot.png")));
         assert_eq!(parsed.ui_shot_size, ui::shot::DEFAULT_SIZE);
@@ -1142,7 +1149,7 @@ mod tests {
         let parsed = parse_args(&args).expect("parse");
         assert_eq!(
             parsed.ui_shot,
-            Some(ui::shot::View::Settings(ui::settings::Section::Display)),
+            Some((ui::shot::View::Settings(ui::settings::Section::Display), i18n::Lang::Fr)),
             "`settings` names the section the panel opens on"
         );
         assert_eq!(parsed.ui_shot_size, (1024, 768));
@@ -1157,8 +1164,28 @@ mod tests {
         ] {
             let args = ["--ui-shot", name, "s.png"].map(String::from).to_vec();
             let parsed = parse_args(&args).expect("parse");
-            assert_eq!(parsed.ui_shot, Some(ui::shot::View::Settings(section)), "{name}");
+            assert_eq!(
+                parsed.ui_shot,
+                Some((ui::shot::View::Settings(section), i18n::Lang::Fr)),
+                "{name}"
+            );
         }
+
+        // …and in either language, named on the view itself: without this the
+        // English half of every screen is unverifiable.
+        for (spec, lang) in [
+            ("settings-display@en", i18n::Lang::En),
+            ("settings-display@fr", i18n::Lang::Fr),
+            ("library@en", i18n::Lang::En),
+        ] {
+            let args = ["--ui-shot", spec, "s.png"].map(String::from).to_vec();
+            let parsed = parse_args(&args).expect("parse");
+            assert_eq!(parsed.ui_shot.map(|(_, l)| l), Some(lang), "{spec}");
+        }
+        // A language the interface does not speak is refused up front rather
+        // than silently captured in French.
+        assert!(parse_args(&["--ui-shot".into(), "library@de".into(), "s.png".into()]).is_err());
+        assert!(parse_args(&["--ui-shot".into(), "library@".into(), "s.png".into()]).is_err());
 
         // A view that does not exist, a missing size and a missing output path
         // are all refused up front rather than producing an empty PNG.

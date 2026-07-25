@@ -15,6 +15,8 @@
 
 use egui::{Key, Rect, Response, Sense, Vec2};
 
+use crate::i18n::{Lang, Msg};
+
 use super::icons::{self, Icon};
 use super::theme;
 
@@ -35,12 +37,12 @@ pub enum Tab {
 impl Tab {
     pub const ALL: [Tab; 4] = [Tab::Library, Tab::Favorites, Tab::Recent, Tab::Settings];
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self, lang: Lang) -> &'static str {
         match self {
-            Tab::Library => "Bibliothèque",
-            Tab::Favorites => "Favoris",
-            Tab::Recent => "Récents",
-            Tab::Settings => "Réglages",
+            Tab::Library => Msg::TabLibrary.text(lang),
+            Tab::Favorites => Msg::TabFavorites.text(lang),
+            Tab::Recent => Msg::TabRecent.text(lang),
+            Tab::Settings => Msg::TabSettings.text(lang),
         }
     }
 
@@ -99,14 +101,14 @@ pub const TRANSITION: f32 = 0.12;
 /// Draw the bar and return the tab the player asked for, if any. `active` is
 /// the entry the spectral rule is drawn under, which the caller resolves (the
 /// settings panel takes the underline while it is open).
-pub fn show(ui: &mut egui::Ui, active: Tab) -> Option<Tab> {
+pub fn show(ui: &mut egui::Ui, active: Tab, lang: Lang) -> Option<Tab> {
     let mut chosen = None;
     let mut focused = None;
     let mut responses: Vec<Response> = Vec::with_capacity(Tab::ALL.len());
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
         for (i, tab) in Tab::ALL.into_iter().enumerate() {
-            let response = tab_button(ui, tab, tab == active);
+            let response = tab_button(ui, tab, tab == active, lang);
             if response.clicked() {
                 chosen = Some(tab);
             }
@@ -138,10 +140,10 @@ pub fn height() -> f32 {
     TAB_H + RULE_GAP + theme::SPECTRAL_RULE_H
 }
 
-fn tab_button(ui: &mut egui::Ui, tab: Tab, active: bool) -> Response {
+fn tab_button(ui: &mut egui::Ui, tab: Tab, active: bool, lang: Lang) -> Response {
     let font = if active { theme::strong(theme::SIZE_BODY) } else { theme::font(theme::SIZE_BODY) };
     let galley =
-        ui.painter().layout_no_wrap(tab.label().to_owned(), font, egui::Color32::PLACEHOLDER);
+        ui.painter().layout_no_wrap(tab.label(lang).to_owned(), font, egui::Color32::PLACEHOLDER);
     let icon_w = tab.icon().map_or(0.0, |_| icons::SIZE + ICON_GAP);
     let size = Vec2::new(galley.size().x + icon_w + 2.0 * PAD_X, height());
     let (rect, response) = ui.allocate_at_least(size, Sense::CLICK | Sense::FOCUSABLE);
@@ -207,8 +209,10 @@ mod tests {
 
     #[test]
     fn the_bar_lists_the_four_entries_the_brief_names() {
-        let labels: Vec<&str> = Tab::ALL.iter().map(|t| t.label()).collect();
+        let labels: Vec<&str> = Tab::ALL.iter().map(|t| t.label(Lang::Fr)).collect();
         assert_eq!(labels, vec!["Bibliothèque", "Favoris", "Récents", "Réglages"]);
+        let english: Vec<&str> = Tab::ALL.iter().map(|t| t.label(Lang::En)).collect();
+        assert_eq!(english, vec!["Library", "Favourites", "Recent", "Settings"]);
         assert_eq!(Tab::default(), Tab::Library);
         // Only the first three are views of the library.
         assert_eq!(Tab::ALL.iter().filter(|t| t.is_view()).count(), 3);
@@ -247,7 +251,7 @@ mod tests {
         let mut chosen = None;
         let output = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                chosen = show(ui, active);
+                chosen = show(ui, active, Lang::Fr);
             });
         });
         fn walk(shape: &egui::Shape, out: &mut Vec<egui::Shape>) {
@@ -295,7 +299,11 @@ mod tests {
             }
         }
         for tab in Tab::ALL {
-            assert!(text.contains(tab.label()), "{:?} is missing: {text}", tab.label());
+            assert!(
+                text.contains(tab.label(Lang::Fr)),
+                "{:?} is missing: {text}",
+                tab.label(Lang::Fr)
+            );
         }
     }
 }

@@ -58,6 +58,12 @@ Only Terranigma could see it, because it uploads through its own receiver rather
 
 Two caveats. `roms/Terranigma (F).resume` stays broken by construction: it was captured on the old build with the SPC already derailed. And the code landed inside commit `0d50036`, whose message is about CI — a `git add -A` swept an agent's in-flight work; the fix is `core/src/apu/mod.rs` and `core/src/apu/spc700.rs` in that commit.
 
+**Confirmed in real play.** A later session's auto-saved state shows SPC PC $0760 (inside the driver), SP $FD, MVOL $5F/$5F and 61 352 bytes of APU RAM, with its preview picture showing Ark's room fully rendered. Terranigma works.
+
+A methodology note worth keeping, because it cost a wasted round: an intermediate state looked like the bug was still there, and it was read as "not fixed" without checking which build had produced it. **Installing a binary does not change a process that is already running**, so a state file written after an install can still come from the old code. Compare timestamps against the *process*, not against the file on disk — or, better, confirm from a run started after the install.
+
+One thing was never established: whether that intermediate failure was old code, or the same race firing intermittently. Both readings fit the evidence, and no reproduction was ever obtained — four attempts, none of which made it fail on demand.
+
 ## Cartridge coprocessor decision (UPDATED)
 User provided a Yoshi's Island ROM = **SuperFX** (GSU-2), so the target chip pivoted from SA-1 to **SuperFX** (testable against a real ROM). SA-1 reference doc (references/sa1.md) was written and is kept for a future SA-1 pass; SA-1 core was never started. SuperFX is a from-scratch GSU CPU (new instruction set) — larger than SA-1 but now game-validatable on Yoshi's Island.
 

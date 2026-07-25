@@ -28,6 +28,7 @@ use gilrs::{Axis, EventType, GamepadId, Gilrs};
 pub use gilrs::Button;
 use snes_core::JoypadState;
 
+use crate::i18n::{Lang, Msg};
 use crate::input;
 
 /// Controller ports the console exposes (`Snes::run_frame` takes
@@ -130,28 +131,30 @@ pub fn pad_button_from_name(name: &str) -> Option<Button> {
 /// What the settings panel shows for a physical button: where it sits on a
 /// modern controller, since `gilrs` names faces by geometry and few players
 /// think of their pad in those terms.
-pub fn pad_label(button: Button) -> &'static str {
+pub fn pad_label(lang: Lang, button: Button) -> &'static str {
+    // `C`, `Z`, `Select`, `Start` and `Mode` are printed on the pad itself and
+    // are left alone, exactly like the SNES letters.
     match button {
-        Button::South => "Bouton bas",
-        Button::East => "Bouton droite",
-        Button::North => "Bouton haut",
-        Button::West => "Bouton gauche",
+        Button::South => Msg::PadSouth.text(lang),
+        Button::East => Msg::PadEast.text(lang),
+        Button::North => Msg::PadNorth.text(lang),
+        Button::West => Msg::PadWest.text(lang),
         Button::C => "C",
         Button::Z => "Z",
-        Button::LeftTrigger => "Gâchette L (LB)",
-        Button::LeftTrigger2 => "Gâchette L2 (LT)",
-        Button::RightTrigger => "Gâchette R (RB)",
-        Button::RightTrigger2 => "Gâchette R2 (RT)",
+        Button::LeftTrigger => Msg::PadLeftTrigger.text(lang),
+        Button::LeftTrigger2 => Msg::PadLeftTrigger2.text(lang),
+        Button::RightTrigger => Msg::PadRightTrigger.text(lang),
+        Button::RightTrigger2 => Msg::PadRightTrigger2.text(lang),
         Button::Select => "Select",
         Button::Start => "Start",
-        Button::Mode => "Mode",
-        Button::LeftThumb => "Clic stick gauche",
-        Button::RightThumb => "Clic stick droit",
-        Button::DPadUp => "Croix haut",
-        Button::DPadDown => "Croix bas",
-        Button::DPadLeft => "Croix gauche",
-        Button::DPadRight => "Croix droite",
-        Button::Unknown => "Inconnu",
+        Button::Mode => Msg::PadMode.text(lang),
+        Button::LeftThumb => Msg::PadLeftThumb.text(lang),
+        Button::RightThumb => Msg::PadRightThumb.text(lang),
+        Button::DPadUp => Msg::PadDPadUp.text(lang),
+        Button::DPadDown => Msg::PadDPadDown.text(lang),
+        Button::DPadLeft => Msg::PadDPadLeft.text(lang),
+        Button::DPadRight => Msg::PadDPadRight.text(lang),
+        Button::Unknown => Msg::PadUnknown.text(lang),
     }
 }
 
@@ -251,7 +254,7 @@ pub fn current_buttons(map: &BTreeMap<String, String>, name: &str) -> Vec<Button
 /// `name` are listed: a hand-edited `pad_map` can leave a SNES button claiming
 /// a physical button another one won, and printing it would say the button
 /// responds when it does not.
-pub fn binding_label(map: &BTreeMap<String, String>, name: &str) -> String {
+pub fn binding_label(lang: Lang, map: &BTreeMap<String, String>, name: &str) -> String {
     let buttons: Vec<Button> = current_buttons(map, name)
         .into_iter()
         .filter(|&b| resolve_button(map, b) == Some(name))
@@ -259,7 +262,7 @@ pub fn binding_label(map: &BTreeMap<String, String>, name: &str) -> String {
     if buttons.is_empty() {
         return "—".to_string();
     }
-    buttons.iter().map(|&b| pad_label(b)).collect::<Vec<_>>().join(" / ")
+    buttons.iter().map(|&b| pad_label(lang, b)).collect::<Vec<_>>().join(" / ")
 }
 
 /// One meaningful change of a controller, decoupled from `gilrs::EventType`.
@@ -470,9 +473,8 @@ pub struct PadNotice {
 impl PadNotice {
     /// Text for the status overlay. Uppercase and unaccented: the overlay font
     /// (`video::glyph`) has no lowercase and no accented glyphs.
-    pub fn status(&self) -> String {
-        let what = if self.connected { "CONNECTEE" } else { "DECONNECTEE" };
-        format!("MANETTE {} {what}", self.player + 1)
+    pub fn status(&self, lang: Lang) -> String {
+        crate::i18n::status_pad(lang, self.player + 1, self.connected)
     }
 }
 
@@ -910,16 +912,20 @@ mod tests {
     #[test]
     fn hot_plug_notices_are_written_for_the_overlay_font() {
         let plugged = PadNotice { player: 0, connected: true, name: "Pad".to_string() };
-        assert_eq!(plugged.status(), "MANETTE 1 CONNECTEE");
+        assert_eq!(plugged.status(Lang::Fr), "MANETTE 1 CONNECTEE");
+        assert_eq!(plugged.status(Lang::En), "CONTROLLER 1 CONNECTED");
         let gone = PadNotice { player: 1, connected: false, name: "Pad".to_string() };
-        assert_eq!(gone.status(), "MANETTE 2 DECONNECTEE");
+        assert_eq!(gone.status(Lang::Fr), "MANETTE 2 DECONNECTEE");
+        assert_eq!(gone.status(Lang::En), "CONTROLLER 2 DISCONNECTED");
         // The overlay font is uppercase, unaccented ASCII only.
         for notice in [plugged, gone] {
-            let text = notice.status();
-            assert!(
-                text.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == ' '),
-                "{text:?} cannot be drawn by the overlay font"
-            );
+            for lang in Lang::ALL {
+                let text = notice.status(lang);
+                assert!(
+                    text.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == ' '),
+                    "{text:?} cannot be drawn by the overlay font"
+                );
+            }
         }
     }
 
@@ -950,7 +956,9 @@ mod tests {
             assert_eq!(name, format!("{button:?}"), "stored name must be the gilrs one");
             assert_eq!(pad_button_name(button), name);
             assert_eq!(pad_button_from_name(name), Some(button));
-            assert!(!pad_label(button).is_empty());
+            for lang in Lang::ALL {
+                assert!(!pad_label(lang, button).is_empty());
+            }
         }
         // Every default binding names a button the preferences can store.
         for &(_, button) in DEFAULT_PAD_MAP {
@@ -1055,7 +1063,7 @@ mod tests {
         let mut map = no_map();
         map.insert("X".to_string(), "South".to_string());
         assert_eq!(resolve_button(&map, Button::South), Some("X"));
-        assert_eq!(binding_label(&map, "B"), "—", "B's claim is masked by X");
+        assert_eq!(binding_label(Lang::Fr, &map, "B"), "—", "B's claim is masked by X");
 
         assert_eq!(
             bind_button(&mut map, "B", Button::South),
@@ -1065,8 +1073,8 @@ mod tests {
         assert_eq!(map.get("X"), None, "X goes back to its built-in button");
         assert_eq!(resolve_button(&map, Button::South), Some("B"));
         assert_eq!(resolve_button(&map, Button::North), Some("X"));
-        assert_eq!(binding_label(&map, "B"), pad_label(Button::South));
-        assert_eq!(binding_label(&map, "X"), pad_label(Button::North));
+        assert_eq!(binding_label(Lang::Fr, &map, "B"), pad_label(Lang::Fr, Button::South));
+        assert_eq!(binding_label(Lang::Fr, &map, "X"), pad_label(Lang::Fr, Button::North));
         // The console really sees B now, and nothing else.
         let mut state = PadState::default();
         press(&mut state, Button::South);
@@ -1105,13 +1113,13 @@ mod tests {
     #[test]
     fn the_binding_label_names_every_button_that_drives_it() {
         let map = no_map();
-        assert_eq!(binding_label(&map, "A"), pad_label(Button::East));
+        assert_eq!(binding_label(Lang::Fr, &map, "A"), pad_label(Lang::Fr, Button::East));
         assert_eq!(
-            binding_label(&map, "R"),
-            format!("{} / {}", pad_label(Button::RightTrigger), pad_label(Button::RightTrigger2))
+            binding_label(Lang::Fr, &map, "R"),
+            format!("{} / {}", pad_label(Lang::Fr, Button::RightTrigger), pad_label(Lang::Fr, Button::RightTrigger2))
         );
         for name in input::BUTTONS {
-            assert_ne!(binding_label(&map, name), "—", "{name} has no default binding");
+            assert_ne!(binding_label(Lang::Fr, &map, name), "—", "{name} has no default binding");
         }
     }
 }

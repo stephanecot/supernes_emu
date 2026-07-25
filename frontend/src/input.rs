@@ -21,6 +21,8 @@ use std::collections::BTreeMap;
 use snes_core::JoypadState;
 use winit::keyboard::KeyCode;
 
+use crate::i18n::{self, Lang, Msg};
+
 /// Built-in button -> physical key mapping. Physical keys are
 /// layout-independent scancode positions, so the mapping stays put on
 /// non-QWERTY layouts. Button names are the ones the `--script` contract uses.
@@ -178,77 +180,82 @@ pub fn bind_key(
 /// reach the console: the capture refuses them instead of accepting a binding
 /// that does nothing. Escape is not listed — it is what cancels a capture, so
 /// it can never be assigned in the first place.
-pub const RESERVED_KEYS: &[(KeyCode, &str)] = &[
-    (KeyCode::Tab, "accéléré"),
-    (KeyCode::KeyM, "muet"),
-    (KeyCode::KeyP, "pause"),
-    (KeyCode::KeyN, "image suivante"),
-    (KeyCode::KeyO, "ouvrir une ROM"),
-    (KeyCode::KeyC, "confirmation avant de quitter"),
-    (KeyCode::KeyF, "compteur d'images"),
-    (KeyCode::KeyV, "filtre"),
-    (KeyCode::KeyR, "ratio"),
-    (KeyCode::Comma, "réglages"),
-    (KeyCode::Equal, "volume +"),
-    (KeyCode::NumpadAdd, "volume +"),
-    (KeyCode::Minus, "volume -"),
-    (KeyCode::NumpadSubtract, "volume -"),
-    (KeyCode::BracketLeft, "facteur d'accéléré"),
-    (KeyCode::BracketRight, "facteur d'accéléré"),
-    (KeyCode::F1, "taille de la fenêtre"),
-    (KeyCode::F2, "taille de la fenêtre"),
-    (KeyCode::F3, "taille de la fenêtre"),
-    (KeyCode::F4, "taille de la fenêtre"),
-    (KeyCode::F5, "sauvegarder l'état"),
-    (KeyCode::F6, "réinitialiser la console"),
-    (KeyCode::F7, "slot suivant"),
-    (KeyCode::F8, "exporter la musique"),
-    (KeyCode::F9, "charger l'état"),
-    (KeyCode::F10, "reprise instantanée"),
-    (KeyCode::F11, "plein écran"),
-    (KeyCode::F12, "capture d'écran"),
-    (KeyCode::Digit0, "slot de sauvegarde"),
-    (KeyCode::Digit1, "slot de sauvegarde"),
-    (KeyCode::Digit2, "slot de sauvegarde"),
-    (KeyCode::Digit3, "slot de sauvegarde"),
-    (KeyCode::Digit4, "slot de sauvegarde"),
-    (KeyCode::Digit5, "slot de sauvegarde"),
-    (KeyCode::Digit6, "slot de sauvegarde"),
-    (KeyCode::Digit7, "slot de sauvegarde"),
-    (KeyCode::Digit8, "slot de sauvegarde"),
-    (KeyCode::Digit9, "slot de sauvegarde"),
+pub const RESERVED_KEYS: &[(KeyCode, Msg)] = &[
+    (KeyCode::Tab, Msg::HotkeyFastForward),
+    (KeyCode::KeyM, Msg::HotkeyMute),
+    (KeyCode::KeyP, Msg::HotkeyPause),
+    (KeyCode::KeyN, Msg::HotkeyNextFrame),
+    (KeyCode::KeyO, Msg::HotkeyOpenRom),
+    (KeyCode::KeyC, Msg::HotkeyConfirmQuit),
+    (KeyCode::KeyF, Msg::HotkeyFrameCounter),
+    (KeyCode::KeyV, Msg::HotkeyFilter),
+    (KeyCode::KeyR, Msg::HotkeyAspect),
+    (KeyCode::Comma, Msg::HotkeySettings),
+    (KeyCode::Equal, Msg::HotkeyVolumeUp),
+    (KeyCode::NumpadAdd, Msg::HotkeyVolumeUp),
+    (KeyCode::Minus, Msg::HotkeyVolumeDown),
+    (KeyCode::NumpadSubtract, Msg::HotkeyVolumeDown),
+    (KeyCode::BracketLeft, Msg::HotkeyFastForwardFactor),
+    (KeyCode::BracketRight, Msg::HotkeyFastForwardFactor),
+    (KeyCode::F1, Msg::HotkeyWindowSize),
+    (KeyCode::F2, Msg::HotkeyWindowSize),
+    (KeyCode::F3, Msg::HotkeyWindowSize),
+    (KeyCode::F4, Msg::HotkeyWindowSize),
+    (KeyCode::F5, Msg::HotkeySaveState),
+    (KeyCode::F6, Msg::HotkeyReset),
+    (KeyCode::F7, Msg::HotkeyNextSlot),
+    (KeyCode::F8, Msg::HotkeyExportSpc),
+    (KeyCode::F9, Msg::HotkeyLoadState),
+    (KeyCode::F10, Msg::HotkeyInstantResume),
+    (KeyCode::F11, Msg::HotkeyFullscreen),
+    (KeyCode::F12, Msg::HotkeyScreenshot),
+    (KeyCode::Digit0, Msg::HotkeySaveSlot),
+    (KeyCode::Digit1, Msg::HotkeySaveSlot),
+    (KeyCode::Digit2, Msg::HotkeySaveSlot),
+    (KeyCode::Digit3, Msg::HotkeySaveSlot),
+    (KeyCode::Digit4, Msg::HotkeySaveSlot),
+    (KeyCode::Digit5, Msg::HotkeySaveSlot),
+    (KeyCode::Digit6, Msg::HotkeySaveSlot),
+    (KeyCode::Digit7, Msg::HotkeySaveSlot),
+    (KeyCode::Digit8, Msg::HotkeySaveSlot),
+    (KeyCode::Digit9, Msg::HotkeySaveSlot),
 ];
 
 /// The application function `key` already triggers, or `None` when the key is
 /// free for a pad binding.
-pub fn reserved_for(key: KeyCode) -> Option<&'static str> {
+pub fn reserved_for(key: KeyCode) -> Option<Msg> {
     RESERVED_KEYS.iter().find(|&&(code, _)| code == key).map(|&(_, what)| what)
 }
 
-/// Human-readable name of a physical key, for the bindings list. Physical keys
-/// are scancode positions, so what is drawn is the *US* legend of that
-/// position — the same convention the built-in mapping is documented with.
+/// Name of a physical key, for the bindings list.
+///
+/// **Never translated.** A key name is the legend printed on the key, in the
+/// same category as the pad's own letters: a French interface shows `Enter` and
+/// `Right Shift` because that is what the player reads on the keyboard in front
+/// of them, not `Entrée` and `Maj droite`. Physical keys are scancode
+/// positions, so what is drawn is the *US* legend of that position — the
+/// convention the built-in mapping is documented with.
 pub fn key_label(key: KeyCode) -> String {
     let named = match key {
-        KeyCode::ArrowUp => "Flèche haut",
-        KeyCode::ArrowDown => "Flèche bas",
-        KeyCode::ArrowLeft => "Flèche gauche",
-        KeyCode::ArrowRight => "Flèche droite",
-        KeyCode::Enter => "Entrée",
-        KeyCode::NumpadEnter => "Entrée (pavé)",
-        KeyCode::Space => "Espace",
-        KeyCode::Backspace => "Retour arrière",
-        KeyCode::ShiftLeft => "Maj gauche",
-        KeyCode::ShiftRight => "Maj droite",
-        KeyCode::ControlLeft => "Ctrl gauche",
-        KeyCode::ControlRight => "Ctrl droite",
-        KeyCode::AltLeft => "Alt gauche",
-        KeyCode::AltRight => "Alt droite",
-        KeyCode::SuperLeft => "Cmd gauche",
-        KeyCode::SuperRight => "Cmd droite",
-        KeyCode::CapsLock => "Verr. maj",
+        KeyCode::ArrowUp => "Arrow Up",
+        KeyCode::ArrowDown => "Arrow Down",
+        KeyCode::ArrowLeft => "Arrow Left",
+        KeyCode::ArrowRight => "Arrow Right",
+        KeyCode::Enter => "Enter",
+        KeyCode::NumpadEnter => "Numpad Enter",
+        KeyCode::Space => "Space",
+        KeyCode::Backspace => "Backspace",
+        KeyCode::ShiftLeft => "Left Shift",
+        KeyCode::ShiftRight => "Right Shift",
+        KeyCode::ControlLeft => "Left Ctrl",
+        KeyCode::ControlRight => "Right Ctrl",
+        KeyCode::AltLeft => "Left Alt",
+        KeyCode::AltRight => "Right Alt",
+        KeyCode::SuperLeft => "Left Cmd",
+        KeyCode::SuperRight => "Right Cmd",
+        KeyCode::CapsLock => "Caps Lock",
         KeyCode::Tab => "Tab",
-        KeyCode::Escape => "Échap",
+        KeyCode::Escape => "Esc",
         _ => "",
     };
     if !named.is_empty() {
@@ -264,7 +271,7 @@ pub fn key_label(key: KeyCode) -> String {
         }
     }
     if let Some(rest) = raw.strip_prefix("Numpad") {
-        return format!("Pavé {rest}");
+        return format!("Numpad {rest}");
     }
     raw
 }
@@ -287,7 +294,7 @@ pub enum Captured {
     Cancelled,
     /// The key drives an application function (`RESERVED_KEYS`) and was
     /// refused; the capture stays pending so another key can be pressed.
-    Reserved(&'static str),
+    Reserved(Msg),
     /// Assign `key` to `button`.
     Key { button: &'static str, key: KeyCode },
 }
@@ -338,8 +345,9 @@ impl Capture {
         self.pending = None;
     }
 
-    /// Feed one key press to the capture.
-    pub fn on_key(&mut self, key: KeyCode) -> Captured {
+    /// Feed one key press to the capture. `lang` is only needed for the notice
+    /// a refusal writes, which is prose and therefore has a language.
+    pub fn on_key(&mut self, lang: Lang, key: KeyCode) -> Captured {
         let Some((button, device)) = self.pending else { return Captured::Ignored };
         if key == KeyCode::Escape {
             self.pending = None;
@@ -352,10 +360,8 @@ impl Capture {
             return Captured::Ignored;
         }
         if let Some(what) = reserved_for(key) {
-            self.notice = Some(format!(
-                "{} est déjà un raccourci de l'application ({what}).",
-                key_label(key)
-            ));
+            self.notice =
+                Some(i18n::key_is_reserved(lang, &key_label(key), what.text(lang)));
             return Captured::Reserved(what);
         }
         self.pending = None;
@@ -592,28 +598,59 @@ mod tests {
         for &(name, code) in DEFAULT_KEYMAP {
             assert_eq!(reserved_for(code), None, "default key of {name} is a shortcut");
         }
-        assert_eq!(reserved_for(KeyCode::F11), Some("plein écran"));
-        assert_eq!(reserved_for(KeyCode::Tab), Some("accéléré"));
-        assert_eq!(reserved_for(KeyCode::Digit7), Some("slot de sauvegarde"));
+        assert_eq!(reserved_for(KeyCode::F11), Some(Msg::HotkeyFullscreen));
+        assert_eq!(reserved_for(KeyCode::Tab), Some(Msg::HotkeyFastForward));
+        assert_eq!(reserved_for(KeyCode::Digit7), Some(Msg::HotkeySaveSlot));
         assert_eq!(reserved_for(KeyCode::Space), None);
         // Escape is deliberately absent: it is what cancels a capture, so it
         // can never reach the reserved check.
         assert_eq!(reserved_for(KeyCode::Escape), None);
     }
 
+    /// A key name is what is printed on the key, so it is English on both
+    /// sides of the language setting — like the pad's own letters, and unlike
+    /// every label around it.
     #[test]
     fn key_labels_read_as_the_key_and_never_as_a_winit_variant() {
         assert_eq!(key_label(KeyCode::KeyZ), "Z");
         assert_eq!(key_label(KeyCode::Digit4), "4");
-        assert_eq!(key_label(KeyCode::Enter), "Entrée");
-        assert_eq!(key_label(KeyCode::ShiftRight), "Maj droite");
-        assert_eq!(key_label(KeyCode::ArrowUp), "Flèche haut");
-        assert_eq!(key_label(KeyCode::Numpad7), "Pavé 7");
-        // Anything without a French name keeps winit's own, which is still
+        assert_eq!(key_label(KeyCode::Enter), "Enter");
+        assert_eq!(key_label(KeyCode::ShiftRight), "Right Shift");
+        assert_eq!(key_label(KeyCode::ArrowUp), "Arrow Up");
+        assert_eq!(key_label(KeyCode::Numpad7), "Numpad 7");
+        // Anything without a name of its own keeps winit's, which is still
         // readable, rather than showing nothing.
         assert_eq!(key_label(KeyCode::Semicolon), "Semicolon");
         for &(_, code) in DEFAULT_KEYMAP {
             assert!(!key_label(code).is_empty());
+        }
+        // Not a single accented character anywhere in the table: that is what
+        // "never translated" means here, and a French name creeping back in
+        // would only be seen on a screenshot otherwise.
+        for key in [
+            KeyCode::ArrowUp,
+            KeyCode::ArrowDown,
+            KeyCode::ArrowLeft,
+            KeyCode::ArrowRight,
+            KeyCode::Enter,
+            KeyCode::NumpadEnter,
+            KeyCode::Space,
+            KeyCode::Backspace,
+            KeyCode::ShiftLeft,
+            KeyCode::ShiftRight,
+            KeyCode::ControlLeft,
+            KeyCode::ControlRight,
+            KeyCode::AltLeft,
+            KeyCode::AltRight,
+            KeyCode::SuperLeft,
+            KeyCode::SuperRight,
+            KeyCode::CapsLock,
+            KeyCode::Tab,
+            KeyCode::Escape,
+            KeyCode::Numpad7,
+        ] {
+            let label = key_label(key);
+            assert!(label.is_ascii(), "{label} is not the key's own legend");
         }
     }
 
@@ -626,7 +663,7 @@ mod tests {
         assert_eq!(capture.notice, None);
         // A key arriving while nothing is captured is not swallowed.
         let mut capture = Capture::default();
-        assert_eq!(capture.on_key(KeyCode::KeyZ), Captured::Ignored);
+        assert_eq!(capture.on_key(Lang::Fr, KeyCode::KeyZ), Captured::Ignored);
         assert_eq!(capture.take_gamepad(), None);
     }
 
@@ -638,12 +675,12 @@ mod tests {
         assert_eq!(capture.waiting_for(Device::Keyboard), Some("A"));
         assert_eq!(capture.waiting_for(Device::Gamepad), None);
         assert_eq!(
-            capture.on_key(KeyCode::Space),
+            capture.on_key(Lang::Fr, KeyCode::Space),
             Captured::Key { button: "A", key: KeyCode::Space }
         );
         assert!(!capture.is_active(), "the capture ends on the first key");
         // The next key is no longer swallowed.
-        assert_eq!(capture.on_key(KeyCode::KeyZ), Captured::Ignored);
+        assert_eq!(capture.on_key(Lang::Fr, KeyCode::KeyZ), Captured::Ignored);
     }
 
     #[test]
@@ -652,7 +689,7 @@ mod tests {
             let mut capture = Capture::default();
             capture.start("Start", device);
             capture.notice = Some("…".to_string());
-            assert_eq!(capture.on_key(KeyCode::Escape), Captured::Cancelled);
+            assert_eq!(capture.on_key(Lang::Fr, KeyCode::Escape), Captured::Cancelled);
             assert!(!capture.is_active());
             assert_eq!(capture.notice, None);
         }
@@ -666,13 +703,13 @@ mod tests {
     fn a_shortcut_key_is_refused_and_the_capture_stays_open() {
         let mut capture = Capture::default();
         capture.start("A", Device::Keyboard);
-        assert_eq!(capture.on_key(KeyCode::F11), Captured::Reserved("plein écran"));
+        assert_eq!(capture.on_key(Lang::Fr, KeyCode::F11), Captured::Reserved(Msg::HotkeyFullscreen));
         assert!(capture.is_active(), "the player must be able to press another key");
         let notice = capture.notice.clone().expect("a refusal must be explained");
-        assert!(notice.contains("plein écran"), "{notice}");
+        assert!(notice.contains(Msg::HotkeyFullscreen.text(Lang::Fr)), "{notice}");
         // A free key still lands afterwards, and clears nothing behind it.
         assert_eq!(
-            capture.on_key(KeyCode::Space),
+            capture.on_key(Lang::Fr, KeyCode::Space),
             Captured::Key { button: "A", key: KeyCode::Space }
         );
     }
@@ -683,7 +720,7 @@ mod tests {
         capture.start("L", Device::Gamepad);
         assert_eq!(capture.waiting_for(Device::Gamepad), Some("L"));
         assert_eq!(capture.waiting_for(Device::Keyboard), None);
-        assert_eq!(capture.on_key(KeyCode::Space), Captured::Ignored);
+        assert_eq!(capture.on_key(Lang::Fr, KeyCode::Space), Captured::Ignored);
         assert!(capture.is_active(), "a stray key must not end a pad capture");
         assert_eq!(capture.take_gamepad(), Some("L"));
         assert!(!capture.is_active());

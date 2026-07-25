@@ -19,7 +19,7 @@ use super::theme;
 /// Side of an icon standing next to body text, in points.
 pub const SIZE: f32 = 15.0;
 /// Gap between an icon and the label that follows it.
-const GAP: f32 = 7.0;
+pub const GAP: f32 = 7.0;
 /// Stroke width as a fraction of the icon's side. One value for the whole set:
 /// that uniformity is what makes drawn icons read as a family.
 const STROKE_RATIO: f32 = 0.095;
@@ -55,7 +55,7 @@ impl Icon {
     /// the family's stroke weight and stays inside its box. Compiled in tests
     /// only — the screens name the icon they want.
     #[cfg(test)]
-    pub const ALL: [Icon; 9] = [
+    pub const ALL: [Icon; 10] = [
         Icon::Play,
         Icon::Star,
         Icon::StarFilled,
@@ -65,6 +65,7 @@ impl Icon {
         Icon::Search,
         Icon::Close,
         Icon::ArrowLeft,
+        Icon::Plus,
     ];
 
     /// Draw the icon inside `rect` in `color`. The drawing is inscribed in the
@@ -363,6 +364,32 @@ mod tests {
 
     /// Every icon must draw something at every size the shell uses it at — an
     /// icon that silently emitted nothing would leave a hole in a button.
+    #[test]
+    /// `ALL` is what every other test in this module walks, so an icon missing
+    /// from it is an icon nothing checks — which is exactly what happened when
+    /// `Plus` was added and the list was not. The match below is the guard: a
+    /// new variant stops compiling here until it is named, and the count then
+    /// forces it into `ALL` as well.
+    #[test]
+    fn no_icon_escapes_the_walked_set() {
+        let mut named = 0;
+        for icon in Icon::ALL {
+            match icon {
+                Icon::Play
+                | Icon::Star
+                | Icon::StarFilled
+                | Icon::Gear
+                | Icon::Folder
+                | Icon::Chip
+                | Icon::Search
+                | Icon::Close
+                | Icon::ArrowLeft
+                | Icon::Plus => named += 1,
+            }
+        }
+        assert_eq!(named, 10, "every icon named in the match must be listed in ALL");
+    }
+
     #[test]
     fn every_icon_draws_at_every_size_the_shell_uses() {
         for icon in Icon::ALL {

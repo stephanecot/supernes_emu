@@ -31,6 +31,7 @@
 use muda::accelerator::{Accelerator, Code, Modifiers, CMD_OR_CTRL};
 use muda::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 
+use crate::i18n::{self, Lang, Msg};
 use crate::APP_NAME;
 
 /// Stable ids for the items `video.rs` dispatches on after a
@@ -100,7 +101,7 @@ pub struct AppMenu {
 /// Takes no state: nothing here reflects a preference any more (see module
 /// docs), so there is no restored checkmark to feed in at construction time
 /// and no menu item that can fall out of step with `prefs.json`.
-pub fn install() -> AppMenu {
+pub fn install(lang: Lang) -> AppMenu {
     let menu_bar = Menu::new();
 
     // Application (leftmost) menu: AppKit titles it after the running
@@ -118,7 +119,7 @@ pub fn install() -> AppMenu {
     // which invokes AppKit's terminate: directly.
     let quit = MenuItem::with_id(
         QUIT_ID,
-        format!("Quitter {APP_NAME}"),
+        i18n::quit_named(lang, APP_NAME),
         true,
         Some(Accelerator::new(Some(CMD_OR_CTRL), Code::KeyQ)),
     );
@@ -126,28 +127,28 @@ pub fn install() -> AppMenu {
     // bare `,` hotkey in `video.rs` covers the other platforms.
     let settings = MenuItem::with_id(
         SETTINGS_ID,
-        "Réglages…",
+        Msg::MenuSettings.text(lang),
         true,
         Some(Accelerator::new(Some(CMD_OR_CTRL), Code::Comma)),
     );
     let _ = app_menu.append_items(&[&settings, &PredefinedMenuItem::separator(), &quit]);
     let _ = menu_bar.append(&app_menu);
 
-    let file_menu = Submenu::new("Fichier", true);
-    let home = MenuItem::with_id(HOME_ID, "Accueil (Échap)", true, None);
+    let file_menu = Submenu::new(Msg::MenuFile.text(lang), true);
+    let home = MenuItem::with_id(HOME_ID, Msg::MenuHome.text(lang), true, None);
     let open_rom = MenuItem::with_id(
         OPEN_ROM_ID,
-        "Ouvrir une ROM…",
+        Msg::OpenRom.text(lang),
         true,
         Some(Accelerator::new(Some(CMD_OR_CTRL), Code::KeyO)),
     );
     // No accelerator on these two: F12 is handled directly by `video.rs`, and
     // a menu accelerator would make AppKit swallow the key press and route it
     // here as a second, duplicate activation.
-    let screenshot = MenuItem::with_id(SCREENSHOT_ID, "Capture d'écran (F12)", true, None);
+    let screenshot = MenuItem::with_id(SCREENSHOT_ID, Msg::MenuScreenshot.text(lang), true, None);
     let export_spc =
-        MenuItem::with_id(EXPORT_SPC_ID, "Exporter la musique (.spc)…", true, None);
-    let quit_file = MenuItem::with_id(QUIT_ID, "Quitter", true, None);
+        MenuItem::with_id(EXPORT_SPC_ID, Msg::MenuExportSpc.text(lang), true, None);
+    let quit_file = MenuItem::with_id(QUIT_ID, Msg::Quit.text(lang), true, None);
     let _ = file_menu.append_items(&[
         &home,
         &open_rom,
@@ -159,16 +160,16 @@ pub fn install() -> AppMenu {
     ]);
     let _ = menu_bar.append(&file_menu);
 
-    let emulation_menu = Submenu::new("Émulation", true);
+    let emulation_menu = Submenu::new(Msg::SectionEmulation.text(lang), true);
     let pause_resume = MenuItem::with_id(
         PAUSE_RESUME_ID,
-        "Pause / Reprise",
+        Msg::MenuPauseResume.text(lang),
         true,
         Some(Accelerator::new(Some(CMD_OR_CTRL), Code::KeyP)),
     );
     let reset = MenuItem::with_id(
         RESET_ID,
-        "Réinitialiser",
+        Msg::MenuReset.text(lang),
         true,
         Some(Accelerator::new(Some(CMD_OR_CTRL), Code::KeyR)),
     );
@@ -177,17 +178,17 @@ pub fn install() -> AppMenu {
     // hotkeys in video.rs. Cmd+S / Cmd+L.
     let save_state = MenuItem::with_id(
         SAVE_STATE_ID,
-        "Sauvegarder l'état (F5)",
+        Msg::MenuSaveState.text(lang),
         true,
         Some(Accelerator::new(Some(CMD_OR_CTRL), Code::KeyS)),
     );
     let load_state = MenuItem::with_id(
         LOAD_STATE_ID,
-        "Charger l'état (F9)",
+        Msg::MenuLoadState.text(lang),
         true,
         Some(Accelerator::new(Some(CMD_OR_CTRL), Code::KeyL)),
     );
-    let next_slot = MenuItem::with_id(NEXT_SLOT_ID, "Slot suivant (F7)", true, None);
+    let next_slot = MenuItem::with_id(NEXT_SLOT_ID, Msg::MenuNextSlot.text(lang), true, None);
     let _ = emulation_menu.append_items(&[
         &pause_resume,
         &reset,
@@ -198,13 +199,13 @@ pub fn install() -> AppMenu {
     ]);
     let _ = menu_bar.append(&emulation_menu);
 
-    let view_menu = Submenu::new("Affichage", true);
+    let view_menu = Submenu::new(Msg::SectionDisplay.text(lang), true);
     // Ctrl+Cmd+F: macOS's own system convention for toggling fullscreen
     // (distinct from the bare F11 the `video.rs` hotkey also answers to,
     // which some Mac keyboards/OS versions reserve for Mission Control).
     let fullscreen = MenuItem::with_id(
         FULLSCREEN_ID,
-        "Plein écran (F11)",
+        Msg::MenuFullscreen.text(lang),
         true,
         Some(Accelerator::new(Some(Modifiers::SUPER | Modifiers::CONTROL), Code::KeyF)),
     );

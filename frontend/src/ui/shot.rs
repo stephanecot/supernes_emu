@@ -27,6 +27,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use egui_wgpu::wgpu;
 
+use crate::i18n::Lang;
 use crate::library::{GameEntry, StateFile};
 use crate::prefs::{GameStats, Prefs};
 
@@ -109,6 +110,26 @@ impl View {
     /// section, so a command line written before them keeps working.
     pub const ALIASES: [(&'static str, View); 1] =
         [("settings", View::Settings(Section::Display))];
+
+    /// Parse a `--ui-shot` argument: a view name, optionally suffixed with the
+    /// language to render it in (`settings-display@en`).
+    ///
+    /// The suffix rather than a flag of its own, because a capture is named by
+    /// what it shows and the language is part of that: the two halves of a
+    /// screen are two pictures, and a run that captures a dozen views in both
+    /// languages names each of them once.
+    pub fn parse_spec(spec: &str) -> Result<(View, Lang), String> {
+        let (name, lang) = match spec.split_once('@') {
+            Some((name, tag)) => (
+                name,
+                Lang::from_pref(tag).ok_or_else(|| {
+                    format!("unknown --ui-shot language: {tag} (fr, en)")
+                })?,
+            ),
+            None => (spec, Lang::default()),
+        };
+        Ok((Self::parse(name)?, lang))
+    }
 
     pub fn parse(name: &str) -> Result<View, String> {
         Self::ALL
@@ -237,9 +258,10 @@ fn pass_input(size: (u32, u32), pass: u32, pointer: Option<egui::Pos2>) -> egui:
     }
 }
 
-/// Render `view` at `size` points and write it to `out` as an RGBA PNG.
-pub fn capture(view: View, size: (u32, u32), out: &Path) -> Result<(), String> {
-    let mut fixture = Fixture::new(view)?;
+/// Render `view` at `size` points, in `lang`, and write it to `out` as an RGBA
+/// PNG.
+pub fn capture(view: View, lang: Lang, size: (u32, u32), out: &Path) -> Result<(), String> {
+    let mut fixture = Fixture::new(view, lang)?;
     let ctx = egui::Context::default();
     theme::apply(&ctx);
 
@@ -695,6 +717,7 @@ const SHEET_GAME: usize = 6;
 /// the PNGs it points at (deleted on drop).
 pub struct Fixture {
     view: View,
+    lang: Lang,
     dir: PathBuf,
     entries: Vec<GameEntry>,
     games: BTreeMap<String, GameStats>,
@@ -713,7 +736,7 @@ pub struct Fixture {
 }
 
 impl Fixture {
-    pub fn new(view: View) -> Result<Self, String> {
+    pub fn new(view: View, lang: Lang) -> Result<Self, String> {
         let serial = SCRATCH_SERIAL.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir()
             .join(format!("prisme-ui-shot-{}-{serial}", std::process::id()));
@@ -818,6 +841,7 @@ impl Fixture {
 
         Ok(Self {
             view,
+            lang,
             dir,
             entries,
             games,
@@ -844,7 +868,14 @@ impl Fixture {
                 ui
             },
             textures: TextureStore::new(),
-            prefs: Prefs::default(),
+            // The capture renders the language it was asked for, whatever the
+            // host is set to: an English screen must be reachable on a French
+            // machine, which is the only way the other half gets looked at.
+            prefs: {
+                let mut prefs = Prefs::default();
+                prefs.language = lang.as_pref().to_string();
+                prefs
+            },
             rom_dir,
             config_dir: PathBuf::from("/Users/vous/Library/Application Support/Prisme"),
         })
@@ -869,6 +900,7 @@ impl Fixture {
                     config_dir: Some(&self.config_dir),
                     pressed: self.view.held(),
                     state: &mut self.settings_ui,
+                    lang: self.lang,
                 },
             );
             return;
@@ -883,6 +915,7 @@ impl Fixture {
             &mut HomeModel {
                 app_name: crate::APP_NAME,
                 version: crate::VERSION,
+                lang: self.lang,
                 game_title: Some("SUPER MARIOWORLD"),
                 rom_path: Some(&self.entries[0].path),
                 library: LibraryModel {
@@ -893,6 +926,7 @@ impl Fixture {
                     pending,
                     state: &mut self.library_ui,
                     textures: &mut self.textures,
+                    lang: self.lang,
                 },
                 sheet: &self.sheet,
             },
@@ -967,6 +1001,17 @@ mod tests {
         }
         assert!(View::parse("Library").is_err(), "the names are case-sensitive");
         assert!(View::parse("grid").is_err());
+        // The language rides on the view name; without a suffix a capture is
+        // French, which is what every existing command line expects.
+        assert_eq!(View::parse_spec("library"), Ok((View::Library, Lang::Fr)));
+        assert_eq!(View::parse_spec("library@en"), Ok((View::Library, Lang::En)));
+        assert_eq!(
+            View::parse_spec("settings-display@fr"),
+            Ok((View::Settings(Section::Display), Lang::Fr))
+        );
+        assert!(View::parse_spec("library@de").is_err(), "an unspoken language is refused");
+        assert!(View::parse_spec("library@").is_err());
+        assert!(View::parse_spec("grid@en").is_err());
         for (name, view) in View::ALL {
             assert_eq!(view.name(), name);
         }
@@ -1042,8 +1087,13 @@ mod tests {
     /// would panic on a bad model.
     #[test]
     fn every_view_lays_out_headless() {
-        for (name, view) in View::ALL {
-            let mut fixture = Fixture::new(view).expect("fixture");
+        // Both languages: a capture that only lays out in French is a screen
+        // whose English half has never been built, let alone looked at.
+        for (name, view, lang) in View::ALL
+            .into_iter()
+            .flat_map(|(name, view)| Lang::ALL.map(|lang| (name, view, lang)))
+        {
+            let mut fixture = Fixture::new(view, lang).expect("fixture");
             let ctx = egui::Context::default();
             theme::apply(&ctx);
             let mut shapes = 0;
@@ -1055,14 +1105,14 @@ mod tests {
                 textures += output.textures_delta.set.len();
                 shapes = output.shapes.len();
             }
-            assert!(shapes > 0, "{name} drew nothing");
+            assert!(shapes > 0, "{name}@{lang} drew nothing");
             // The fixture's pictures are real PNGs on disk: they must decode
             // and reach the texture store, or the capture would show nothing
             // but placeholders. The empty view has no game and therefore no
             // picture — that is the point of it — and the settings view shows
             // no library at all.
             if view != View::Empty && view.settings_section().is_none() {
-                assert!(textures > 1, "{name} uploaded no picture ({textures} textures)");
+                assert!(textures > 1, "{name}@{lang} uploaded no picture ({textures} textures)");
             }
         }
     }
@@ -1071,7 +1121,10 @@ mod tests {
     /// must leave nothing behind, and two of them must never share a path.
     #[test]
     fn each_fixture_owns_its_scratch_directory_and_removes_it() {
-        let (a, b) = (Fixture::new(View::Library).unwrap(), Fixture::new(View::Library).unwrap());
+        let (a, b) = (
+            Fixture::new(View::Library, Lang::Fr).unwrap(),
+            Fixture::new(View::Library, Lang::En).unwrap(),
+        );
         assert_ne!(a.dir, b.dir);
         assert!(a.dir.is_dir() && b.dir.is_dir());
         let path = a.dir.clone();

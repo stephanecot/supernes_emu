@@ -21,6 +21,8 @@ use std::path::Path;
 
 use egui::{Align, Color32, Layout, RichText, Sense, Stroke, StrokeKind, Vec2};
 
+use crate::i18n::{self, Lang, Msg};
+
 use super::game_sheet::{self, SheetData, SheetModel};
 use super::icons::{self, Icon};
 use super::library_view::{self, LibraryModel};
@@ -33,6 +35,9 @@ use super::Action;
 pub struct HomeModel<'a> {
     pub app_name: &'a str,
     pub version: &'a str,
+    /// Language every string of the screen is rendered in, resolved by the
+    /// shell from `prefs.lang()` on each frame.
+    pub lang: Lang,
     /// Cartridge title of the suspended session, `None` when nothing is loaded.
     pub game_title: Option<&'a str>,
     /// Path of that cartridge, shown as the session chip's tooltip.
@@ -77,7 +82,7 @@ pub fn show(ctx: &egui::Context, model: &mut HomeModel) -> Action {
                 // (`app_state::escape_action`), and the line must not promise
                 // otherwise.
                 ui.label(
-                    RichText::new(footer_hint(model.has_session()))
+                    RichText::new(footer_hint(model.lang, model.has_session()))
                         .size(theme::SIZE_SMALL)
                         .color(theme::TEXT_DIM),
                 );
@@ -106,7 +111,7 @@ pub fn show(ctx: &egui::Context, model: &mut HomeModel) -> Action {
             // The rule marks the library view being shown. `Réglages` is never
             // active here: it is a screen of its own (`ui::settings`), which
             // draws the same bar with the rule under its own entry.
-            if let Some(tab) = tabs::show(ui, model.library.state.tab) {
+            if let Some(tab) = tabs::show(ui, model.library.state.tab, model.lang) {
                 if tab.is_view() {
                     model.library.state.tab = tab;
                     // Switching tab leaves whatever sheet was open: the sheet
@@ -150,6 +155,7 @@ fn library(ui: &mut egui::Ui, model: &mut HomeModel) -> Action {
                 textures: model.library.textures,
                 selected: &mut model.library.state.selected,
                 confirm_delete: &mut model.library.state.confirm_delete,
+                lang: model.lang,
             };
             return game_sheet::show(ui, &mut sheet);
         }
@@ -169,20 +175,20 @@ fn header(ui: &mut egui::Ui, model: &HomeModel) -> Option<Action> {
         ui.label(RichText::new("Prisme").font(theme::strong(theme::SIZE_TITLE)).color(theme::TEXT));
         ui.add_space(8.0);
         ui.label(
-            RichText::new("Émulateur Super Nintendo")
+            RichText::new(Msg::AppTagline.text(model.lang))
                 .font(theme::font(theme::SIZE_SMALL))
                 .color(theme::TEXT_DIM),
         );
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if ui.button("Quitter").clicked() {
+            if ui.button(Msg::Quit.text(model.lang)).clicked() {
                 action = Some(Action::Quit);
             }
-            if icons::primary_button(ui, Icon::Folder, "Ouvrir une ROM…").clicked() {
+            if icons::primary_button(ui, Icon::Folder, Msg::OpenRom.text(model.lang)).clicked() {
                 action = Some(Action::PickRom);
             }
             if let Some(title) = model.game_title {
-                if session_chip(ui, title, model.rom_path).clicked() {
+                if session_chip(ui, title, model.rom_path, model.lang).clicked() {
                     action = Some(Action::ResumeGame);
                 }
             }
@@ -193,8 +199,13 @@ fn header(ui: &mut egui::Ui, model: &HomeModel) -> Option<Action> {
 
 /// The suspended session, as a chip on the header line: green means "running"
 /// everywhere in the shell, and clicking it goes back into the game.
-fn session_chip(ui: &mut egui::Ui, title: &str, path: Option<&Path>) -> egui::Response {
-    let label = format!("Reprendre · {}", elide(title, SESSION_TITLE_MAX_CHARS));
+fn session_chip(
+    ui: &mut egui::Ui,
+    title: &str,
+    path: Option<&Path>,
+    lang: Lang,
+) -> egui::Response {
+    let label = i18n::resume_chip(lang, &elide(title, SESSION_TITLE_MAX_CHARS));
     let galley = ui.painter().layout_no_wrap(
         label,
         theme::font(theme::SIZE_BUTTON),
@@ -233,12 +244,8 @@ fn session_chip(ui: &mut egui::Ui, title: &str, path: Option<&Path>) -> egui::Re
 
 /// The keyboard line of the footer. What Escape does depends on whether a
 /// cartridge is loaded, so the line does too.
-pub fn footer_hint(has_session: bool) -> &'static str {
-    if has_session {
-        "Échap : revenir au jeu · O : ouvrir une ROM · , : réglages"
-    } else {
-        "O : ouvrir une ROM · , : réglages · Échap : quitter"
-    }
+pub fn footer_hint(lang: Lang, has_session: bool) -> &'static str {
+    i18n::escape_hint(lang, has_session)
 }
 
 /// Accent-filled call to action with no icon, distinct from the neutral
@@ -301,13 +308,19 @@ mod tests {
 
     #[test]
     fn the_footer_line_matches_what_escape_actually_does() {
-        assert!(footer_hint(true).contains("revenir au jeu"));
-        assert!(footer_hint(false).contains("quitter"));
-        assert_ne!(footer_hint(true), footer_hint(false));
+        assert!(footer_hint(Lang::Fr, true).contains("revenir au jeu"));
+        assert!(footer_hint(Lang::Fr, false).contains("quitter"));
+        assert_ne!(footer_hint(Lang::Fr, true), footer_hint(Lang::Fr, false));
         // Both name the two other shortcuts of the screen.
-        for line in [footer_hint(true), footer_hint(false)] {
+        for line in [footer_hint(Lang::Fr, true), footer_hint(Lang::Fr, false)] {
             assert!(line.contains("ouvrir une ROM"), "{line}");
             assert!(line.contains("réglages"), "{line}");
+        }
+        assert!(footer_hint(Lang::En, true).contains("back to the game"));
+        assert!(footer_hint(Lang::En, false).contains("quit"));
+        for line in [footer_hint(Lang::En, true), footer_hint(Lang::En, false)] {
+            assert!(line.contains("open a ROM"), "{line}");
+            assert!(line.contains("settings"), "{line}");
         }
     }
 
@@ -365,6 +378,7 @@ mod tests {
         game_title: Option<&str>,
         state: &mut super::super::library_view::LibraryUi,
         size: egui::Vec2,
+        lang: Lang,
     ) -> (Action, String) {
         let entries: Vec<crate::library::GameEntry> = Vec::new();
         let games = std::collections::BTreeMap::new();
@@ -385,6 +399,7 @@ mod tests {
                 &mut HomeModel {
                     app_name: "Prisme",
                     version: "0.0.0",
+                    lang,
                     game_title,
                     rom_path: None,
                     library: LibraryModel {
@@ -395,6 +410,7 @@ mod tests {
                         pending: &pending,
                         state,
                         textures: &mut textures,
+                        lang,
                     },
                     sheet: &sheet,
                 },
@@ -421,16 +437,22 @@ mod tests {
     /// panel when no cartridge is running, so both must actually be painted.
     #[test]
     fn the_home_screen_offers_the_tabs_and_the_global_actions() {
-        let mut state = super::super::library_view::LibraryUi::default();
-        let (produced, text) = draw(None, &mut state, egui::vec2(1024.0, 896.0));
-        assert_eq!(produced, Action::None, "drawing alone must ask for nothing");
-        for tab in Tab::ALL {
-            assert!(text.contains(tab.label()), "tab {:?} is missing: {text}", tab.label());
+        for lang in Lang::ALL {
+            let mut state = super::super::library_view::LibraryUi::default();
+            let (produced, text) = draw(None, &mut state, egui::vec2(1024.0, 896.0), lang);
+            assert_eq!(produced, Action::None, "drawing alone must ask for nothing");
+            for tab in Tab::ALL {
+                assert!(
+                    text.contains(tab.label(lang)),
+                    "tab {:?} is missing: {text}",
+                    tab.label(lang)
+                );
+            }
+            assert!(text.contains(Msg::OpenRom.text(lang)), "{text}");
+            assert!(text.contains(Msg::Quit.text(lang)), "{text}");
+            // No cartridge: no session chip.
+            assert!(!text.contains(" · SUPER"), "{text}");
         }
-        assert!(text.contains("Ouvrir une ROM…"), "{text}");
-        assert!(text.contains("Quitter"), "{text}");
-        // No cartridge: no session chip.
-        assert!(!text.contains("Reprendre ·"), "{text}");
     }
 
     /// A suspended session is shown as one chip on the header line, not as a
@@ -438,8 +460,13 @@ mod tests {
     #[test]
     fn a_suspended_session_is_offered_on_the_header_line() {
         let mut state = super::super::library_view::LibraryUi::default();
-        let (_, text) = draw(Some("SUPER MARIOWORLD"), &mut state, egui::vec2(1024.0, 896.0));
+        let (_, text) =
+            draw(Some("SUPER MARIOWORLD"), &mut state, egui::vec2(1024.0, 896.0), Lang::Fr);
         assert!(text.contains("Reprendre · SUPER MARIOWORLD"), "{text}");
+        let mut state = super::super::library_view::LibraryUi::default();
+        let (_, text) =
+            draw(Some("SUPER MARIOWORLD"), &mut state, egui::vec2(1024.0, 896.0), Lang::En);
+        assert!(text.contains("Resume · SUPER MARIOWORLD"), "{text}");
     }
 
     /// The chrome above the first card is what the brief measured at 53 % of
@@ -468,6 +495,7 @@ mod tests {
         let mut m = HomeModel {
             app_name: "Prisme",
             version: "0.0.0",
+            lang: Lang::Fr,
             game_title: None,
             rom_path: None,
             library: LibraryModel {
@@ -478,6 +506,7 @@ mod tests {
                 pending: &pending,
                 state: &mut state,
                 textures: &mut textures,
+                lang: Lang::Fr,
             },
             sheet: &sheet,
         };

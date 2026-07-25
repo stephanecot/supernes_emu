@@ -26,6 +26,10 @@ pub enum Screen {
 /// values into `prefs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Setting {
+    /// Interface language, or `None` to follow the host's
+    /// (`i18n::system_lang`). Applied on the next frame — the shell is rebuilt
+    /// from `prefs` every time, so there is nothing to restart.
+    Language(Option<crate::i18n::Lang>),
     /// Window size step of `ui::settings::ZOOM_CHOICES`, 1..=5.
     Zoom(u8),
     Filter(crate::render::Filter),

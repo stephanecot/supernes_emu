@@ -11,12 +11,14 @@
 
 use egui::{Align, Layout, RichText};
 
+use crate::i18n::{self, Lang, Msg};
+
 use super::theme;
 use super::Action;
 
 /// Draw the modal over whichever screen owns the window and return what the
 /// player answered. `Action::None` while they have not answered.
-pub fn show(ctx: &egui::Context, app_name: &str) -> Action {
+pub fn show(ctx: &egui::Context, app_name: &str, lang: Lang) -> Action {
     let mut action = Action::None;
     let response = egui::Modal::new(egui::Id::new("prisme-quit-confirm"))
         .backdrop_color(theme::VEIL)
@@ -30,23 +32,23 @@ pub fn show(ctx: &egui::Context, app_name: &str) -> Action {
         .show(ctx, |ui| {
             ui.set_max_width(380.0);
             ui.label(
-                RichText::new(title(app_name))
+                RichText::new(title(app_name, lang))
                     .font(theme::strong(theme::SIZE_HEADING))
                     .color(theme::TEXT),
             );
             ui.add_space(8.0);
             ui.label(
-                RichText::new(DESCRIPTION)
+                RichText::new(Msg::QuitPromise.text(lang))
                     .font(theme::font(theme::SIZE_BODY))
                     .color(theme::TEXT_DIM),
             );
             ui.add_space(14.0);
             ui.horizontal(|ui| {
-                if ui.button("Annuler (Échap)").clicked() {
+                if ui.button(Msg::CancelEsc.text(lang)).clicked() {
                     action = Action::CancelQuit;
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if super::home::primary_button(ui, "Quitter (Entrée)").clicked() {
+                    if super::home::primary_button(ui, Msg::QuitEnter.text(lang)).clicked() {
                         action = Action::ConfirmQuit;
                     }
                 });
@@ -60,13 +62,11 @@ pub fn show(ctx: &egui::Context, app_name: &str) -> Action {
     action
 }
 
-/// What the modal promises before it lets the process go; the battery save is
-/// written by `video::App::persist_all` on the way out.
-const DESCRIPTION: &str =
-    "La sauvegarde de la cartouche et l'état de session seront écrits avant de quitter.";
-
-pub fn title(app_name: &str) -> String {
-    format!("Quitter {app_name} ?")
+/// What the modal asks, named after the application it is about
+/// (`Msg::QuitPromise` is what it promises: the battery save is written by
+/// `video::App::persist_all` on the way out).
+pub fn title(app_name: &str, lang: Lang) -> String {
+    i18n::quit_app(lang, app_name)
 }
 
 #[cfg(test)]
@@ -105,7 +105,7 @@ mod tests {
         // pass lays out and a later one paints.
         for _ in 0..3 {
             output = ctx.run(input.clone(), |ctx| {
-                produced = show(ctx, "Prisme");
+                produced = show(ctx, "Prisme", Lang::Fr);
             });
         }
         assert_eq!(produced, Action::None, "drawing alone must answer nothing");
@@ -119,7 +119,8 @@ mod tests {
 
     #[test]
     fn the_title_carries_the_product_name() {
-        assert_eq!(title("Prisme"), "Quitter Prisme ?");
-        assert_ne!(title("Prisme"), title("Autre"));
+        assert_eq!(title("Prisme", Lang::Fr), "Quitter Prisme ?");
+        assert_eq!(title("Prisme", Lang::En), "Quit Prisme?");
+        assert_ne!(title("Prisme", Lang::Fr), title("Autre", Lang::Fr));
     }
 }
