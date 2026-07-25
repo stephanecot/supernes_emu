@@ -322,7 +322,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut LibraryModel) -> Action {
                     if hit.favorite {
                         action = Action::ToggleFavorite(entry.id.clone());
                     } else if hit.play {
-                        action = Action::Launch(entry.path.clone());
+                        action = Action::Launch { path: entry.path.clone(), resume: true };
                     } else if hit.open {
                         model.state.selected = Some(entry.id.clone());
                     }

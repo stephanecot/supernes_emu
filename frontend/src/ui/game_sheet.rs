@@ -60,6 +60,13 @@ const TITLE_ROWS: usize = 2;
 /// reading width, and a wider window gives it margins instead of longer lines.
 const SHEET_MAX_W: f32 = 1040.0;
 
+/// Tooltip of the `Reprendre` button: when the session it would pick up was
+/// left. A date rather than "a session exists" — the useful question is
+/// whether it is the one they remember.
+fn resume_hover(lang: crate::i18n::Lang, resume: &StateFile) -> String {
+    crate::i18n::resume_from(lang, &library::format_date(lang, resume.modified))
+}
+
 /// Run `body` inside the sheet's reading column: at most `SHEET_MAX_W` points,
 /// centred in whatever the window affords.
 fn column<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
@@ -91,6 +98,15 @@ pub struct SheetData {
     pub id: String,
     pub states: Vec<StateFile>,
     pub screenshots: Vec<PathBuf>,
+}
+
+impl SheetData {
+    /// The automatic session state, if this game has one. `StateFile::slot` is
+    /// `None` for exactly that file, so the list already carries it and no
+    /// second listing of the directory is needed.
+    pub fn resume(&self) -> Option<&StateFile> {
+        self.states.iter().find(|s| s.slot.is_none())
+    }
 }
 
 /// Everything the sheet draws, borrowed for one UI frame.
@@ -186,10 +202,32 @@ pub fn show(ui: &mut egui::Ui, model: &mut SheetModel) -> Action {
                                 {
                                     action = Action::ForgetGame(entry.path.clone());
                                 }
+                            } else if let Some(resume) = model.data.resume() {
+                                // A suspended session exists, so the two ways
+                                // in are genuinely different and the sheet
+                                // must not choose for the player: resuming is
+                                // offered first (it is what they left), and
+                                // starting over is a plain button beside it —
+                                // never a hidden preference three screens away.
+                                if icons::primary_button(ui, Icon::Play, Msg::Resume.text(lang))
+                                    .on_hover_text(resume_hover(lang, resume))
+                                    .clicked()
+                                {
+                                    action =
+                                        Action::Launch { path: entry.path.clone(), resume: true };
+                                }
+                                if ui
+                                    .button(Msg::StartOver.text(lang))
+                                    .on_hover_text(Msg::StartOverHint.text(lang))
+                                    .clicked()
+                                {
+                                    action =
+                                        Action::Launch { path: entry.path.clone(), resume: false };
+                                }
                             } else if icons::primary_button(ui, Icon::Play, Msg::Play.text(lang))
                                 .clicked()
                             {
-                                action = Action::Launch(entry.path.clone());
+                                action = Action::Launch { path: entry.path.clone(), resume: true };
                             }
                         });
                         if model.stats.thumbnail.is_some()

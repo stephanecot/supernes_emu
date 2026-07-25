@@ -1194,8 +1194,8 @@ impl App {
                 event_loop.exit();
             }
             Action::CancelQuit => self.cancel_quit(),
-            Action::Launch(path) => {
-                if let Err(e) = self.switch_rom(&path, true) {
+            Action::Launch { path, resume } => {
+                if let Err(e) = self.switch_rom(&path, resume) {
                     eprintln!("error: could not load {}: {e}", path.display());
                     self.library.ui.error = Some(crate::i18n::cannot_load(
                         self.prefs.lang(),

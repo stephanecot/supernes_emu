@@ -147,6 +147,10 @@ messages! {
     AddGameHint       => "Ajouter un jeu situé hors du dossier — ou déposez son fichier sur la fenêtre"
                        / "Add a game from outside the folder — or drop its file on the window",
     Play              => "Jouer" / "Play",
+    Resume            => "Reprendre" / "Resume",
+    StartOver         => "Nouvelle partie" / "New game",
+    StartOverHint     => "Démarre la cartouche à zéro. La partie en cours est conservée et reste reprenable."
+                       / "Starts the cartridge from scratch. The suspended session is kept and stays resumable.",
     AddToFavorites    => "Ajouter aux favoris" / "Add to favourites",
     Favorite          => "Favori" / "Favourite",
     NoPicture         => "pas de miniature" / "no thumbnail",
@@ -492,8 +496,18 @@ pub fn cannot_open(lang: Lang, error: &str) -> String {
 /// Waiting for a key or a pad button to bind to `button`.
 ///
 /// Written out per language rather than assembled: French puts the button after
-/// the verb phrase, English fronts it, and a shared template would force one of
-/// them into the other's word order.
+/// When the session being offered was left. `when` is already localised.
+pub fn resume_from(lang: Lang, when: &str) -> String {
+    match lang {
+        Lang::Fr => format!("Reprendre la partie laissée le {when}"),
+        Lang::En => format!("Pick up the session left on {when}"),
+    }
+}
+
+/// Waiting for a key or a pad button to bind to `button`. Written out per
+/// language rather than assembled: French puts the button after the verb
+/// phrase, English fronts it, and a shared template would force one of them
+/// into the other's word order.
 pub fn press_a_key_for(lang: Lang, button: &str) -> String {
     match lang {
         Lang::Fr => format!("Appuyez sur une touche pour {button} — Échap pour annuler."),

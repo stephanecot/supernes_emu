@@ -70,8 +70,10 @@ pub enum Action {
     /// …or no: dismiss the modal and restore the previous pause state.
     CancelQuit,
     /// Start the library game at this path (the `Jouer` button / a double
-    /// click on a grid card).
-    Launch(std::path::PathBuf),
+    /// click on a grid card). `resume` picks up the automatic session state
+    /// when there is one; `false` starts the cartridge from power-on without
+    /// touching it, so the suspended session is still there afterwards.
+    Launch { path: std::path::PathBuf, resume: bool },
     /// Pin or unpin a game, by `library::game_id`.
     ToggleFavorite(String),
     /// Promote one of the game's own screenshots as its thumbnail, replacing
