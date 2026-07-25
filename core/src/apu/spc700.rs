@@ -6,6 +6,36 @@
 //! references/apu.md (nesdev S-SMP / SPC-700 instruction set). 1 CPU cycle =
 //! 2 SMP clocks = 1/1_024_000 s.
 
+/// Cycle count of every opcode, transcribed from references/apu.md. Entries
+/// listed there as `n/m` (conditional branches, `BBS`/`BBC`, `CBNE`, `DBNZ`)
+/// hold the not-taken cost `n`; a taken branch costs 2 more and touches no
+/// memory, so the shorter figure is the one that matters here.
+///
+/// The scheduler needs the length of the *next* instruction before running it:
+/// an SPC700 instruction performs its memory access on its last cycle, so it
+/// may only be executed once its whole cycle window has elapsed. Executing it
+/// as soon as its first cycle is due would publish a `MOV $F4,Y` port write up
+/// to three SPC cycles (~60 master cycles) early, which is enough to lose a
+/// CPU/APU handshake race that real hardware wins.
+pub const OPCODE_CYCLES: [u8; 256] = [
+    2, 8, 4, 5, 3, 4, 3, 6, 2, 6, 5, 4, 5, 4, 6, 8, // $00
+    2, 8, 4, 5, 4, 5, 5, 6, 5, 5, 6, 5, 2, 2, 4, 6, // $10
+    2, 8, 4, 5, 3, 4, 3, 6, 2, 6, 5, 4, 5, 4, 5, 4, // $20
+    2, 8, 4, 5, 4, 5, 5, 6, 5, 5, 6, 5, 2, 2, 3, 8, // $30
+    2, 8, 4, 5, 3, 4, 3, 6, 2, 6, 4, 4, 5, 4, 6, 6, // $40
+    2, 8, 4, 5, 4, 5, 5, 6, 5, 5, 4, 5, 2, 2, 4, 3, // $50
+    2, 8, 4, 5, 3, 4, 3, 6, 2, 6, 4, 4, 5, 4, 5, 5, // $60
+    2, 8, 4, 5, 4, 5, 5, 6, 5, 5, 5, 5, 2, 2, 3, 6, // $70
+    2, 8, 4, 5, 3, 4, 3, 6, 2, 6, 5, 4, 5, 2, 4, 5, // $80
+    2, 8, 4, 5, 4, 5, 5, 6, 5, 5, 5, 5, 2, 2, 12, 5, // $90
+    3, 8, 4, 5, 3, 4, 3, 6, 2, 6, 4, 4, 5, 2, 4, 4, // $A0
+    2, 8, 4, 5, 4, 5, 5, 6, 5, 5, 5, 5, 2, 2, 3, 4, // $B0
+    3, 8, 4, 5, 4, 5, 4, 7, 2, 5, 6, 4, 5, 2, 4, 9, // $C0
+    2, 8, 4, 5, 5, 6, 6, 7, 4, 5, 5, 5, 2, 2, 6, 3, // $D0
+    2, 8, 4, 5, 3, 4, 3, 6, 2, 4, 5, 3, 4, 3, 4, 3, // $E0
+    2, 8, 4, 5, 4, 5, 5, 6, 3, 4, 5, 4, 2, 2, 4, 2, // $F0
+];
+
 /// Memory access seen by the SPC700. The implementor decodes the I/O overlay,
 /// IPL ROM and timers; the core only issues plain byte reads/writes.
 pub trait Spc700Bus {
@@ -1719,5 +1749,56 @@ mod tests {
         run(&mut cpu, &mut bus, &[0xBA, 0x20]); // MOVW YA,$20
         assert_eq!(cpu.a, 0x00);
         assert_eq!(cpu.y, 0x01);
+    }
+
+    /// `OPCODE_CYCLES` is the scheduler's lookahead: it must never claim an
+    /// instruction is longer than the core actually charges for it (that would
+    /// stall the SPC700), and for every opcode there must be a register/flag
+    /// state in which the core charges exactly that (so the table is the true
+    /// not-taken cost, not an arbitrary lower bound).
+    #[test]
+    fn opcode_cycle_table_matches_core() {
+        // States chosen so every conditional opcode falls through in at least
+        // one of them: both flag polarities (branches), a direct page of $00
+        // (BBS never taken, CBNE equal), of $FF (BBC never taken) and of $01
+        // (DBNZ d,r reaches zero), and Y=1 (DBNZ Y,r reaches zero).
+        let states: [(bool, u8); 6] =
+            [(false, 0x00), (true, 0x00), (false, 0xFF), (true, 0xFF), (false, 0x01), (true, 0x01)];
+        for op in 0u16..=0xFF {
+            let op = op as u8;
+            let mut seen_exact = false;
+            for &(flags, dp) in &states {
+                let mut cpu = Spc700::new();
+                let mut bus = TestBus::new();
+                cpu.n = flags;
+                cpu.v = flags;
+                cpu.h = flags;
+                cpu.z = flags;
+                cpu.c = flags;
+                cpu.a = 0;
+                cpu.x = 0;
+                cpu.y = 1;
+                cpu.sp = 0xEF;
+                // Fill the direct page so CBNE d,r / DBNZ d,r can fall through.
+                for b in bus.ram[0x0000..0x0100].iter_mut() {
+                    *b = dp;
+                }
+                // Operand bytes 0 keep every address in low RAM.
+                let c = run(&mut cpu, &mut bus, &[op, 0x00, 0x00]);
+                let table = OPCODE_CYCLES[op as usize] as u32;
+                assert!(
+                    c >= table,
+                    "opcode ${op:02X}: core charged {c} cycles but the table promises {table}"
+                );
+                if c == table {
+                    seen_exact = true;
+                }
+            }
+            assert!(
+                seen_exact,
+                "opcode ${op:02X}: table says {} but the core never charges that",
+                OPCODE_CYCLES[op as usize]
+            );
+        }
     }
 }

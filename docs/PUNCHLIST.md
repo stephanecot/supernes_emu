@@ -45,6 +45,19 @@ Impact: also blocks the Mode 7 real-screen gate (SMW's Mode 7 is the Bowser figh
 ## Secret of Mana — garbled characters on the name-entry screen (USER-REPORTED BUG)
 When SoM prompts for the character's name, strange/garbled characters are displayed. Real rendering bug on a base-console game. Likely candidates to check: the name-entry screen's text tiles (BG mode/priority on that screen), a variable-width-font or dynamic-tile-upload path the game uses for the name grid, or a VRAM/DMA timing issue that corrupts the font tiles for that screen specifically. To diagnose: script SoM into a new game to reach name entry, dump the frame + VRAM/CGRAM state, compare the font tiles against what the game uploaded. Not yet investigated.
 
+## Terranigma — silent APU, then a freeze after "Chapitre 1" (USER-REPORTED, FIXED)
+One bug, two faces. The S-CPU sat in `86:8F76 LDA $2140 / BNE $8F76` forever — 100 % of 607 954 traced instructions — waiting for a sound driver that had derailed to $0000; and the driver, while it still ran, never wrote the master volume nor grew past 3.2 KB of APU RAM.
+
+**Rule we had wrong:** an SPC700 instruction does its memory access on its **last** cycle. `Apu::run_budget` started an instruction as soon as *one* of its cycles was due and charged the cost afterwards, so every SPC-side effect — writes to the comm ports $F4-$F7 included — became visible to the S-CPU up to `len-1` SPC cycles early: ~62 master cycles for a 4-cycle `MOV $F4,Y`.
+
+Only Terranigma could see it, because it uploads through its own receiver rather than the IPL. The IPL reads the data byte *before* acking (`$FFDD: CMP Y,$F4 / MOV A,$F5 / MOV $F4,$Y`) and so cannot race. Terranigma's receiver at $041D acks **first** (`MOV $F4,Y` then `MOV A,$F5`) and leans on the ~14 master cycles of margin the SPC700 really has; a 62-cycle early ack inverted it, and the S-CPU overwrote $2141 before the SPC had read it. 2 743 of 7 316 transferred bytes were wrong, the sequence pointer eventually became $0000, and the driver walked off into zero page.
+
+**Fix:** `spc700::OPCODE_CYCLES` plus a `run_budget` that refuses to start an instruction until the budget covers its whole cycle window. No fudge factor, no per-game test. The long-term SPC rate is unchanged — only *when inside its window* an instruction publishes its effects moves, from the first cycle to the last, which is where the hardware does its bus access.
+
+**Measured:** Terranigma audio peak 0 → 5038 at 900 frames (13339 over a scripted 5000-frame run), MVOL $00 → $5F, APU RAM 5334 → 60611 bytes, 0 wrong bytes of 2387 transferred. The freeze is gone from a cold boot: "Chapitre 1" at frame 2000, Ark's room with dialogue at 4800. The seven other test ROMs drift by ±1 % in peak amplitude — every SPC instruction now lands one window later — and none lost audio.
+
+Two caveats. `roms/Terranigma (F).resume` stays broken by construction: it was captured on the old build with the SPC already derailed. And the code landed inside commit `0d50036`, whose message is about CI — a `git add -A` swept an agent's in-flight work; the fix is `core/src/apu/mod.rs` and `core/src/apu/spc700.rs` in that commit.
+
 ## Cartridge coprocessor decision (UPDATED)
 User provided a Yoshi's Island ROM = **SuperFX** (GSU-2), so the target chip pivoted from SA-1 to **SuperFX** (testable against a real ROM). SA-1 reference doc (references/sa1.md) was written and is kept for a future SA-1 pass; SA-1 core was never started. SuperFX is a from-scratch GSU CPU (new instruction set) — larger than SA-1 but now game-validatable on Yoshi's Island.
 

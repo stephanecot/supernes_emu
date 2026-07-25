@@ -373,6 +373,23 @@ impl Apu {
             ports_to_cpu,
         };
         while *cycle_budget > 0 {
+            // An SPC700 instruction performs its memory access on its last
+            // cycle, so it may only run once its whole cycle window has
+            // elapsed: starting it as soon as its first cycle is due would
+            // make its writes visible to the S-CPU up to (len-1) cycles early.
+            // Terranigma's sound uploader depends on that ordering — it acks a
+            // transfer index on port 0 and only *then* reads the data byte from
+            // port 1, so the S-CPU must not be able to see the ack before the
+            // `MOV $F4,Y` that produces it has actually finished.
+            let pc = spc.pc;
+            let opcode = if *mem.ipl_enabled && (0xFFC0..=0xFFFF).contains(&pc) {
+                ipl::IPL_ROM[(pc - 0xFFC0) as usize]
+            } else {
+                mem.ram[pc as usize]
+            };
+            if *cycle_budget < spc700::OPCODE_CYCLES[opcode as usize] as i64 {
+                break;
+            }
             if let Some(sink) = spc_trace.as_mut() {
                 // Read raw ARAM (no side effects, unlike a bus read of the
                 // $F0-$FF I/O overlay which would clear timer counters), but
@@ -645,6 +662,37 @@ mod tests {
         apu.drain_samples(&mut out2);
         assert!(out2.is_empty());
         assert_eq!(apu.sample_rate(), 32_000);
+    }
+
+    /// An SPC700 instruction does its memory access on its last cycle, so a
+    /// port write must not become visible to the S-CPU until the instruction's
+    /// whole cycle window has elapsed. Publishing it when the instruction
+    /// merely *starts* hands the S-CPU up to (len-1) SPC cycles of head start
+    /// and loses handshake races that real hardware wins (Terranigma's sound
+    /// uploader acks the transfer index on port 0 before reading the data byte
+    /// from port 1, and relies on exactly that ordering).
+    #[test]
+    fn spc_port_write_appears_only_when_its_instruction_ends() {
+        let mut apu = Apu::new();
+        apu.set_region(21_281_370);
+        // Run a lone `MOV $F4,Y` ($CB, 4 cycles) from RAM, IPL out of the way.
+        apu.control = 0;
+        apu.ipl_enabled = false;
+        apu.ram[0x0200] = 0xCB;
+        apu.ram[0x0201] = 0xF4;
+        apu.ram[0x0202] = 0xFF; // STOP, so nothing runs past the write
+        apu.spc.pc = 0x0200;
+        apu.spc.y = 0x5A;
+        apu.cycle_budget = 0;
+        apu.frac_accum = 0;
+        apu.last_master = 0;
+        assert_eq!(apu.read_port(0), 0x00);
+        // ~20.8 master cycles per SPC cycle: 3 of the instruction's 4 cycles.
+        let spc_cycle = (21_281_370 / 1_024_000) as u64;
+        apu.catch_up(3 * spc_cycle);
+        assert_eq!(apu.read_port(0), 0x00, "port write published before the instruction ended");
+        apu.catch_up(5 * spc_cycle);
+        assert_eq!(apu.read_port(0), 0x5A, "port write never landed");
     }
 
     #[test]
