@@ -134,26 +134,41 @@ pub fn generate(rom: &Path, out: &Path) -> Result<(), String> {
     crate::atomic::write(out, &png)
 }
 
-/// Decode a PNG written by this application (8-bit RGBA, no interlacing) into
-/// `(width, height, rgba)`. Used by the UI to upload thumbnails and
-/// screenshots as textures.
+/// Decode a PNG into `(width, height, rgba)`. Used by the UI to upload
+/// thumbnails, screenshots and box art as textures.
+///
+/// The application writes 8-bit RGBA, but the box art fetched from
+/// `libretro-thumbnails` is palette-indexed (`Super Mario Kart (Europe).png` is
+/// 512x352, colour type 3), so the decoder is asked to expand palettes and
+/// transparency chunks and to drop 16-bit samples to 8. That leaves four
+/// possible outputs, all handled: a file this code cannot read must show a
+/// placeholder, never take the frame down.
 pub fn decode_png(path: &Path) -> Result<(u32, u32, Vec<u8>), String> {
     let file =
         std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
-    let decoder = png::Decoder::new(std::io::BufReader::new(file));
+    let mut decoder = png::Decoder::new(std::io::BufReader::new(file));
+    decoder.set_transformations(
+        png::Transformations::EXPAND | png::Transformations::STRIP_16,
+    );
     let mut reader = decoder.read_info().map_err(|e| format!("png {}: {e}", path.display()))?;
     let mut buf = vec![0u8; reader.output_buffer_size()];
     let info = reader.next_frame(&mut buf).map_err(|e| format!("png {}: {e}", path.display()))?;
     buf.truncate(info.buffer_size());
+    let pixels = info.width as usize * info.height as usize;
+    let expand = |buf: &[u8], stride: usize, to_rgba: fn(&[u8]) -> [u8; 4]| {
+        let mut out = Vec::with_capacity(pixels * 4);
+        for px in buf.chunks_exact(stride) {
+            out.extend_from_slice(&to_rgba(px));
+        }
+        out
+    };
     let rgba = match info.color_type {
         png::ColorType::Rgba => buf,
-        png::ColorType::Rgb => {
-            let mut out = Vec::with_capacity(info.width as usize * info.height as usize * 4);
-            for px in buf.chunks_exact(3) {
-                out.extend_from_slice(&[px[0], px[1], px[2], 0xFF]);
-            }
-            out
-        }
+        png::ColorType::Rgb => expand(&buf, 3, |p| [p[0], p[1], p[2], 0xFF]),
+        png::ColorType::Grayscale => expand(&buf, 1, |p| [p[0], p[0], p[0], 0xFF]),
+        png::ColorType::GrayscaleAlpha => expand(&buf, 2, |p| [p[0], p[0], p[0], p[1]]),
+        // `EXPAND` turns a palette into RGB/RGBA, so this is unreachable in
+        // practice; it stays an error rather than a panic.
         other => return Err(format!("{}: unsupported PNG color type {other:?}", path.display())),
     };
     Ok((info.width, info.height, rgba))

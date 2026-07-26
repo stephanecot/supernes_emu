@@ -89,7 +89,7 @@ impl View {
     /// Names accepted on the command line, in the order `--help` lists them.
     /// One name per screen the shell can show, the settings panel counting one
     /// per section since that is what it draws at a time.
-    pub const ALL: [(&'static str, View); 13] = [
+    pub const ALL: [(&'static str, View); 14] = [
         ("library", View::Library),
         ("favorites", View::Favorites),
         ("game-sheet", View::GameSheet),
@@ -99,6 +99,7 @@ impl View {
         ("settings-inputs", View::Settings(Section::Inputs)),
         ("settings-inputs-capture", View::InputsCapture),
         ("settings-inputs-pressed", View::InputsPressed),
+        ("settings-assistant", View::Settings(Section::Assistant)),
         ("settings-folders", View::Settings(Section::Folders)),
         ("settings-about", View::Settings(Section::About)),
         ("empty", View::Empty),
@@ -727,6 +728,14 @@ pub struct Fixture {
     /// is no thumbnail in flight either.
     no_pending: HashSet<String>,
     sheet: SheetData,
+    /// A filled-in sheet for the game `game-sheet` opens on, so the capture
+    /// shows the catalogue block and the attributed description rather than
+    /// the "nothing fetched yet" state — the layout only has to be judged
+    /// where there is something to lay out.
+    meta: BTreeMap<String, crate::metadata::GameMeta>,
+    /// Nothing is ever in flight in a capture: a spinner would be a different
+    /// picture every run.
+    no_fetching: HashSet<String>,
     library_ui: LibraryUi,
     settings_ui: SettingsUi,
     textures: TextureStore,
@@ -763,6 +772,7 @@ impl Fixture {
                 fastrom: game.fastrom,
                 checksum: 0x1234u16.wrapping_add((i as u16) << 8),
                 checksum_valid: game.checksum_valid,
+                crc32: 0x5641_0E5E ^ (i as u32),
                 missing: false,
             });
             games.insert(
@@ -803,6 +813,7 @@ impl Fixture {
             fastrom: false,
             checksum: 0,
             checksum_valid: false,
+            crc32: 0,
         });
 
         // Save slots and screenshots of the game the sheet opens on. Three of
@@ -857,6 +868,45 @@ impl Fixture {
             )?,
         ];
 
+        // A filled-in sheet for the game the `game-sheet` view opens on. The
+        // description is a real Wikipedia extract, at its real length: a
+        // capture is only worth looking at if it shows what a long paragraph
+        // does to the layout.
+        let boxart = dir.join("boxart.png");
+        write_fake_boxart(&boxart)?;
+        thumbs.insert(sheet_id.clone(), boxart.clone());
+        let mut meta = BTreeMap::new();
+        meta.insert(
+            sheet_id.clone(),
+            crate::metadata::GameMeta {
+                crc32: 0x777A_EBB4,
+                name: "Legend of Zelda, The - A Link to the Past (Europe) (Rev 1)".to_string(),
+                genre: Some("Action Adventure".to_string()),
+                developer: Some("Nintendo EAD".to_string()),
+                publisher: Some("Nintendo".to_string()),
+                players: Some("1".to_string()),
+                year: Some("1992".to_string()),
+                month: Some("9".to_string()),
+                franchise: Some("The Legend of Zelda".to_string()),
+                esrb: Some("E".to_string()),
+                description: Some(crate::metadata::Description {
+                    text: "The Legend of Zelda: A Link to the Past is an action-adventure game \
+                           developed and published by Nintendo for the Super Nintendo \
+                           Entertainment System. It is the third installment in The Legend of \
+                           Zelda series and was released in 1991 in Japan and 1992 in North \
+                           America and Europe. The game's story is set many years before the \
+                           events of the first two games, and tells of Link's quest to defeat \
+                           the evil Ganon and rescue the descendants of the Seven Sages."
+                        .to_string(),
+                    title: "The Legend of Zelda: A Link to the Past".to_string(),
+                    url: "https://en.wikipedia.org/wiki/The_Legend_of_Zelda:_A_Link_to_the_Past"
+                        .to_string(),
+                }),
+                boxart: Some(boxart),
+                fetched: FIXTURE_NOW,
+            },
+        );
+
         Ok(Self {
             view,
             lang,
@@ -866,6 +916,8 @@ impl Fixture {
             thumbs,
             pending,
             no_pending: HashSet::new(),
+            meta,
+            no_fetching: HashSet::new(),
             sheet: SheetData { id: sheet_id.clone(), states, screenshots, cheats },
             library_ui: LibraryUi {
                 selected: (view == View::GameSheet).then_some(sheet_id),
@@ -907,6 +959,9 @@ impl Fixture {
             super::settings::show(
                 ctx,
                 &mut SettingsModel {
+                    // The fixture claims the tool is there: the interesting capture is
+                    // the row live, not greyed.
+                    claude: Some(Path::new("/Users/vous/.local/bin/claude")),
                     app_name: crate::APP_NAME,
                     version: crate::VERSION,
                     prefs: &self.prefs,
@@ -942,11 +997,13 @@ impl Fixture {
                     dir: &self.rom_dir,
                     thumbs: &self.thumbs,
                     pending,
+                    fetching: &self.no_fetching,
                     state: &mut self.library_ui,
                     textures: &mut self.textures,
                     lang: self.lang,
                 },
                 sheet: &self.sheet,
+                meta: &self.meta,
             },
         );
     }
@@ -981,6 +1038,40 @@ fn write_fake_picture(path: &Path, seed: usize) -> Result<(), String> {
             // flat colour and downscaling artifacts are visible.
             let checker = y >= horizon && ((x / 16 + y / 16) % 2 == 0);
             let k = 0.25 + 0.75 * shade * if checker { 0.7 } else { 1.0 };
+            rgba.extend_from_slice(&[
+                (base.r() as f32 * k) as u8,
+                (base.g() as f32 * k) as u8,
+                (base.b() as f32 * k) as u8,
+                255,
+            ]);
+        }
+    }
+    let png = crate::encode_rgba_png(&rgba, W, H)?;
+    crate::write_new_file(path, &png)
+}
+
+/// A stand-in for a downloaded box art, at the shape the real ones have:
+/// `libretro-thumbnails` serves the SNES boxes at 512x352, which is *wider*
+/// than the 8:7 frame every picture box of this interface is cut to. Its whole
+/// job here is to make that mismatch visible in a capture, so the letterboxing
+/// is judged rather than assumed.
+fn write_fake_boxart(path: &Path) -> Result<(), String> {
+    const W: u32 = 512;
+    const H: u32 = 352;
+    let mut rgba = Vec::with_capacity((W * H * 4) as usize);
+    for y in 0..H {
+        for x in 0..W {
+            // A framed plate: a border, then two accents split on a diagonal,
+            // which reads as artwork at thumbnail size without being one.
+            let border = x < 18 || y < 18 || x >= W - 18 || y >= H - 18;
+            let base = if border {
+                theme::accent(3)
+            } else if (x as f32 / W as f32) + (y as f32 / H as f32) < 1.0 {
+                theme::accent(0)
+            } else {
+                theme::accent(1)
+            };
+            let k = if border { 0.55 } else { 0.35 + 0.65 * (y as f32 / H as f32) };
             rgba.extend_from_slice(&[
                 (base.r() as f32 * k) as u8,
                 (base.g() as f32 * k) as u8,

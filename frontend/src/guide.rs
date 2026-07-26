@@ -56,10 +56,25 @@ pub fn find() -> Option<PathBuf> {
 /// the reader is a separate application and the emulator must keep running its
 /// frames.
 pub fn open(path: &Path) -> Result<(), String> {
+    hand_over(path.as_os_str()).map_err(|e| format!("could not open {}: {e}", path.display()))
+}
+
+/// The same handler, given a URL instead of a file: the Wikipedia article a
+/// description was taken from, which the CC BY-SA attribution has to be able
+/// to reach. Only ever called with a URL this application built itself from a
+/// summary response, never with text a page supplied.
+pub fn open_url(url: &str) -> Result<(), String> {
+    if !url.starts_with("https://") {
+        return Err(format!("refusing to open {url:?}: not an https URL"));
+    }
+    hand_over(std::ffi::OsStr::new(url)).map_err(|e| format!("could not open {url}: {e}"))
+}
+
+fn hand_over(target: &std::ffi::OsStr) -> Result<(), std::io::Error> {
     #[cfg(target_os = "macos")]
     let mut command = {
         let mut c = std::process::Command::new("open");
-        c.arg(path);
+        c.arg(target);
         c
     };
     #[cfg(target_os = "windows")]
@@ -67,19 +82,16 @@ pub fn open(path: &Path) -> Result<(), String> {
         // `start` is a `cmd` builtin; the empty string is the window title
         // argument, without which a quoted path would be taken as the title.
         let mut c = std::process::Command::new("cmd");
-        c.args(["/C", "start", ""]).arg(path);
+        c.args(["/C", "start", ""]).arg(target);
         c
     };
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let mut command = {
         let mut c = std::process::Command::new("xdg-open");
-        c.arg(path);
+        c.arg(target);
         c
     };
-    command
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("could not open {}: {e}", path.display()))
+    command.spawn().map(|_| ())
 }
 
 #[cfg(test)]
@@ -124,6 +136,22 @@ mod tests {
         sorted.sort();
         sorted.dedup();
         assert_eq!(sorted.len(), list.len());
+    }
+
+    /// The URL handed to the platform can only ever be one this application
+    /// built from a Wikipedia summary; anything else is refused rather than
+    /// passed to a shell-adjacent opener.
+    #[test]
+    fn only_an_https_url_is_handed_to_the_platform() {
+        for refused in [
+            "file:///etc/passwd",
+            "http://example.com",
+            "javascript:alert(1)",
+            "",
+            "en.wikipedia.org/wiki/Terranigma",
+        ] {
+            assert!(open_url(refused).is_err(), "{refused}");
+        }
     }
 
     #[test]

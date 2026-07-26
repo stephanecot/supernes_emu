@@ -8,11 +8,19 @@
 //! right, machine values in the monospace face — the distinction that says at a
 //! glance which strings the cartridge wrote and which ones the application did.
 //!
-//! Nothing here is fetched from the network or from a database: every line
-//! comes from `library::GameEntry` (cartridge header), `prefs.games` (play
-//! time / favourite / promoted thumbnail) or the file system (states, their
-//! previews, captures), which is what makes the sheet correct for any ROM the
-//! player drops in the folder.
+//! Everything above the `Catalogue` heading comes from the machine itself:
+//! `library::GameEntry` (cartridge header), `prefs.games` (play time /
+//! favourite / promoted thumbnail) and the file system (states, their
+//! previews, captures) — which is what makes that half of the sheet correct
+//! for any ROM the player drops in the folder, with no network at all.
+//!
+//! Below it sits what a catalogue says (`metadata`), and the two are kept
+//! visibly apart: the header facts are read off the cartridge, the catalogue
+//! facts are a claim by a third party, and the description is a claim matched
+//! **by title** on Wikipedia, credited and linked so a wrong match reads as a
+//! wrong match rather than as an assertion by this application. That section
+//! is empty until the player presses `Compléter la fiche`, which is one of the
+//! two places in the whole application that opens a socket.
 //!
 //! Clicking one of the screenshots promotes it as the game's thumbnail,
 //! replacing the generated one; the generated one is never deleted, so the
@@ -23,8 +31,9 @@ use std::path::{Path, PathBuf};
 use egui::{Align, Layout, RichText, Sense, Stroke, Vec2};
 
 use crate::cheats::{Cheat, Kind};
-use crate::i18n::{Lang, Msg};
+use crate::i18n::{self, Lang, Msg};
 use crate::library::{self, GameEntry, StateFile};
+use crate::metadata::GameMeta;
 use crate::prefs::GameStats;
 
 use super::icons::{self, Icon};
@@ -124,6 +133,12 @@ pub struct SheetModel<'a> {
     pub picture: Option<&'a Path>,
     /// The thumbnail of this game is still being generated.
     pub pending: bool,
+    /// What the catalogue said about this game, `None` while nobody has asked
+    /// for it. The sheet never fetches anything itself — it produces an
+    /// `Action` and the shell's background thread does the work.
+    pub meta: Option<&'a GameMeta>,
+    /// A fetch for this game is in flight.
+    pub fetching: bool,
     pub textures: &'a mut TextureStore,
     /// Cleared by the `Retour` button; the shell shows the grid again.
     pub selected: &'a mut Option<String>,
@@ -243,6 +258,29 @@ pub fn show(ui: &mut egui::Ui, model: &mut SheetModel) -> Action {
                         {
                             action = Action::ClearThumbnail(entry.id.clone());
                         }
+                        // The one control of this screen that reaches the
+                        // network. Never offered for a game whose file is
+                        // gone: there is no image to fingerprint, so there is
+                        // nothing to look up.
+                        if !entry.missing {
+                            if model.fetching {
+                                ui.add_space(2.0);
+                                note(ui, Msg::Filling.text(lang));
+                            } else {
+                                let (label, hint) = if model.meta.is_some() {
+                                    (Msg::CatalogRefetch, Msg::CatalogRefetchHint)
+                                } else {
+                                    (Msg::FillSheet, Msg::FillSheetHint)
+                                };
+                                if ui
+                                    .button(label.text(lang))
+                                    .on_hover_text(hint.text(lang))
+                                    .clicked()
+                                {
+                                    action = Action::FillSheet(entry.id.clone());
+                                }
+                            }
+                        }
                     },
                 );
                 ui.add_space(COLUMN_GAP);
@@ -265,6 +303,13 @@ pub fn show(ui: &mut egui::Ui, model: &mut SheetModel) -> Action {
                     }
                 });
             });
+
+            ui.add_space(20.0);
+            super::home::heading(ui, Msg::Catalog.text(lang));
+            ui.add_space(8.0);
+            if let Some(produced) = catalog_section(ui, model.meta, lang) {
+                action = produced;
+            }
 
             ui.add_space(20.0);
             super::home::heading(ui, Msg::SaveStates.text(lang));
@@ -352,6 +397,104 @@ fn title(ui: &mut egui::Ui, text: &str) {
 /// it holds nothing.
 fn note(ui: &mut egui::Ui, text: &str) {
     ui.label(RichText::new(text).font(theme::font(theme::SIZE_BODY)).color(theme::TEXT_DIM));
+}
+
+/// What a catalogue says about this game: how it was identified, the facts
+/// that came back, and the description — each with its provenance attached.
+///
+/// Three states, all of them deliberate: nothing has been fetched yet, the
+/// fingerprint matched nothing, or there is a sheet. None of them is a hole.
+fn catalog_section(ui: &mut egui::Ui, meta: Option<&GameMeta>, lang: Lang) -> Option<Action> {
+    let Some(meta) = meta else {
+        note(ui, Msg::NoCatalogEntry.text(lang));
+        return None;
+    };
+    if !meta.matched() {
+        note(ui, Msg::NotInNoIntro.text(lang));
+        return None;
+    }
+    // The canonical name first, in the machine-data face: it is the answer the
+    // fingerprint gave, and the one line that shows at a glance whether the
+    // rest belongs to this cartridge.
+    ui.label(RichText::new(&meta.name).font(theme::mono(theme::SIZE_MONO)).color(theme::TEXT));
+    ui.add_space(8.0);
+    let facts = crate::metadata::facts(lang, meta);
+    if facts.is_empty() {
+        note(ui, Msg::NoCatalogEntry.text(lang));
+    } else {
+        let label_w = fact_label_w(ui, &facts);
+        for (label, value) in &facts {
+            fact_row(ui, label, value, label_w);
+        }
+    }
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new(Msg::CatalogSource.text(lang))
+            .font(theme::font(theme::SIZE_SMALL))
+            .color(theme::TEXT_DIM),
+    );
+    if meta.boxart.is_none() {
+        ui.label(
+            RichText::new(Msg::NoBoxart.text(lang))
+                .font(theme::font(theme::SIZE_SMALL))
+                .color(theme::TEXT_DIM),
+        );
+    }
+
+    ui.add_space(14.0);
+    super::home::heading(ui, Msg::Description.text(lang));
+    ui.add_space(8.0);
+    let Some(description) = &meta.description else {
+        note(ui, Msg::NoDescription.text(lang));
+        return None;
+    };
+    let mut action = None;
+    egui::Frame::new()
+        .fill(theme::BG_CARD)
+        .stroke(Stroke::new(1.0, theme::STROKE))
+        .corner_radius(egui::CornerRadius::same(8))
+        .inner_margin(egui::Margin::same(SLOT_MARGIN as i8))
+        .show(ui, |ui| {
+            // The credit comes *before* the text, not as a footnote under it:
+            // whoever reads the paragraph has already been told who wrote it,
+            // in which language, and that the match was made on a title.
+            ui.label(
+                RichText::new(Msg::WikipediaCredit.text(lang))
+                    .font(theme::font(theme::SIZE_SMALL))
+                    .color(theme::TEXT_DIM),
+            );
+            if ui
+                .link(
+                    RichText::new(i18n::wikipedia_article(lang, &description.title))
+                        .font(theme::font(theme::SIZE_SMALL)),
+                )
+                .on_hover_text(format!(
+                    "{} · {}",
+                    Msg::OpenArticle.text(lang),
+                    description.url
+                ))
+                .clicked()
+            {
+                action = Some(Action::OpenUrl(description.url.clone()));
+            }
+            ui.add_space(8.0);
+            // The paragraph is English inside a bilingual interface. Marked as
+            // such rather than left to read as a translation nobody finished.
+            ui.label(
+                RichText::new(&description.text)
+                    .font(theme::font(theme::SIZE_BODY))
+                    .color(theme::TEXT),
+            );
+            if lang != Lang::En {
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(Msg::EnglishOnly.text(lang))
+                        .font(theme::font(theme::SIZE_SMALL))
+                        .color(theme::TEXT_DIM),
+                );
+            }
+        });
+    action
 }
 
 /// One save state: the picture written beside it when it was saved, its slot,
@@ -667,6 +810,7 @@ mod tests {
             fastrom: true,
             checksum: 0xABCD,
             checksum_valid: true,
+            crc32: 0x5641_0E5E,
             missing: false,
         }
     }
@@ -795,6 +939,17 @@ mod tests {
         confirm: &mut Option<PathBuf>,
         lang: Lang,
     ) -> (Action, String) {
+        draw_with(data, stats, confirm, None, lang)
+    }
+
+    /// The same, with a catalogue sheet in place.
+    fn draw_with(
+        data: &SheetData,
+        stats: &GameStats,
+        confirm: &mut Option<PathBuf>,
+        meta: Option<&GameMeta>,
+        lang: Lang,
+    ) -> (Action, String) {
         let ctx = egui::Context::default();
         theme::apply(&ctx);
         let entry = entry();
@@ -818,6 +973,8 @@ mod tests {
                         data,
                         picture: None,
                         pending: false,
+                        meta,
+                        fetching: false,
                         textures: &mut textures,
                         selected: &mut selected,
                         confirm_delete: confirm,
@@ -920,6 +1077,98 @@ mod tests {
         assert!(text.contains("frozen"), "{text}");
         assert!(text.contains("once"), "{text}");
         assert!(text.contains("Remove"), "{text}");
+    }
+
+    fn filled_meta() -> GameMeta {
+        GameMeta {
+            crc32: 0x5641_0E5E,
+            name: "Super Mario Kart (Europe)".to_string(),
+            genre: Some("Racing".to_string()),
+            developer: Some("Nintendo".to_string()),
+            players: Some("2".to_string()),
+            year: Some("1993".to_string()),
+            month: Some("1".to_string()),
+            description: Some(crate::metadata::Description {
+                text: "Super Mario Kart is a 1992 kart racing game developed and published by \
+                       Nintendo for the Super Nintendo Entertainment System."
+                    .to_string(),
+                title: "Super Mario Kart".to_string(),
+                url: "https://en.wikipedia.org/wiki/Super_Mario_Kart".to_string(),
+            }),
+            boxart: Some(PathBuf::from("/box/GAME-1234.png")),
+            fetched: 1_768_478_400,
+            ..Default::default()
+        }
+    }
+
+    /// The catalogue block, when there is one: the facts, the source of the
+    /// facts, and — separately — the description with its attribution.
+    #[test]
+    fn a_fetched_sheet_shows_its_facts_and_credits_the_description() {
+        let meta = filled_meta();
+        let mut confirm = None;
+        let (produced, text) =
+            draw_with(&SheetData::default(), &GameStats::default(), &mut confirm, Some(&meta), Lang::Fr);
+        assert_eq!(produced, Action::None, "drawing alone must fetch nothing");
+        // The canonical name the fingerprint resolved to is on screen: it is
+        // what makes a wrong match visible at a glance.
+        assert!(text.contains("Super Mario Kart (Europe)"), "{text}");
+        assert!(text.contains("Racing"), "{text}");
+        assert!(text.contains("01/1993"), "{text}");
+        assert!(text.contains("No-Intro"), "{text}");
+        // The attribution is not optional and not a footnote: the licence
+        // asks for it, and a title-matched description has to say so.
+        assert!(text.contains("Wikipédia"), "{text}");
+        assert!(text.contains("CC BY-SA"), "{text}");
+        assert!(text.contains("Super Mario Kart"), "{text}");
+        // …and the French interface says the paragraph is in English rather
+        // than letting it read as a translation nobody finished.
+        assert!(text.contains("en anglais"), "{text}");
+        // The refresh button replaces the "fill it in" one once there is a
+        // sheet, so the network button never reads as "nothing happened".
+        assert!(text.contains("Actualiser la fiche"), "{text}");
+
+        let (_, text) =
+            draw_with(&SheetData::default(), &GameStats::default(), &mut confirm, Some(&meta), Lang::En);
+        assert!(text.contains("Wikipedia"), "{text}");
+        assert!(text.contains("1993-01"), "{text}");
+        assert!(text.contains("Refresh the sheet"), "{text}");
+    }
+
+    /// A dump no catalogue knows is a normal outcome, and it has to read as a
+    /// decision rather than as a blank.
+    #[test]
+    fn a_dump_that_is_in_no_catalogue_says_so_instead_of_showing_a_hole() {
+        let unmatched = GameMeta { crc32: 0xDEAD_BEEF, ..Default::default() };
+        let mut confirm = None;
+        let (_, text) = draw_with(
+            &SheetData::default(),
+            &GameStats::default(),
+            &mut confirm,
+            Some(&unmatched),
+            Lang::Fr,
+        );
+        assert!(text.contains("No-Intro"), "{text}");
+        assert!(text.contains("traduction amateur"), "{text}");
+        // No empty facts, and no description block promising a description.
+        assert!(!text.contains("Wikipédia"), "{text}");
+    }
+
+    /// Before anybody asks, the section says what would fill it — and the
+    /// button that would is the one thing on the screen that reaches the
+    /// network, so it is named plainly.
+    #[test]
+    fn an_unfetched_sheet_offers_the_button_and_nothing_else() {
+        let mut confirm = None;
+        let (produced, text) =
+            draw_with(&SheetData::default(), &GameStats::default(), &mut confirm, None, Lang::Fr);
+        assert_eq!(produced, Action::None);
+        assert!(text.contains("Catalogue"), "{text}");
+        assert!(text.contains("Compléter la fiche…"), "{text}");
+        assert!(!text.contains("Actualiser la fiche"), "{text}");
+        let (_, text) =
+            draw_with(&SheetData::default(), &GameStats::default(), &mut confirm, None, Lang::En);
+        assert!(text.contains("Fill in the sheet…"), "{text}");
     }
 
     /// An empty section is never a void: it says what would fill it.

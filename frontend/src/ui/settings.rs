@@ -168,16 +168,18 @@ pub enum Section {
     Audio,
     Emulation,
     Inputs,
+    Assistant,
     Folders,
     About,
 }
 
 impl Section {
-    pub const ALL: [Section; 6] = [
+    pub const ALL: [Section; 7] = [
         Section::Display,
         Section::Audio,
         Section::Emulation,
         Section::Inputs,
+        Section::Assistant,
         Section::Folders,
         Section::About,
     ];
@@ -192,6 +194,7 @@ impl Section {
             Section::Audio => Msg::SectionAudio,
             Section::Emulation => Msg::SectionEmulation,
             Section::Inputs => Msg::SectionInputs,
+            Section::Assistant => Msg::SectionAssistant,
             Section::Folders => Msg::SectionFolders,
             Section::About => Msg::SectionAbout,
         }
@@ -253,6 +256,10 @@ impl FolderNotice {
 /// persisted — the panel always opens on the first section.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SettingsUi {
+    /// Edit buffer of the assistant's tool path: a text field needs somewhere
+    /// to live between frames, and `prefs` is only written when the field is
+    /// left.
+    pub assistant_path: String,
     pub open: bool,
     pub section: Section,
     /// Pedagogical PDF located when the panel was opened (`crate::guide`);
@@ -293,6 +300,9 @@ pub struct SettingsModel<'a> {
     /// Folder the library actually scans, already resolved through its
     /// fallbacks (`library::library_dir`).
     pub library_dir: &'a Path,
+    /// Path of the `claude` tool, or `None` when it was not found on this
+    /// machine — which is what makes the assistant row inert.
+    pub claude: Option<&'a Path>,
     /// Where `prefs.json` and the derived caches live, for the About section.
     pub config_dir: Option<&'a Path>,
     /// SNES buttons held right now, keyboard and controllers together. The
@@ -474,6 +484,7 @@ fn body(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
                                 Section::Audio => audio_section(ui, model),
                                 Section::Inputs => inputs_section(ui, model, reading_w),
                                 Section::Emulation => emulation_section(ui, model),
+                                Section::Assistant => assistant_section(ui, model),
                                 Section::Folders => folders_section(ui, model),
                                 Section::About => about_section(ui, model),
                             };
@@ -920,6 +931,87 @@ fn pad_caption(ui: &mut egui::Ui, rect: Rect, lang: Lang) -> f32 {
     height
 }
 
+/// Width of the tool-path field: long enough for a full home-relative path
+/// without pushing the browse button off a narrow window.
+const TOOL_PATH_W: f32 = 340.0;
+
+/// The assistant: one switch, and the truth about whether it can be flipped.
+///
+/// A toggle that promises what the machine cannot do is worse than no toggle,
+/// so when `claude` is absent the row is disabled *and* says why — a greyed
+/// control with no explanation sends people hunting through preferences for a
+/// cause that is not there.
+fn assistant_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
+    let mut action = Action::None;
+    let lang = model.lang;
+    let available = model.claude.is_some();
+
+    hint(ui, Msg::AssistantWhat.text(lang));
+    ui.add_space(12.0);
+
+    let label_w = label_column_w(ui, lang, &[Msg::AssistantEnable, Msg::AssistantTool]);
+    row(ui, Msg::AssistantEnable.text(lang), label_w, |ui| {
+        let mut on = model.prefs.assistant && available;
+        let toggle = ui
+            .add_enabled(available, egui::Checkbox::new(&mut on, Msg::AssistantOn.text(lang)));
+        if toggle.changed() {
+            action = Action::Set(Setting::Assistant(on));
+        }
+    });
+    hint(
+        ui,
+        if available { Msg::AssistantFound.text(lang) } else { Msg::AssistantMissing.text(lang) },
+    );
+    ui.add_space(14.0);
+
+    // The path is typed, not searched for. See `assistant::find_claude`: the
+    // application looks on the `PATH` and nowhere else, so this field is the
+    // whole answer when the `PATH` a window inherits does not carry the tool.
+    // Seeded from the preference the first time the section is drawn: the
+    // buffer only exists to survive between frames, it is not a second source
+    // of truth.
+    if model.state.assistant_path.is_empty() && !model.prefs.assistant_path.is_empty() {
+        model.state.assistant_path = model.prefs.assistant_path.clone();
+    }
+    row(ui, Msg::AssistantTool.text(lang), label_w, |ui| {
+        let mut path = model.state.assistant_path.clone();
+        let edit = ui.add(
+            egui::TextEdit::singleline(&mut path)
+                .desired_width(TOOL_PATH_W)
+                .hint_text(Msg::AssistantOnPath.text(lang))
+                .font(theme::mono(theme::SIZE_MONO)),
+        );
+        if edit.changed() {
+            model.state.assistant_path = path.clone();
+        }
+        // Applied when the field is left or Enter is pressed, not on every
+        // keystroke: re-resolving the tool for each letter typed would make
+        // "not an executable" flash under the fingers of someone halfway
+        // through a path.
+        if edit.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            if path != model.prefs.assistant_path {
+                action = Action::Set(Setting::AssistantPath(path));
+            }
+        }
+        if ui.button(Msg::AssistantLocate.text(lang)).clicked() {
+            action = Action::ChooseAssistantTool;
+        }
+    });
+
+    let typed = !model.state.assistant_path.trim().is_empty();
+    if typed && !available {
+        ui.label(
+            RichText::new(Msg::AssistantBadPath.text(lang))
+                .font(theme::font(theme::SIZE_SMALL))
+                .color(theme::RED),
+        );
+    } else if let Some(path) = model.claude.filter(|_| !typed) {
+        path_line(ui, &super::home::shorten_path(path, 60));
+    }
+    hint(ui, Msg::AssistantPathHint.text(lang));
+    action
+}
+
 fn emulation_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
     let mut action = Action::None;
     let prefs = model.prefs;
@@ -1354,16 +1446,16 @@ mod tests {
 
     #[test]
     fn every_section_is_listed_once_with_its_own_label() {
-        assert_eq!(Section::ALL.len(), 6);
+        assert_eq!(Section::ALL.len(), 7);
         let mut labels: Vec<&str> = Section::ALL.iter().map(|s| s.label(Lang::Fr)).collect();
         // The order the brief fixes, top to bottom in the section column.
         assert_eq!(
             labels,
-            vec!["Affichage", "Audio", "Émulation", "Entrées", "Dossiers", "À propos"]
+            vec!["Affichage", "Audio", "Émulation", "Entrées", "Assistant", "Dossiers", "À propos"]
         );
         assert_eq!(
             Section::ALL.iter().map(|s| s.label(Lang::En)).collect::<Vec<_>>(),
-            vec!["Display", "Audio", "Emulation", "Controls", "Folders", "About"]
+            vec!["Display", "Audio", "Emulation", "Controls", "Assistant", "Folders", "About"]
         );
         labels.sort_unstable();
         labels.dedup();
@@ -1560,6 +1652,7 @@ mod tests {
                 produced = show(
                     ctx,
                     &mut SettingsModel {
+                        claude: Some(Path::new("/usr/local/bin/claude")),
                         app_name: "Prisme",
                         version: "0.0.0",
                         prefs,
@@ -1931,6 +2024,7 @@ mod tests {
                 produced = show(
                     ctx,
                     &mut SettingsModel {
+                        claude: Some(Path::new("/usr/local/bin/claude")),
                         app_name: "Prisme",
                         version: "0.0.0",
                         prefs: &prefs,
@@ -2053,6 +2147,7 @@ mod tests {
                 show(
                     ctx,
                     &mut SettingsModel {
+                        claude: Some(Path::new("/usr/local/bin/claude")),
                         app_name: "Prisme",
                         version: "0.0.0",
                         prefs: &prefs,
@@ -2261,6 +2356,7 @@ mod tests {
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     let model = SettingsModel {
+                        claude: Some(Path::new("/usr/local/bin/claude")),
                         app_name: "Prisme",
                         version: "0.0.0",
                         prefs: &prefs,
@@ -2302,6 +2398,7 @@ mod tests {
         let prefs = Prefs::default();
         for guide in [None, Some(PathBuf::from("/repo/docs/emulateur-snes-explique.pdf"))] {
             let mut state = SettingsUi {
+                assistant_path: String::new(),
                 open: true,
                 section: Section::About,
                 guide,
@@ -2315,6 +2412,7 @@ mod tests {
                 produced = show(
                     ctx,
                     &mut SettingsModel {
+                        claude: Some(Path::new("/usr/local/bin/claude")),
                         app_name: "Prisme",
                         version: "0.0.0",
                         prefs: &prefs,

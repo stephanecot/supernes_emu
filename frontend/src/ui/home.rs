@@ -48,6 +48,9 @@ pub struct HomeModel<'a> {
     /// selection changed (never per frame — each field is a directory
     /// listing).
     pub sheet: &'a SheetData,
+    /// What the catalogues said, per game id — empty until the player asks for
+    /// any of it (`ui::Action::FillSheet` / `FillLibrary`).
+    pub meta: &'a std::collections::BTreeMap<String, crate::metadata::GameMeta>,
 }
 
 impl HomeModel<'_> {
@@ -152,6 +155,8 @@ fn library(ui: &mut egui::Ui, model: &mut HomeModel) -> Action {
                 data: model.sheet,
                 picture: thumbs.get(&id).map(|p| p.as_path()),
                 pending: pending.contains(&id),
+                meta: model.meta.get(&id),
+                fetching: model.library.fetching.contains(&id),
                 textures: model.library.textures,
                 selected: &mut model.library.state.selected,
                 confirm_delete: &mut model.library.state.confirm_delete,
@@ -384,6 +389,8 @@ mod tests {
         let games = std::collections::BTreeMap::new();
         let thumbs = std::collections::HashMap::new();
         let pending = std::collections::HashSet::new();
+        let fetching = std::collections::HashSet::new();
+        let meta = std::collections::BTreeMap::new();
         let mut textures = super::super::textures::TextureStore::new();
         let sheet = SheetData::default();
         let ctx = egui::Context::default();
@@ -408,11 +415,13 @@ mod tests {
                         dir: Path::new("roms"),
                         thumbs: &thumbs,
                         pending: &pending,
+                        fetching: &fetching,
                         state,
                         textures: &mut textures,
                         lang,
                     },
                     sheet: &sheet,
+                    meta: &meta,
                 },
             );
         });
@@ -489,6 +498,8 @@ mod tests {
         let games = std::collections::BTreeMap::new();
         let thumbs = std::collections::HashMap::new();
         let pending = std::collections::HashSet::new();
+        let fetching = std::collections::HashSet::new();
+        let meta = std::collections::BTreeMap::new();
         let mut state = super::super::library_view::LibraryUi::default();
         let mut textures = super::super::textures::TextureStore::new();
         let sheet = SheetData::default();
@@ -504,11 +515,13 @@ mod tests {
                 dir: Path::new("roms"),
                 thumbs: &thumbs,
                 pending: &pending,
+                fetching: &fetching,
                 state: &mut state,
                 textures: &mut textures,
                 lang: Lang::Fr,
             },
             sheet: &sheet,
+            meta: &meta,
         };
         assert!(!m.has_session());
         m.game_title = Some("SUPER MARIOWORLD");

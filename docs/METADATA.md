@@ -13,7 +13,12 @@ devinette en passant par une empreinte :
 1. **CRC32 de la ROM**, en-tête copieur retiré — le chargeur le fait déjà.
 2. **DAT No-Intro** (`libretro-database/metadat/no-intro/`) : CRC → nom
    canonique. `Super Mario Kart (Europe)`, de façon **certaine**.
-3. Tout le reste se lit avec ce nom comme clé.
+3. Tout le reste se lit avec ce nom comme clé — **correction relevée à
+   l'implémentation** : les fichiers de catégorie sont en réalité indexés sur
+   le **même CRC** (`rom ( crc XXXXXXXX )`, le nom canonique n'y figurant qu'en
+   `comment`). C'est mieux que prévu : plus aucun appariement par nom dans la
+   chaîne, sauf Wikipédia. Le nom canonique ne sert donc qu'à deux choses : le
+   fichier de jaquette et le titre interrogé sur Wikipédia.
 
 Un jeu absent du DAT (dump modifié, traduction amateur, homebrew) n'est pas une
 erreur : il garde simplement sa fiche telle qu'elle est aujourd'hui.

@@ -2,6 +2,7 @@
 //! — keep the two in sync.
 
 mod agent;
+mod assistant;
 mod atomic;
 mod audio;
 mod cheats;
@@ -11,6 +12,8 @@ mod i18n;
 mod input;
 mod library;
 mod menu;
+mod metadata;
+mod net;
 mod pad;
 mod paths;
 mod picker;

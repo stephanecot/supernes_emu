@@ -40,3 +40,15 @@ pub fn pick_dir(title: &str, current: &Path) -> Option<PathBuf> {
     }
     dialog.pick_folder()
 }
+
+/// Open a native file-open dialog for an executable, starting in `current`'s
+/// own directory when there is one. No extension filter: a Unix binary has no
+/// extension at all, and filtering on `.exe` would hide the `.cmd` shim npm
+/// installs on Windows.
+pub fn pick_executable(title: &str, current: Option<&Path>) -> Option<PathBuf> {
+    let mut dialog = rfd::FileDialog::new().set_title(title);
+    if let Some(dir) = current.and_then(Path::parent).filter(|d| d.is_dir()) {
+        dialog = dialog.set_directory(dir);
+    }
+    dialog.pick_file()
+}

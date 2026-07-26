@@ -8,7 +8,7 @@
 //! coarse — a few ms on some hosts — so a plain sleep-to-deadline would
 //! frequently overshoot).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -118,6 +118,13 @@ struct LibraryState {
     thumbs: HashMap<String, PathBuf>,
     /// Games whose thumbnail is queued on the worker.
     pending: HashSet<String>,
+    /// Games whose sheet is being fetched from the catalogues, i.e. the only
+    /// requests this application ever has in flight.
+    fetching: HashSet<String>,
+    /// What the catalogues said, per game id. Read once from `metadata.json`
+    /// when the library starts, and updated as the worker answers; the worker
+    /// owns the file and writes it, exactly as it owns `library.json`.
+    meta: BTreeMap<String, crate::metadata::GameMeta>,
     /// Files listed by the open sheet, refreshed when the selection changes.
     sheet: SheetData,
 }
@@ -132,6 +139,8 @@ impl LibraryState {
             textures: TextureStore::new(),
             thumbs: HashMap::new(),
             pending: HashSet::new(),
+            fetching: HashSet::new(),
+            meta: BTreeMap::new(),
             sheet: SheetData::default(),
         }
     }
@@ -157,6 +166,8 @@ impl LibraryState {
 /// `prefs` carries the persisted user options (loaded by `main`); it is stored
 /// on `App`, written back after every option change and once more on exit.
 pub fn run(launch: Option<Launch>, prefs: Prefs) -> Result<(), String> {
+    // Resolved before `prefs` is moved into the application.
+    let claude = crate::assistant::find_claude(prefs.assistant_tool());
     let (title, snes, current_rom_path, game_paths, sram_baseline, frame_duration, game_id) =
         match launch {
             Some(l) => {
@@ -238,6 +249,7 @@ pub fn run(launch: Option<Launch>, prefs: Prefs) -> Result<(), String> {
         play_tick: Instant::now(),
         play_unsaved: 0,
         dialogs: dialog::Dialogs::new(),
+        claude,
         quit_confirm: false,
         quit_saved_pause: false,
         #[cfg(target_os = "macos")]
@@ -401,6 +413,11 @@ struct App {
     /// `crate::dialog`: a native modal opened from a callback re-enters winit's
     /// event handler, which panics on purpose).
     dialogs: dialog::Dialogs,
+    /// Path of the `claude` tool, resolved once at startup; `None` disables
+    /// the assistant entirely. Looked up here rather than at each use so the
+    /// settings screen can *say* why the row is inert, instead of failing on
+    /// the click.
+    claude: Option<PathBuf>,
     /// The quit confirmation modal (`ui::confirm`) is up. It replaces the
     /// native alert this used to show, for the same reentrancy reason.
     quit_confirm: bool,
@@ -1237,6 +1254,25 @@ impl App {
                 self.refresh_thumbnails();
             }
             Action::DeleteState(path) => self.delete_state(&path),
+            Action::FillSheet(id) => self.fill_sheets(&[id]),
+            Action::FillLibrary => {
+                // Only the games that have nothing yet: pressing this twice
+                // must not re-ask two public servers for four thousand
+                // pictures they already gave.
+                let wanted: Vec<String> = self
+                    .library
+                    .entries
+                    .iter()
+                    .filter(|e| !e.missing && !self.library.meta.contains_key(&e.id))
+                    .map(|e| e.id.clone())
+                    .collect();
+                self.fill_sheets(&wanted);
+            }
+            Action::OpenUrl(url) => {
+                if let Err(e) = crate::guide::open_url(&url) {
+                    eprintln!("{e}");
+                }
+            }
             Action::Rescan => self.rescan_library(),
             Action::AddGame { replacing } => {
                 // A relocation opens where the game used to live: the file has
@@ -1306,6 +1342,12 @@ impl App {
                     cheats.remove(&name);
                 });
             }
+            Action::ChooseAssistantTool => {
+                let current = self.claude.clone().or_else(|| {
+                    self.prefs.assistant_tool().map(std::path::Path::to_path_buf)
+                });
+                self.dialogs.request(dialog::Request::AssistantTool { current });
+            }
             Action::OpenGuide => self.open_guide(),
         }
     }
@@ -1347,6 +1389,8 @@ impl App {
             Setting::Aspect(aspect) => self.set_aspect(aspect),
             Setting::Fullscreen(on) => self.set_fullscreen(on),
             Setting::ShowFps(on) => self.set_show_fps(on),
+            Setting::Assistant(on) => self.set_assistant(on),
+            Setting::AssistantPath(path) => self.set_assistant_path(path),
             Setting::Mute(on) => self.set_mute(on),
             Setting::Volume(volume) => self.set_volume(volume),
             Setting::FastForward(factor) => self.set_fast_forward_factor(factor),
@@ -1469,6 +1513,12 @@ impl App {
         }
         self.library.ui.sort = SortMode::from_pref(&self.prefs.library_sort);
         self.library.ui.tab = ui::Tab::from_pref(&self.prefs.library_tab);
+        // What earlier sessions already fetched. Read from disk, never from
+        // the network: opening the home screen must stay an offline act.
+        self.library.meta = crate::metadata::store_path()
+            .map(|p| crate::metadata::Store::read_from(&p))
+            .unwrap_or_default()
+            .games;
         match library::Worker::spawn() {
             Some(worker) => {
                 self.library.worker = Some(worker);
@@ -1530,9 +1580,33 @@ impl App {
                         self.library.textures.forget(path);
                     }
                 }
+                library::Update::Fetched { id, meta, remaining } => {
+                    self.library.fetching.remove(&id);
+                    // `None` is a fetch that produced nothing: the entry the
+                    // sheet is already showing stays exactly as it was.
+                    if let Some(meta) = meta {
+                        if let Some(path) = &meta.boxart {
+                            self.library.textures.forget(path);
+                        }
+                        self.library.meta.insert(id, meta);
+                    }
+                    if remaining == 0 {
+                        self.library.fetching.clear();
+                    }
+                }
+                library::Update::FetchFailed { error, .. } => {
+                    // Nothing was identified, so nothing changed. Said once,
+                    // where the scan error is said, rather than in a modal
+                    // over a sheet that is still perfectly readable.
+                    eprintln!("metadata: {error}");
+                    self.library.fetching.clear();
+                    self.library.ui.error =
+                        Some(crate::i18n::Msg::FetchFailed.text(self.prefs.lang()).to_string());
+                }
             }
         }
         if rescanned {
+            self.forget_stale_metadata();
             self.request_thumbnails();
         }
         self.refresh_thumbnails();
@@ -1565,9 +1639,57 @@ impl App {
         self.library.pending.extend(queued);
     }
 
+    /// Drop the fetched sheet of any game whose ROM file is no longer the dump
+    /// it was fetched for. A replaced file keeps its `game_id` when its header
+    /// is unchanged, but its CRC32 moves — and showing another dump's box art
+    /// and release date would be worse than showing none.
+    ///
+    /// Only the in-memory view is pruned: `metadata.json` still holds the
+    /// entry, and it comes back by itself if the original file does.
+    fn forget_stale_metadata(&mut self) {
+        let store = crate::metadata::Store {
+            version: crate::metadata::CACHE_VERSION,
+            games: std::mem::take(&mut self.library.meta),
+        };
+        self.library.meta = self
+            .library
+            .entries
+            .iter()
+            .filter_map(|e| store.get(&e.id, e.crc32).map(|m| (e.id.clone(), m.clone())))
+            .collect();
+    }
+
+    /// Ask the library thread to fill in these games' sheets from the
+    /// catalogues. **The only place in the application that starts a network
+    /// request**, reached from the sheet's own button or from the library
+    /// toolbar's catch-up — never from a scan, never from startup.
+    ///
+    /// Games already in flight are not queued twice, and a run with no worker
+    /// asks for nothing rather than pinning a progress line nobody will clear.
+    fn fill_sheets(&mut self, ids: &[String]) {
+        let Some(worker) = &self.library.worker else { return };
+        let mut games = Vec::with_capacity(ids.len());
+        for id in ids {
+            if self.library.fetching.contains(id) {
+                continue;
+            }
+            let Some(entry) = self.library.entries.iter().find(|e| &e.id == id) else { continue };
+            if entry.missing || entry.crc32 == 0 {
+                continue; // no image on disk, so no fingerprint to look up
+            }
+            games.push((entry.id.clone(), entry.crc32));
+        }
+        if games.is_empty() {
+            return;
+        }
+        self.library.ui.error = None;
+        self.library.fetching.extend(games.iter().map(|(id, _)| id.clone()));
+        worker.submit(library::Job::Fetch { games });
+    }
+
     /// Re-resolve the picture of every game: the promoted screenshot when the
-    /// player chose one and it still exists, else the generated thumbnail when
-    /// it has been produced.
+    /// player chose one and it still exists, else the downloaded box art, else
+    /// the generated thumbnail when it has been produced.
     fn refresh_thumbnails(&mut self) {
         let mut map = HashMap::with_capacity(self.library.entries.len());
         for entry in &self.library.entries {
@@ -1736,7 +1858,9 @@ impl App {
         let (Some(ui), Some(pixels)) = (ui.as_mut(), pixels.as_ref()) else {
             return Action::None;
         };
-        let LibraryState { dir, entries, ui: view, textures, thumbs, pending, sheet, .. } = library;
+        let LibraryState {
+            dir, entries, ui: view, textures, thumbs, pending, fetching, meta, sheet, ..
+        } = library;
         let action = ui.run(&window, |ctx| {
             // One screen owns the window: the settings are a full-width view
             // now, not a modal over the library or over the game.
@@ -1744,6 +1868,7 @@ impl App {
                 crate::ui::settings::show(
                     ctx,
                     &mut SettingsModel {
+                        claude: self.claude.as_deref(),
                         app_name: APP_NAME,
                         version: VERSION,
                         prefs,
@@ -1771,11 +1896,13 @@ impl App {
                             dir,
                             thumbs,
                             pending,
+                            fetching,
                             state: &mut *view,
                             textures: &mut *textures,
                             lang,
                         },
                         sheet,
+                        meta,
                     },
                 )
             } else {
@@ -2072,6 +2199,9 @@ impl App {
             self.set_fast_forward(false);
             self.next_deadline = Instant::now() + self.frame_duration;
             match answer {
+                dialog::Answer::AssistantTool(path) => {
+                    self.set_assistant_path(path.display().to_string());
+                }
                 dialog::Answer::AddRom { path, replacing } => {
                     if let Some(old) = replacing {
                         // Dropped before the add, so relocating a game onto the
@@ -2434,6 +2564,29 @@ impl App {
         self.prefs.save();
     }
 
+    /// Turning the assistant on is refused outright when `claude` was not
+    /// found. The settings row is already inert in that case, so this is the
+    /// second lock rather than the first: a preferences file edited by hand,
+    /// or copied from a machine that had the tool, must not switch on a
+    /// feature that can only fail here.
+    fn set_assistant(&mut self, on: bool) {
+        self.prefs.assistant = on && self.claude.is_some();
+        self.prefs.save();
+    }
+
+    /// Re-resolve the tool as soon as the path changes, so the settings screen
+    /// answers on the spot instead of at the next launch. A path that resolves
+    /// to nothing also switches the feature off: leaving it on would promise
+    /// something that can no longer run.
+    fn set_assistant_path(&mut self, path: String) {
+        self.prefs.assistant_path = path;
+        self.claude = crate::assistant::find_claude(self.prefs.assistant_tool());
+        if self.claude.is_none() {
+            self.prefs.assistant = false;
+        }
+        self.prefs.save();
+    }
+
     /// `Réglages > Affichage > Langue`. The egui screens are rebuilt from
     /// `prefs` on every frame, so they change with the next one; the native
     /// menu bar is not, and is rebuilt here — a macOS menu still reading
@@ -2702,9 +2855,18 @@ impl App {
 /// Picture to show for `id`, or `None` when the game still needs one (see
 /// `library::resolve_picture`). Both the display map and the generation queue
 /// go through this, so they can never disagree.
+///
+/// The box art is looked for on disk rather than in the fetched metadata: the
+/// file's presence *is* the answer, which keeps this a pure function of the
+/// preferences and the file system and leaves the two callers nothing to
+/// disagree about.
 fn picture_for(prefs: &Prefs, id: &str) -> Option<PathBuf> {
     let custom = prefs.games.get(id).and_then(|s| s.thumbnail.clone());
-    library::resolve_picture(custom.as_deref(), thumbs::thumb_path(id).as_deref())
+    library::resolve_picture(
+        custom.as_deref(),
+        crate::metadata::boxart_path(id).as_deref(),
+        thumbs::thumb_path(id).as_deref(),
+    )
 }
 
 /// What the `Entrées` section says after a binding was written. A plain

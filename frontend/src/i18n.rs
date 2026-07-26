@@ -244,11 +244,52 @@ messages! {
     NeverPlayed       => "Jamais joué" / "Never played",
     LessThanAMinute   => "moins d'une minute" / "less than a minute",
 
+    // --- Catalogue facts (No-Intro + libretro-database) --------------------
+    Catalog           => "Catalogue" / "Catalogue",
+    FactGenre         => "Genre" / "Genre",
+    FactDeveloper     => "Développeur" / "Developer",
+    FactPublisher     => "Éditeur" / "Publisher",
+    FactPlayers       => "Joueurs" / "Players",
+    FactRelease       => "Sortie" / "Release",
+    FactFranchise     => "Série" / "Series",
+    FactEsrb          => "Classification" / "Age rating",
+    CatalogSource     => "Identifié par empreinte CRC32 · No-Intro et libretro-database"
+                       / "Identified by CRC32 fingerprint · No-Intro and libretro-database",
+    FillSheet         => "Compléter la fiche…" / "Fill in the sheet…",
+    FillSheetHint     => "Télécharge la jaquette et les faits de ce jeu. C'est le seul accès réseau de l'application, et il n'a lieu que sur ce bouton."
+                       / "Downloads this game's box art and facts. This is the application's only network access, and it happens on this button alone.",
+    FillLibrary       => "Compléter les fiches…" / "Fill in the sheets…",
+    FillLibraryHint   => "Télécharge jaquettes et faits pour les jeux qui n'en ont pas encore. Les catalogues ne sont téléchargés qu'une fois, puis relus hors ligne."
+                       / "Downloads box art and facts for the games that have none yet. The catalogues are downloaded once, then read offline.",
+    Filling           => "Recherche en cours…" / "Looking it up…",
+    CatalogRefetch    => "Actualiser la fiche" / "Refresh the sheet",
+    CatalogRefetchHint => "Redemander les faits et la jaquette de ce jeu."
+                       / "Ask for this game's facts and box art again.",
+    NoCatalogEntry    => "Aucune fiche pour l'instant. Le bouton ci-contre la télécharge."
+                       / "No sheet yet. The button on the left downloads one.",
+    NotInNoIntro      => "Cette copie n'est pas au catalogue No-Intro : dump modifié, traduction amateur ou homebrew. Les informations de la cartouche restent celles ci-dessus."
+                       / "This dump is not in the No-Intro catalogue: a modified dump, a fan translation or homebrew. The cartridge's own facts above still stand.",
+    NoBoxart          => "Pas de jaquette au catalogue" / "No box art in the catalogue",
+    FetchFailed       => "Rien n'a pu être téléchargé ; la fiche est inchangée."
+                       / "Nothing could be downloaded; the sheet is unchanged.",
+
+    // --- Description, and the reservations that come with it ---------------
+    Description       => "Description" / "Description",
+    // Named, not paraphrased: the licence asks for the attribution, and a
+    // wrong match has to be legible as one rather than as our own claim.
+    WikipediaCredit   => "Texte de Wikipédia (anglais), licence CC BY-SA — appariement par titre, donc à vérifier."
+                       / "Text from Wikipedia (English), CC BY-SA licence — matched by title, so worth checking.",
+    OpenArticle       => "Ouvrir l'article" / "Open the article",
+    EnglishOnly       => "Ce paragraphe est en anglais : Wikipédia n'en propose pas de version française sous ce titre."
+                       / "This paragraph is in English.",
+    NoDescription     => "Aucun article trouvé sous ce titre." / "No article found under that title.",
+
     // --- Settings sections ------------------------------------------------
     SectionDisplay    => "Affichage" / "Display",
     SectionAudio      => "Audio" / "Audio",
     SectionEmulation  => "Émulation" / "Emulation",
     SectionInputs     => "Entrées" / "Controls",
+    SectionAssistant  => "Assistant" / "Assistant",
     SectionFolders    => "Dossiers" / "Folders",
     SectionAbout      => "À propos" / "About",
     SettingsFooter    => "Échap : revenir · chaque changement est enregistré aussitôt"
@@ -281,6 +322,23 @@ messages! {
     Volume            => "Volume" / "Volume",
     VolumeHint        => "Le son est coupé pendant l'accéléré ; le volume choisi ici revient à sa libération."
                        / "Sound is off while fast-forwarding; the volume set here comes back when the key is released.",
+
+    // --- Assistant ---------------------------------------------------------
+    AssistantEnable   => "Autoriser l'assistant" / "Allow the assistant",
+    AssistantOn       => "Activé" / "Enabled",
+    AssistantWhat     => "Demandez en français ce que vous voulez — trouver une triche, franchir un passage — et l'assistant pilote l'émulateur pour vous."
+                       / "Ask in your own words for what you want — find a cheat, get past a passage — and the assistant drives the emulator for you.",
+    AssistantFound    => "Claude Code est installé sur cette machine. Le raisonnement se fait ici, sans clé ni compte."
+                       / "Claude Code is installed on this machine. The reasoning happens here, with no key and no account.",
+    AssistantMissing  => "Claude Code est introuvable sur cette machine, l'assistant ne peut donc pas être activé."
+                       / "Claude Code was not found on this machine, so the assistant cannot be enabled.",
+    AssistantGetIt    => "Installez-le, puis rouvrez cet écran." / "Install it, then reopen this screen.",
+    AssistantTool     => "Chemin de l'outil" / "Path to the tool",
+    AssistantLocate   => "Parcourir…" / "Browse…",
+    AssistantOnPath   => "Trouvé dans le PATH" / "Found on the PATH",
+    AssistantPathHint => "Laissez vide pour chercher dans le PATH. Une application lancée depuis le Finder n'hérite pas du PATH de votre terminal : c'est là qu'il faut indiquer le chemin complet."
+                       / "Leave empty to look on the PATH. An application launched from the Finder does not inherit your terminal's PATH: that is when the full path belongs here.",
+    AssistantBadPath  => "Ce chemin ne désigne aucun exécutable." / "That path is not an executable.",
 
     // --- Controls ---------------------------------------------------------
     RebindHint        => "Cliquez sur une case — ou sur le bouton dessiné — pour la réaffecter."
@@ -472,6 +530,25 @@ pub fn thumbnails_pending(lang: Lang, count: usize) -> String {
         (Lang::Fr, n) => format!("{n} miniatures en cours…"),
         (Lang::En, 1) => "1 thumbnail being built…".to_string(),
         (Lang::En, n) => format!("{n} thumbnails being built…"),
+    }
+}
+
+/// Games whose sheet is still being filled in from the network. Written out
+/// per count rather than with a parenthesised plural — this is prose.
+pub fn sheets_pending(lang: Lang, count: usize) -> String {
+    match (lang, count) {
+        (Lang::Fr, 1) => "1 fiche en cours…".to_string(),
+        (Lang::Fr, n) => format!("{n} fiches en cours…"),
+        (Lang::En, 1) => "1 sheet being filled in…".to_string(),
+        (Lang::En, n) => format!("{n} sheets being filled in…"),
+    }
+}
+
+/// The article a description was taken from, credited under it.
+pub fn wikipedia_article(lang: Lang, title: &str) -> String {
+    match lang {
+        Lang::Fr => format!("Article « {title} » sur Wikipédia"),
+        Lang::En => format!("Wikipedia article “{title}”"),
     }
 }
 
@@ -771,7 +848,9 @@ mod tests {
     /// per-screen assertions in the screens' own tests as well.
     #[test]
     fn no_screen_of_the_shell_holds_a_french_string_of_its_own() {
-        const SOURCES: [(&str, &str); 13] = [
+        const SOURCES: [(&str, &str); 15] = [
+            ("metadata.rs", include_str!("metadata.rs")),
+            ("net.rs", include_str!("net.rs")),
             ("ui/home.rs", include_str!("ui/home.rs")),
             ("ui/library_view.rs", include_str!("ui/library_view.rs")),
             ("ui/game_sheet.rs", include_str!("ui/game_sheet.rs")),

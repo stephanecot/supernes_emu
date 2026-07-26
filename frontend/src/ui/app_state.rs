@@ -24,7 +24,10 @@ pub enum Screen {
 /// loop through the very same `App::set_*` methods the keyboard hotkeys and
 /// the native menu use, so the three entry points can never write different
 /// values into `prefs`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Not `Copy`: one variant carries a path. Cloning a settings change once per
+/// click is not a cost worth designing around.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Setting {
     /// Interface language, or `None` to follow the host's
     /// (`i18n::system_lang`). Applied on the next frame — the shell is rebuilt
@@ -47,6 +50,13 @@ pub enum Setting {
     ConfirmOnQuit(bool),
     /// Save-state slot F5/F9 act on, 0..=9.
     Slot(u8),
+    /// Let the assistant be summoned. Only settable when `claude` was actually
+    /// found: the row is inert otherwise, so this can never be turned on for a
+    /// feature the machine cannot run.
+    Assistant(bool),
+    /// Where the assistant's tool lives, typed or picked by the player. Empty
+    /// goes back to looking on the `PATH`.
+    AssistantPath(String),
     /// Drop every keyboard and controller binding the player made, back to the
     /// built-in `input::DEFAULT_KEYMAP` / `pad::DEFAULT_PAD_MAP`.
     ResetInputs,
@@ -126,8 +136,20 @@ pub enum Action {
     /// Drop one cheat from a game's sidecar. Nothing else is touched — a cheat
     /// is a note about an address, not a change to the save.
     RemoveCheat { id: String, name: String },
+    /// Name the assistant's tool with the native file dialog.
+    ChooseAssistantTool,
     /// Open the pedagogical PDF in the platform's document reader.
     OpenGuide,
+    /// Fill one game's sheet in from the catalogues (`metadata`). One of the
+    /// **two** requests in the whole application that reach the network, and
+    /// both are a button the player pressed — nothing at scan time, nothing at
+    /// startup. A failure leaves the sheet exactly as it was.
+    FillSheet(String),
+    /// The same for every game of the library that has no sheet yet.
+    FillLibrary,
+    /// Open a page in the platform's browser: the Wikipedia article a
+    /// description was taken from, which the licence requires be reachable.
+    OpenUrl(String),
 }
 
 /// What the Escape key does, resolved from the current context.

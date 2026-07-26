@@ -104,6 +104,8 @@ pub struct LibraryModel<'a> {
     pub thumbs: &'a HashMap<String, PathBuf>,
     /// Games whose thumbnail generation has been queued and not answered yet.
     pub pending: &'a HashSet<String>,
+    /// Games whose sheet is being fetched from the catalogues.
+    pub fetching: &'a HashSet<String>,
     pub state: &'a mut LibraryUi,
     pub textures: &'a mut TextureStore,
     /// Language every string of the grid is rendered in.
@@ -254,6 +256,17 @@ pub fn show(ui: &mut egui::Ui, model: &mut LibraryModel) -> Action {
             {
                 action = Action::ChooseLibraryDir;
             }
+            // The library-wide catch-up. Deliberately a plain button next to
+            // the others and never automatic: it is the only thing on this
+            // screen that talks to the internet, and it says so on hover.
+            if !model.entries.is_empty()
+                && ui
+                    .button(Msg::FillLibrary.text(lang))
+                    .on_hover_text(Msg::FillLibraryHint.text(lang))
+                    .clicked()
+            {
+                action = Action::FillLibrary;
+            }
             if ui.button(Msg::Refresh.text(lang)).clicked() {
                 action = Action::Rescan;
             }
@@ -264,7 +277,9 @@ pub fn show(ui: &mut egui::Ui, model: &mut LibraryModel) -> Action {
     // A status line only while something is actually happening. The game count
     // and the folder path used to sit here on every frame: a third band of
     // chrome, above every card, saying what the grid itself already shows.
-    if let Some(status) = activity(lang, model.state.scanning, model.pending.len()) {
+    if let Some(status) =
+        activity(lang, model.state.scanning, model.fetching.len(), model.pending.len())
+    {
         ui.add_space(6.0);
         ui.label(RichText::new(status).font(theme::font(theme::SIZE_SMALL)).color(theme::TEXT_DIM));
     }
@@ -334,12 +349,19 @@ pub fn show(ui: &mut egui::Ui, model: &mut LibraryModel) -> Action {
 }
 
 /// The one line the toolbar shows while the library is working, or `None` when
-/// it is not: a scan in flight, or thumbnails still being emulated. Written out
-/// properly rather than with a parenthesised plural — this is prose, and the
-/// grid says how many games there are by showing them.
-pub fn activity(lang: Lang, scanning: bool, pending: usize) -> Option<String> {
+/// it is not: a scan in flight, sheets being fetched, or thumbnails still being
+/// emulated. Written out properly rather than with a parenthesised plural —
+/// this is prose, and the grid says how many games there are by showing them.
+///
+/// Fetching is announced before thumbnail generation because it is the one the
+/// player asked for by pressing a button, and because it is the one that is
+/// talking to somebody else's server.
+pub fn activity(lang: Lang, scanning: bool, fetching: usize, pending: usize) -> Option<String> {
     if scanning {
         return Some(Msg::ScanningFolder.text(lang).to_string());
+    }
+    if fetching > 0 {
+        return Some(i18n::sheets_pending(lang, fetching));
     }
     match pending {
         0 => None,
@@ -846,6 +868,7 @@ mod tests {
             fastrom: false,
             checksum: 1,
             checksum_valid: true,
+            crc32: 0x0000_0001,
             missing: false,
         }
     }
@@ -901,19 +924,24 @@ mod tests {
     /// carry the game count and the folder path above every single card.
     #[test]
     fn the_toolbar_speaks_only_while_the_library_is_working() {
-        assert_eq!(activity(Lang::Fr, false, 0), None);
-        assert_eq!(activity(Lang::Fr, true, 0).as_deref(), Some("Analyse du dossier…"));
+        assert_eq!(activity(Lang::Fr, false, 0, 0), None);
+        assert_eq!(activity(Lang::Fr, true, 0, 0).as_deref(), Some("Analyse du dossier…"));
         // A scan in flight wins: the count of queued thumbnails is not settled
         // until it ends.
-        assert_eq!(activity(Lang::Fr, true, 3).as_deref(), Some("Analyse du dossier…"));
-        assert_eq!(activity(Lang::Fr, false, 1).as_deref(), Some("1 miniature en cours…"));
-        assert_eq!(activity(Lang::Fr, false, 7).as_deref(), Some("7 miniatures en cours…"));
-        assert_eq!(activity(Lang::En, false, 1).as_deref(), Some("1 thumbnail being built…"));
-        assert_eq!(activity(Lang::En, false, 7).as_deref(), Some("7 thumbnails being built…"));
+        assert_eq!(activity(Lang::Fr, true, 0, 3).as_deref(), Some("Analyse du dossier…"));
+        assert_eq!(activity(Lang::Fr, false, 0, 1).as_deref(), Some("1 miniature en cours…"));
+        assert_eq!(activity(Lang::Fr, false, 0, 7).as_deref(), Some("7 miniatures en cours…"));
+        assert_eq!(activity(Lang::En, false, 0, 1).as_deref(), Some("1 thumbnail being built…"));
+        assert_eq!(activity(Lang::En, false, 0, 7).as_deref(), Some("7 thumbnails being built…"));
+        // A sheet the player asked for is announced ahead of the background
+        // thumbnails: it is the one that is talking to somebody else's server.
+        assert_eq!(activity(Lang::Fr, false, 2, 7).as_deref(), Some("2 fiches en cours…"));
+        assert_eq!(activity(Lang::En, false, 1, 7).as_deref(), Some("1 sheet being filled in…"));
+        assert_eq!(activity(Lang::Fr, true, 2, 7).as_deref(), Some("Analyse du dossier…"));
         // No parenthesised plural anywhere in the line, in either language.
         for lang in Lang::ALL {
             for n in 0..12 {
-                if let Some(line) = activity(lang, false, n) {
+                if let Some(line) = activity(lang, false, n, n) {
                     assert!(!line.contains("(s)"), "{line}");
                 }
             }
@@ -1065,6 +1093,7 @@ mod tests {
         lang: Lang,
     ) -> egui::FullOutput {
         let pending = HashSet::new();
+        let fetching = HashSet::new();
         ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 show(
@@ -1075,6 +1104,7 @@ mod tests {
                         dir: Path::new("/roms"),
                         thumbs,
                         pending: &pending,
+                        fetching: &fetching,
                         state,
                         textures,
                         lang,
