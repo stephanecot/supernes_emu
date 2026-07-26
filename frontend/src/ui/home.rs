@@ -241,13 +241,13 @@ fn library(ui: &mut egui::Ui, model: &mut HomeModel) -> Action {
 
     // Above the grid, not inside it: the grid is a list of games to start,
     // and a game already started is a different kind of thing.
-    let mut action = Action::None;
-    if model.library.state.selected.is_none() && model.library.state.tab == tabs::Tab::Library {
+    // On every library tab, not just the first: a game left running is still
+    // running while its owner browses their favourites.
+    if model.library.state.selected.is_none() {
         if let Some(produced) = session_band(ui, model) {
             return produced;
         }
     }
-    let _ = &mut action;
 
     if let Some(id) = selected {
         if let Some(entry) = entries.iter().find(|e| e.id == id) {

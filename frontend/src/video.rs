@@ -249,6 +249,7 @@ pub fn run(launch: Option<Launch>, prefs: Prefs) -> Result<(), String> {
         play_tick: Instant::now(),
         play_unsaved: 0,
         dialogs: dialog::Dialogs::new(),
+        session_frame: vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT * 4],
         wish: String::new(),
         assistant_session: None,
         assistant_line: None,
@@ -417,6 +418,10 @@ struct App {
     /// `crate::dialog`: a native modal opened from a callback re-enters winit's
     /// event handler, which panics on purpose).
     dialogs: dialog::Dialogs,
+    /// The frame the console stopped on, taken when the game is left. Shown on
+    /// the home screen so that "I opened the menu" never looks like "I closed
+    /// the game".
+    session_frame: Vec<u8>,
     /// What the player is typing into the assistant's field on a game sheet.
     /// Held here rather than in the sheet: the sheet is rebuilt every frame.
     wish: String,
@@ -1223,6 +1228,13 @@ impl App {
         if !self.state.go_home(self.paused) {
             return;
         }
+        // Take the picture *here*, at the moment the game is left, rather than
+        // relying on a buffer the presenter happens to have filled: the home
+        // screen shows this frame to say the session is still there, and it
+        // must not depend on which path the last frame took.
+        if let Some(snes) = &self.snes {
+            snes.framebuffer.to_rgba(&mut self.session_frame);
+        }
         self.paused = true;
         self.frame_advance = false;
         self.pad = JoypadState::default();
@@ -1949,7 +1961,7 @@ impl App {
             assistant_line,
             claude,
             game_id,
-            native_buf,
+            session_frame,
             ..
         } = self;
         let assistant_on = prefs.assistant && claude.is_some();
@@ -1988,7 +2000,7 @@ impl App {
                         // The last frame the console drew, still in the buffer
                         // the presenter fills — no copy, and no PNG written for
                         // the sake of a picture that already exists in memory.
-                        session_frame: has_frame.then_some(native_buf.as_slice()),
+                        session_frame: has_frame.then_some(session_frame.as_slice()),
                         assistant: assistant_on,
                         running: game_id.as_deref(),
                         wish,

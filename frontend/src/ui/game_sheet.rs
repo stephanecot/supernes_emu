@@ -349,11 +349,6 @@ pub fn show(ui: &mut egui::Ui, model: &mut SheetModel) -> Action {
             }
 
             ui.add_space(14.0);
-            if let Some(produced) = ask_section(ui, model) {
-                action = produced;
-            }
-
-            ui.add_space(14.0);
             super::home::heading(ui, Msg::Cheats.text(lang));
             ui.add_space(8.0);
             if model.data.cheats.is_empty() {
@@ -925,6 +920,16 @@ fn fact_row(ui: &mut egui::Ui, label: &str, value: &str, label_w: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The request block was once drawn twice, because a move left the first
+    /// call behind. A section that appears twice is not a layout quibble: it
+    /// makes the reader wonder which of the two is the real one.
+    #[test]
+    fn the_request_block_is_drawn_exactly_once() {
+        let source = include_str!("game_sheet.rs");
+        let body = source.split("#[cfg(test)]").next().unwrap_or(source);
+        assert_eq!(body.matches("ask_section(ui, model)").count(), 1, "{}", "drawn twice");
+    }
 
     fn entry() -> GameEntry {
         GameEntry {

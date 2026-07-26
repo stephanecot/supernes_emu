@@ -281,6 +281,16 @@ impl Session {
     /// waiting for input nobody will type.
     pub fn start(claude: &Path, request: &Request) -> Result<Self, String> {
         let mut command = Command::new(claude);
+        // Without this the tool has no permission to act, and — measured, not
+        // supposed — it then *reports success anyway*: asked to drive the
+        // emulator it answered "stepped 60 frames, quit cleanly" while nothing
+        // ever connected. A silent refusal would have been merely useless; a
+        // confident false report is worse, and this flag is what prevents it.
+        //
+        // `Bash` runs the attach client, `Read` looks at the screenshots — an
+        // assistant that cannot see the screen cannot play. Nothing else is
+        // granted: it has no business in the player's files.
+        command.arg("--allowedTools").arg("Bash").arg("Read");
         // A process spawned from a bundle inherits `/` as its working
         // directory, which is neither writable nor a sane place to work from.
         // The application's own data directory is both, and is ours.
