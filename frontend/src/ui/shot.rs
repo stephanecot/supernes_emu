@@ -1012,7 +1012,6 @@ impl Fixture {
                 running: running.as_deref(),
                 wish: &mut wish,
                 assistant_says: None,
-                assistant_playing: false,
                 app_name: crate::APP_NAME,
                 version: crate::VERSION,
                 lang: self.lang,

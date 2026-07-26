@@ -156,8 +156,6 @@ pub struct SheetModel<'a> {
     pub wish: &'a mut String,
     /// The assistant's latest line, while one is running.
     pub assistant_says: Option<&'a str>,
-    /// That run is a `Jouer le passage`, which drives the live console.
-    pub assistant_playing: bool,
 }
 
 /// Draw the sheet and return what the player asked for.
@@ -810,13 +808,6 @@ fn ask_section(ui: &mut egui::Ui, model: &mut SheetModel) -> Option<Action> {
         ui.label(
             RichText::new(said).font(theme::mono(theme::SIZE_SMALL)).color(theme::TEXT_DIM),
         );
-        // Where to look: a run that plays drives the console on the game
-        // screen, and this screen suspends it — so the assistant is waiting on
-        // a player who is reading about it instead of watching it.
-        if model.assistant_playing {
-            ui.add_space(4.0);
-            note(ui, Msg::AskWatching.text(lang));
-        }
         return action;
     }
 
@@ -830,22 +821,15 @@ fn ask_section(ui: &mut egui::Ui, model: &mut SheetModel) -> Option<Action> {
 
     let asked = !model.wish.trim().is_empty();
     ui.horizontal(|ui| {
-        // Both start from the session's own state — a search wants the game
-        // already at the place where the thing to find happens, not at a title
-        // screen it would have to navigate on its own.
+        // The search starts from the session's own state: it wants the game
+        // already where the thing to find happens, not at a title screen it
+        // would have to navigate on its own.
         if ui
             .add_enabled(asked && model.is_running, egui::Button::new(Msg::AskFindCheat.text(lang)))
             .on_hover_text(Msg::AskCheatHint.text(lang))
             .clicked()
         {
-            action = Some(Action::AskAssistant { id: model.entry.id.clone(), play: false });
-        }
-        if ui
-            .add_enabled(asked && model.is_running, egui::Button::new(Msg::AskPlay.text(lang)))
-            .on_hover_text(Msg::AskPlayHint.text(lang))
-            .clicked()
-        {
-            action = Some(Action::AskAssistant { id: model.entry.id.clone(), play: true });
+            action = Some(Action::AskAssistant { id: model.entry.id.clone() });
         }
     });
     if asked && !model.is_running {
@@ -1108,7 +1092,6 @@ mod tests {
                 is_running: true,
                 wish: &mut String::new(),
                 assistant_says: None,
-                assistant_playing: false,
                         entry: &entry,
                         stats,
                         data,

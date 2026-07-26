@@ -64,9 +64,6 @@ pub struct HomeModel<'a> {
     pub wish: &'a mut String,
     /// The assistant's latest line while one runs.
     pub assistant_says: Option<&'a str>,
-    /// It is playing the session, not searching: the game screen is where that
-    /// happens, and the console waits while this one is up.
-    pub assistant_playing: bool,
 }
 
 impl HomeModel<'_> {
@@ -263,7 +260,6 @@ fn library(ui: &mut egui::Ui, model: &mut HomeModel) -> Action {
                 is_running: model.running == Some(id.as_str()),
                 wish: model.wish,
                 assistant_says: model.assistant_says,
-                assistant_playing: model.assistant_playing,
                 fetching: model.library.fetching.contains(&id),
                 textures: model.library.textures,
                 selected: &mut model.library.state.selected,
@@ -517,7 +513,6 @@ mod tests {
                 running: None,
                 wish: &mut String::new(),
                 assistant_says: None,
-                assistant_playing: false,
                     app_name: "Prisme",
                     version: "0.0.0",
                     lang,
@@ -623,7 +618,6 @@ mod tests {
                 running: None,
                 wish: &mut String::new(),
                 assistant_says: None,
-                assistant_playing: false,
             app_name: "Prisme",
             version: "0.0.0",
             lang: Lang::Fr,

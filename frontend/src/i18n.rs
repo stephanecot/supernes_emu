@@ -351,19 +351,17 @@ messages! {
     AskPlaceholder    => "des vies infinies · passe-moi ce boss · de l'argent au maximum"
                        / "infinite lives · get me past this boss · max out my money",
     AskFindCheat      => "Chercher une triche" / "Find a cheat",
-    AskPlay           => "Jouer le passage" / "Play the passage",
+    AskNeedsSession   => "Lancez ce jeu d'abord : la recherche part de l'état de votre partie."
+                       / "Start this game first: the search works from your session's state.",
+
     AskStop           => "Arrêter" / "Stop",
     AskWorking        => "L'assistant travaille…" / "The assistant is working…",
     AskCheatHint      => "Cherche l'adresse mémoire et laisse une triche. Ne touche pas à votre partie."
                        / "Finds the memory address and leaves a cheat behind. Your session is untouched.",
-    AskPlayHint       => "Joue depuis l'état actuel. Un état est sauvegardé avant, l'opération reste annulable."
-                       / "Plays from the current state. A state is saved first, so this stays undoable.",
+
     AskDisabled       => "Activez l'assistant dans Réglages → Assistant IA."
                        / "Turn the assistant on in Settings → AI assistant.",
-    AskNeedsSession   => "Lancez ce jeu d'abord : l'assistant part de l'état de votre partie."
-                       / "Start this game first: the assistant works from your session's state.",
-    AskWatching       => "Il joue votre partie : revenez au jeu (Échap) pour le regarder faire. Tant que cet écran est ouvert, la partie est suspendue et il attend."
-                       / "It is playing your session: go back to the game (Esc) to watch it. While this screen is up the session is suspended and it waits.",
+
     LiveDriving       => "L'IA joue · Échap pour reprendre la main"
                        / "The AI is playing · Esc to take back control",
     LiveThinking      => "L'IA réfléchit · la partie l'attend"
@@ -503,7 +501,6 @@ messages! {
     StatusNoScreenshot => "CAPTURE IMPOSSIBLE" / "SCREENSHOT FAILED",
     StatusSpcFailed   => "EXPORT SPC ERREUR" / "SPC EXPORT ERROR",
     StatusSpcExported => "MUSIQUE SPC EXPORTEE" / "SPC MUSIC EXPORTED",
-    StatusNoChannel   => "CANAL IA IMPOSSIBLE" / "AI CHANNEL FAILED",
 
     // --- Native menu bar (macOS) -------------------------------------------
     MenuSettings      => "Réglages…" / "Settings…",

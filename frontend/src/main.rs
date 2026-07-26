@@ -11,7 +11,6 @@ mod guide;
 mod i18n;
 mod input;
 mod library;
-mod live;
 mod menu;
 mod metadata;
 mod net;
@@ -55,12 +54,6 @@ struct Args {
     /// `--agent`: serve the JSON control channel on stdin/stdout instead of
     /// running a fixed number of frames. Headless by construction.
     agent: bool,
-    /// `--agent-attach HOST:PORT`: speak that same protocol to the console
-    /// already running in a window, instead of starting one. Needs no ROM: the
-    /// cartridge is the one the player is playing.
-    agent_attach: Option<String>,
-    /// The secret that window handed out, when it is not in the environment.
-    agent_secret: Option<String>,
     frames: u32,
     dump_frame: Option<PathBuf>,
     dump_frame_every: Option<u32>,
@@ -109,16 +102,6 @@ const USAGE: &str = "usage: prisme [rom.sfc|.smc|.zip] [flags]
                                         the save, and a frozen cheat is re-applied after
                                         every frame here as in the window. The search that
                                         finds an address is described in docs/CHEATS.md.
-  --agent-attach HOST:PORT              same protocol, same commands, aimed at the console
-                                        already running in a window: forwards stdin to that
-                                        session and its answers back to stdout, so every
-                                        frame it plays is drawn where the player can see it.
-                                        Loopback only, and the first line sent is the shared
-                                        secret, taken from PRISME_AGENT_SECRET or from
-                                        --agent-secret. Needs no ROM argument. The
-                                        application opens this port for the duration of one
-                                        assistant request and closes it after.
-  --agent-secret VALUE                  that secret, when the environment cannot carry it
   --dump-frame PATH.png                 write final framebuffer as PNG on exit
   --dump-frame-every N --dump-dir DIR   write DIR/frame_XXXXX.png every N frames
   --trace PATH [--trace-start-frame A --trace-end-frame B]
@@ -212,8 +195,6 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             "--count" => a.count = parse_num(&value(&mut it, "--count")?)?,
             "--headless" => a.headless = true,
             "--agent" => a.agent = true,
-            "--agent-attach" => a.agent_attach = Some(value(&mut it, "--agent-attach")?),
-            "--agent-secret" => a.agent_secret = Some(value(&mut it, "--agent-secret")?),
             "--frames" => a.frames = parse_num(&value(&mut it, "--frames")?)?,
             "--dump-frame" => a.dump_frame = Some(value(&mut it, "--dump-frame")?.into()),
             "--dump-frame-every" => {
@@ -306,11 +287,6 @@ fn run(args: Args) -> Result<(), String> {
             args.ui_shot_size.1
         );
         return Ok(());
-    }
-    // `--agent-attach` is a client, not an emulator: it needs no cartridge and
-    // opens nothing, so it answers before the ROM argument is even looked at.
-    if let Some(addr) = &args.agent_attach {
-        return live::attach(addr, args.agent_secret.as_deref());
     }
     // Windowed launch with no ROM: open the application on its home screen.
     // Unreachable with `--headless` (`parse_args` rejects it) and with
