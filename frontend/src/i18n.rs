@@ -338,14 +338,20 @@ messages! {
     AssistantTool     => "Chemin de l'outil" / "Path to the tool",
     AssistantLocate   => "Parcourir…" / "Browse…",
     AssistantOnPath   => "Trouvé dans le PATH" / "Found on the PATH",
+    AssistantModel    => "Modèle" / "Model",
+    AssistantModelDef => "Défaut de l'outil" / "The tool's own default",
+    AssistantModelHint => "Laissez vide pour laisser Claude Code décider. Un alias (opus, sonnet, haiku) suit toujours la dernière version ; un nom complet fige une version précise."
+                       / "Leave empty to let Claude Code decide. An alias (opus, sonnet, haiku) always follows the latest version; a full name pins one.",
     AssistantOk       => "Chemin valide" / "Path is valid",
 
     // --- Asking the assistant ------------------------------------------------
     AskHeading        => "Demander à l'IA" / "Ask the AI",
+    AskIntro          => "Deux choses très différentes : jouer un passage à votre place, ou chercher une triche. Dites laquelle."
+                       / "Two quite different things: play a passage for you, or find a cheat. Say which.",
     AskPlaceholder    => "des vies infinies · passe-moi ce boss · de l'argent au maximum"
                        / "infinite lives · get me past this boss · max out my money",
     AskFindCheat      => "Chercher une triche" / "Find a cheat",
-    AskPlay           => "Jouer le passage" / "Play it for me",
+    AskPlay           => "Jouer le passage" / "Play the passage",
     AskStop           => "Arrêter" / "Stop",
     AskWorking        => "L'assistant travaille…" / "The assistant is working…",
     AskCheatHint      => "Cherche l'adresse mémoire et laisse une triche. Ne touche pas à votre partie."

@@ -26,7 +26,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 
 /// File names the tool can have. Windows does not mark a file executable, it
@@ -48,6 +48,17 @@ const CLAUDE_NAMES: &[&str] = &["claude"];
 // hands it a bare login environment, so a tool installed in `~/.local/bin` is
 // invisible to the bundle while working perfectly in a terminal. That is
 // exactly the case `Prefs::assistant_path` exists for.
+
+/// Model the assistant runs on unless the player names another.
+///
+/// The cheapest and fastest of the family, on purpose: this work is a long
+/// series of small, mechanical steps — read a screen, press a button, compare
+/// two memory dumps — repeated hundreds of times. Latency is what the player
+/// feels here, and a heavier model would spend more of it on every one of
+/// those steps without changing what the step decides. Someone who hits a task
+/// it cannot handle names a stronger one in the settings, which is a single
+/// field away.
+pub const DEFAULT_MODEL: &str = "haiku";
 
 /// What the player is asking for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,17 +158,25 @@ pub struct Request {
     pub state: PathBuf,
     /// Where a found cheat must be written.
     pub cheats: PathBuf,
+    /// Model to run on, or `None` for the tool's own default. Not this
+    /// application's business to pick one, but its business to pass on what
+    /// the player picked.
+    pub model: Option<String>,
 }
 
 /// The instructions handed to the assistant.
 ///
-/// Deliberately concrete: the exact command line, the exact JSON, and the two
-/// failure modes that waste the most time — a control round run while the game
-/// is still resolving the event, and a candidate that is a copy rather than the
-/// value the game reads. Both cost a real search on this project before they
-/// were written down (`docs/CHEATS.md`).
+/// Deliberately concrete, and deliberately self-contained: the exact command
+/// line, the exact JSON, and the two failure modes that waste the most time —
+/// a control round run while the game is still resolving the event, and a
+/// candidate that is a copy rather than the value the game reads. Both cost a
+/// real search on this project.
+///
+/// They are spelled out here rather than behind a pointer to `docs/CHEATS.md`:
+/// an installed application has no repository beside it, so that file would be
+/// an instruction to read something that is not there.
 pub fn prompt(request: &Request) -> String {
-    let Request { task, wish, attach, emulator, rom, state, cheats } = request;
+    let Request { task, wish, attach, emulator, rom, state, cheats, model: _ } = request;
     let (emulator, rom, state, cheats) = (
         emulator.display(),
         rom.display(),
@@ -190,12 +209,16 @@ pub fn prompt(request: &Request) -> String {
             "{common}\n\
              Your job: find the memory address behind that wish, and leave a\n\
              cheat behind.\n\n\
-             Read docs/CHEATS.md — it describes the intersection search step by\n\
-             step, and carries two warnings that each cost a wasted search:\n\
-             a control round run while the game is still resolving the event\n\
-             eliminates the right address, and several addresses survive every\n\
-             round because they are copies — only writing to them tells you\n\
-             which one the game actually reads.\n\n\
+             The method is successive intersection: snapshot the whole of WRAM\n\
+             ($7E:0000, 128 KB), let the event happen, snapshot again, and keep\n\
+             only the addresses that moved as expected. Repeat until few remain.\n\n\
+             Two warnings, each of which has already cost a whole search:\n\
+             - A control round run while the game is still *resolving* the\n\
+               event eliminates the right address. Let it settle first.\n\
+             - Several addresses survive every round because they are copies\n\
+               (a saved counter, the tile that draws the digit). No number of\n\
+               rounds separates them — only writing to each one and looking at\n\
+               the screen tells you which the game actually reads.\n\n\
              When you are sure, persist it with cheat-add, whose file is:\n\
              \x20 {cheats}\n\
              Then verify in a *fresh* process that only reads that file.\n"
@@ -257,7 +280,19 @@ impl Session {
     /// the prompt is an argument, not a conversation — so it can never block
     /// waiting for input nobody will type.
     pub fn start(claude: &Path, request: &Request) -> Result<Self, String> {
-        let mut child = Command::new(claude)
+        let mut command = Command::new(claude);
+        // A process spawned from a bundle inherits `/` as its working
+        // directory, which is neither writable nor a sane place to work from.
+        // The application's own data directory is both, and is ours.
+        if let Some(dir) = crate::prefs::data_path("") {
+            if std::fs::create_dir_all(&dir).is_ok() {
+                command.current_dir(&dir);
+            }
+        }
+        if let Some(model) = &request.model {
+            command.arg("--model").arg(model);
+        }
+        let mut child = command
             .arg("-p")
             .arg(prompt(request))
             .stdin(Stdio::null())
@@ -266,14 +301,40 @@ impl Session {
             .spawn()
             .map_err(|e| format!("{}: {e}", claude.display()))?;
 
+        // stderr is *drained*, never merely piped: nothing reads a pipe that
+        // nobody drains, so the 64 KB buffer fills and the child blocks there
+        // for good — the assistant starts, says nothing, and hangs. Its last
+        // lines are also the only explanation available when it fails.
+        let stderr = child.stderr.take().ok_or("no stderr on the assistant")?;
+        let complaints = Arc::new(Mutex::new(String::new()));
+        let sink = Arc::clone(&complaints);
+        std::thread::Builder::new()
+            .name("prisme-assistant-err".to_string())
+            .spawn(move || {
+                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                    if let Ok(mut held) = sink.lock() {
+                        // Only the tail is worth keeping: a failure explains
+                        // itself at the end, and an unbounded string would grow
+                        // with every warning a long run emits.
+                        if held.len() > 4096 {
+                            held.clear();
+                        }
+                        held.push_str(line.trim());
+                        held.push('\n');
+                    }
+                }
+            })
+            .map_err(|e| format!("could not drain the assistant's errors: {e}"))?;
+
         let stdout = child.stdout.take().ok_or("no stdout on the assistant")?;
         let (tx, updates) = channel();
         let cancelled = Arc::new(AtomicBool::new(false));
 
         let flag = Arc::clone(&cancelled);
+        let errors = Arc::clone(&complaints);
         std::thread::Builder::new()
             .name("prisme-assistant".to_string())
-            .spawn(move || pump(stdout, &tx, &flag))
+            .spawn(move || pump(stdout, &tx, &flag, &errors))
             .map_err(|e| format!("could not start the assistant thread: {e}"))?;
 
         Ok(Self { child: Some(child), updates, cancelled })
@@ -314,7 +375,12 @@ impl Drop for Session {
 
 /// Forward the child's narration line by line. Its last non-empty line is the
 /// summary it was asked for, so it is kept apart from the rest.
-fn pump(stdout: std::process::ChildStdout, tx: &Sender<Status>, cancelled: &AtomicBool) {
+fn pump(
+    stdout: std::process::ChildStdout,
+    tx: &Sender<Status>,
+    cancelled: &AtomicBool,
+    complaints: &Mutex<String>,
+) {
     let mut last = String::new();
     for line in BufReader::new(stdout).lines() {
         if cancelled.load(Ordering::Relaxed) {
@@ -333,10 +399,18 @@ fn pump(stdout: std::process::ChildStdout, tx: &Sender<Status>, cancelled: &Atom
     if cancelled.load(Ordering::Relaxed) {
         return;
     }
-    let _ = tx.send(if last.is_empty() {
-        Status::Failed("the assistant said nothing".to_string())
-    } else {
+    let _ = tx.send(if !last.is_empty() {
         Status::Done(last)
+    } else {
+        // Nothing on stdout means it failed before saying anything; what it
+        // wrote to stderr is then the only account of why, and reporting
+        // "said nothing" while holding the reason would be a lie of omission.
+        let why = complaints.lock().ok().map(|held| held.trim().to_string()).unwrap_or_default();
+        Status::Failed(if why.is_empty() {
+            "the assistant said nothing".to_string()
+        } else {
+            why.lines().last().unwrap_or(&why).to_string()
+        })
     });
 }
 
@@ -353,6 +427,7 @@ mod tests {
             rom: PathBuf::from("/Users/vous/Jeux/Super Mario World.zip"),
             state: PathBuf::from("/tmp/session.state"),
             cheats: PathBuf::from("/tmp/game.cheats.json"),
+            model: None,
         }
     }
 
@@ -371,7 +446,11 @@ mod tests {
     fn each_task_is_told_what_to_leave_behind() {
         let cheat = prompt(&request(Task::Cheat));
         assert!(cheat.contains("cheat-add"), "a cheat run must persist its find");
-        assert!(cheat.contains("docs/CHEATS.md"), "the two known traps are written down there");
+        // Spelled out, not pointed at: an installed application has no
+        // repository next to it.
+        assert!(!cheat.contains("docs/CHEATS.md"), "a deployed app cannot read that file");
+        assert!(cheat.contains("successive intersection"), "the method must be in the prompt");
+        assert!(cheat.contains("copies"), "and the trap that costs a whole search");
 
         let play = prompt(&request(Task::Play));
         assert!(play.contains("load-state"), "a play run must know the way back");

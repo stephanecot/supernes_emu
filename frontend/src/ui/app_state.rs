@@ -57,6 +57,8 @@ pub enum Setting {
     /// Where the assistant's tool lives, typed or picked by the player. Empty
     /// goes back to looking on the `PATH`.
     AssistantPath(String),
+    /// Model the assistant runs on. Empty leaves the tool its own default.
+    AssistantModel(String),
     /// Drop every keyboard and controller binding the player made, back to the
     /// built-in `input::DEFAULT_KEYMAP` / `pad::DEFAULT_PAD_MAP`.
     ResetInputs,

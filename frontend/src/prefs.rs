@@ -231,6 +231,13 @@ pub struct Prefs {
     /// directories is searched. Guessing works until it does not, and it hides
     /// the one fact worth knowing when it fails — where the application looked.
     pub assistant_path: String,
+    /// Model the assistant runs on, passed straight to the tool's `--model`.
+    /// Defaults to `assistant::DEFAULT_MODEL`; empty leaves the tool its own.
+    ///
+    /// Free text rather than a fixed list: model names change faster than this
+    /// emulator ships, and a hardcoded menu would go stale and start refusing
+    /// names that work.
+    pub assistant_model: String,
     /// Interface language: `fr`, `en`, or anything else — including the
     /// default `system` — to follow the host. Storing the fallback as an
     /// unrecognised string rather than as an absent key keeps the file
@@ -282,6 +289,7 @@ impl Default for Prefs {
             library_dir: None,
             assistant: false,
             assistant_path: crate::assistant::default_path(),
+            assistant_model: crate::assistant::DEFAULT_MODEL.to_string(),
             language: "system".to_string(),
             extra_roms: Vec::new(),
             library_sort: "title".to_string(),
@@ -444,6 +452,12 @@ impl Prefs {
     pub fn assistant_tool(&self) -> Option<&Path> {
         let trimmed = self.assistant_path.trim();
         (!trimmed.is_empty()).then(|| Path::new(trimmed))
+    }
+
+    /// The model to run on, or `None` to leave the tool its own default.
+    pub fn assistant_model(&self) -> Option<&str> {
+        let trimmed = self.assistant_model.trim();
+        (!trimmed.is_empty()).then_some(trimmed)
     }
 
     /// Language the interface is drawn in: the stored choice, or the host's

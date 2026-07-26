@@ -257,6 +257,8 @@ impl FolderNotice {
 /// persisted — the panel always opens on the first section.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SettingsUi {
+    /// Edit buffer of the assistant's model name.
+    pub assistant_model: String,
     /// Edit buffer of the assistant's tool path: a text field needs somewhere
     /// to live between frames, and `prefs` is only written when the field is
     /// left.
@@ -1026,6 +1028,38 @@ fn assistant_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
         );
     }
     hint(ui, Msg::AssistantPathHint.text(lang));
+    ui.add_space(14.0);
+
+    // Free text, not a menu: model names change faster than this emulator
+    // ships, and a fixed list would go stale and start refusing names that
+    // work. The aliases are offered as a shortcut, not as the only choices.
+    if model.state.assistant_model.is_empty() && !model.prefs.assistant_model.is_empty() {
+        model.state.assistant_model = model.prefs.assistant_model.clone();
+    }
+    row(ui, Msg::AssistantModel.text(lang), label_w, |ui| {
+        let mut name = model.state.assistant_model.clone();
+        let edit = ui.add(
+            egui::TextEdit::singleline(&mut name)
+                .desired_width(180.0)
+                .hint_text(Msg::AssistantModelDef.text(lang))
+                .font(theme::mono(theme::SIZE_MONO)),
+        );
+        if edit.changed() {
+            model.state.assistant_model = name.clone();
+        }
+        if (edit.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter)))
+            && name != model.prefs.assistant_model
+        {
+            action = Action::Set(Setting::AssistantModel(name));
+        }
+        for alias in ["opus", "sonnet", "haiku"] {
+            if ui.selectable_label(model.state.assistant_model == alias, alias).clicked() {
+                model.state.assistant_model = alias.to_string();
+                action = Action::Set(Setting::AssistantModel(alias.to_string()));
+            }
+        }
+    });
+    hint(ui, Msg::AssistantModelHint.text(lang));
     action
 }
 
@@ -2416,6 +2450,7 @@ mod tests {
         for guide in [None, Some(PathBuf::from("/repo/docs/emulateur-snes-explique.pdf"))] {
             let mut state = SettingsUi {
                 assistant_path: String::new(),
+                assistant_model: String::new(),
                 open: true,
                 section: Section::About,
                 guide,

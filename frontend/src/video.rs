@@ -1462,6 +1462,10 @@ impl App {
             Setting::ShowFps(on) => self.set_show_fps(on),
             Setting::Assistant(on) => self.set_assistant(on),
             Setting::AssistantPath(path) => self.set_assistant_path(path),
+            Setting::AssistantModel(model) => {
+                self.prefs.assistant_model = model;
+                self.prefs.save();
+            }
             Setting::Mute(on) => self.set_mute(on),
             Setting::Volume(volume) => self.set_volume(volume),
             Setting::FastForward(factor) => self.set_fast_forward_factor(factor),
@@ -2762,6 +2766,7 @@ impl App {
             rom,
             state,
             cheats: self.paths.cheats_write(),
+            model: self.prefs.assistant_model().map(str::to_owned),
         };
         match crate::assistant::Session::start(&claude, &request) {
             Ok(session) => {

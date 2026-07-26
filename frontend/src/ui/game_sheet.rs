@@ -325,6 +325,14 @@ pub fn show(ui: &mut egui::Ui, model: &mut SheetModel) -> Action {
             }
 
             ui.add_space(20.0);
+            // Its own place, and deliberately not next to `Triches`: playing a
+            // passage for someone is not cheating, and filing the two together
+            // said it was.
+            if let Some(produced) = ask_section(ui, model) {
+                action = produced;
+            }
+
+            ui.add_space(20.0);
             super::home::heading(ui, Msg::SaveStates.text(lang));
             ui.add_space(8.0);
             if model.data.states.is_empty() {
@@ -780,6 +788,8 @@ fn ask_section(ui: &mut egui::Ui, model: &mut SheetModel) -> Option<Action> {
     let lang = model.lang;
     let mut action = None;
     super::home::heading(ui, Msg::AskHeading.text(lang));
+    ui.add_space(4.0);
+    note(ui, Msg::AskIntro.text(lang));
     ui.add_space(8.0);
 
     if !model.assistant {
