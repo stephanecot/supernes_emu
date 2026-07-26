@@ -56,10 +56,17 @@ pub struct HomeModel<'a> {
     /// `game_id` of the session currently loaded, if any: the assistant plays
     /// from that session's state, so it can only play *this* game.
     pub running: Option<&'a str>,
+    /// Last frame the suspended session drew, as RGBA — `None` when nothing
+    /// is loaded. Shown so that leaving a game for the menu never looks like
+    /// having closed it.
+    pub session_frame: Option<&'a [u8]>,
     /// Edit buffer of the request being typed on the sheet.
     pub wish: &'a mut String,
     /// The assistant's latest line while one runs.
     pub assistant_says: Option<&'a str>,
+    /// It is playing the session, not searching: the game screen is where that
+    /// happens, and the console waits while this one is up.
+    pub assistant_playing: bool,
 }
 
 impl HomeModel<'_> {
@@ -148,12 +155,99 @@ pub fn show(ctx: &egui::Context, model: &mut HomeModel) -> Action {
 /// The lower band: the game grid, or the sheet of the selected game. A
 /// selection naming a game that is no longer in the library (folder changed,
 /// file deleted) falls back to the grid.
+/// Side of the suspended session's picture on the home screen, in points.
+const SESSION_PICTURE_W: f32 = 152.0;
+const SESSION_PICTURE_H: f32 = SESSION_PICTURE_W / library_view::PICTURE_RATIO;
+
+/// The band that shows a game is still there.
+///
+/// A green dot and a title said the session existed; nothing *showed* it, and
+/// "I left the menu open" and "I closed the game" looked alike. The picture is
+/// the frame the console stopped on — the game itself, held still — which
+/// needs no caption to be understood.
+fn session_band(ui: &mut egui::Ui, model: &mut HomeModel) -> Option<Action> {
+    let (Some(title), Some(frame)) = (model.game_title, model.session_frame) else {
+        return None;
+    };
+    let lang = model.lang;
+    let mut action = None;
+    egui::Frame::new()
+        .fill(theme::BG_CARD)
+        .stroke(Stroke::new(1.0, theme::STROKE))
+        .corner_radius(8.0)
+        .inner_margin(egui::Margin::same(10))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let (rect, _) = ui.allocate_exact_size(
+                    Vec2::new(SESSION_PICTURE_W, SESSION_PICTURE_H),
+                    Sense::hover(),
+                );
+                let key = Path::new(super::textures::TextureStore::SESSION_FRAME);
+                let size = [crate::SCREEN_WIDTH, crate::SCREEN_HEIGHT];
+                let texture = model
+                    .library
+                    .textures
+                    .frame(ui.ctx(), key, frame, size)
+                    .map(|texture| texture.id());
+                match texture {
+                    Some(id) => {
+                        ui.painter().image(
+                            id,
+                            rect,
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            Color32::WHITE,
+                        );
+                    }
+                    None => {
+                        ui.painter().rect_filled(rect, 4.0, theme::BG_DEEP);
+                    }
+                }
+                ui.add_space(14.0);
+                ui.vertical(|ui| {
+                    ui.label(
+                        RichText::new(Msg::SessionStillOn.text(lang))
+                            .font(theme::font(theme::SIZE_SMALL))
+                            .color(theme::GREEN),
+                    );
+                    ui.add_space(2.0);
+                    ui.label(
+                        RichText::new(elide(title, SESSION_TITLE_MAX_CHARS))
+                            .font(theme::strong(theme::SIZE_HEADING))
+                            .color(theme::TEXT),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(Msg::SessionStillOnHint.text(lang))
+                            .font(theme::font(theme::SIZE_SMALL))
+                            .color(theme::TEXT_DIM),
+                    );
+                    ui.add_space(10.0);
+                    if icons::primary_button(ui, Icon::Play, Msg::Resume.text(lang)).clicked() {
+                        action = Some(Action::ResumeGame);
+                    }
+                });
+            });
+        });
+    ui.add_space(12.0);
+    action
+}
+
 fn library(ui: &mut egui::Ui, model: &mut HomeModel) -> Action {
     let entries = model.library.entries;
     let games = model.library.games;
     let thumbs = model.library.thumbs;
     let pending = model.library.pending;
     let selected = model.library.state.selected.clone();
+
+    // Above the grid, not inside it: the grid is a list of games to start,
+    // and a game already started is a different kind of thing.
+    let mut action = Action::None;
+    if model.library.state.selected.is_none() && model.library.state.tab == tabs::Tab::Library {
+        if let Some(produced) = session_band(ui, model) {
+            return produced;
+        }
+    }
+    let _ = &mut action;
 
     if let Some(id) = selected {
         if let Some(entry) = entries.iter().find(|e| e.id == id) {
@@ -169,6 +263,7 @@ fn library(ui: &mut egui::Ui, model: &mut HomeModel) -> Action {
                 is_running: model.running == Some(id.as_str()),
                 wish: model.wish,
                 assistant_says: model.assistant_says,
+                assistant_playing: model.assistant_playing,
                 fetching: model.library.fetching.contains(&id),
                 textures: model.library.textures,
                 selected: &mut model.library.state.selected,
@@ -417,10 +512,12 @@ mod tests {
             produced = show(
                 ctx,
                 &mut HomeModel {
+                session_frame: None,
                 assistant: true,
                 running: None,
                 wish: &mut String::new(),
                 assistant_says: None,
+                assistant_playing: false,
                     app_name: "Prisme",
                     version: "0.0.0",
                     lang,
@@ -521,10 +618,12 @@ mod tests {
         let mut textures = super::super::textures::TextureStore::new();
         let sheet = SheetData::default();
         let mut m = HomeModel {
+                session_frame: None,
                 assistant: true,
                 running: None,
                 wish: &mut String::new(),
                 assistant_says: None,
+                assistant_playing: false,
             app_name: "Prisme",
             version: "0.0.0",
             lang: Lang::Fr,

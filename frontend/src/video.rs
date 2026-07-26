@@ -252,6 +252,7 @@ pub fn run(launch: Option<Launch>, prefs: Prefs) -> Result<(), String> {
         wish: String::new(),
         assistant_session: None,
         assistant_line: None,
+        assistant_live: None,
         claude,
         quit_confirm: false,
         quit_saved_pause: false,
@@ -422,8 +423,13 @@ struct App {
     /// The assistant currently running, if any. Dropping it kills the child,
     /// so quitting mid-request cannot leave one emulating in the background.
     assistant_session: Option<crate::assistant::Session>,
-    /// Its latest line, shown on the sheet in place of the field.
+    /// Its latest line, shown on the sheet in place of the field — and, while
+    /// it is playing, under the badge on the game screen itself.
     assistant_line: Option<String>,
+    /// The control channel the assistant drives *this* console through, open
+    /// only while a `Jouer le passage` request is running. Its presence is what
+    /// hands the pad over: see `current_pads` and `about_to_wait`.
+    assistant_live: Option<crate::live::Server>,
     /// Path of the `claude` tool, resolved once at startup; `None` disables
     /// the assistant entirely. Looked up here rather than at each use so the
     /// settings screen can *say* why the row is inert, instead of failing on
@@ -659,6 +665,11 @@ impl ApplicationHandler for App {
         // (see `crate::dialog`).
         self.pump_dialogs();
         self.poll_assistant();
+        // The assistant's requests are answered here, between two frames, and
+        // the one command that costs frames is only *armed* — it spends them
+        // one per pass through this function, which is what keeps the window
+        // drawing while it plays (see `live.rs`).
+        self.pump_assistant_channel();
         // Scan results and finished thumbnails arrive here, one channel drain
         // per frame; the library thread never touches the UI itself.
         self.poll_library();
@@ -687,7 +698,17 @@ impl ApplicationHandler for App {
         // behind it.
         self.credit_play_time(running && !self.paused);
 
-        if running && (!self.paused || self.frame_advance) {
+        // While the assistant holds the channel the console advances only when
+        // one of its commands owes a frame. Between two of them — the seconds
+        // it spends reading a screenshot — the picture is held still rather
+        // than left to run with nobody at the controls, which in most games
+        // means walking into the first hole. The loop itself never stops: the
+        // window keeps presenting, the shell keeps answering, and the player
+        // can stop the whole thing at any moment.
+        let assistant_waiting =
+            self.assistant_live.as_ref().is_some_and(|live| !live.owes_frames());
+
+        if running && (!self.paused || self.frame_advance) && !assistant_waiting {
             // Fast-forward runs `factor` emulated frames per presented frame;
             // only the last one is uploaded, so the extra frames cost no
             // presentation work. `frame_advance` always steps exactly one.
@@ -697,8 +718,10 @@ impl ApplicationHandler for App {
                 1
             };
             let mut frames_run = 0u32;
-            let pads = self.current_pads();
             for i in 0..factor {
+                // Resolved per frame, not per pass: a `press` hands the pad
+                // back mid-burst when its hold is over and its release begins.
+                let pads = self.current_pads();
                 if let Some(snes) = &mut self.snes {
                     snes.run_frame(pads);
                     // After the frame, and after *every* frame of an
@@ -709,6 +732,16 @@ impl ApplicationHandler for App {
                     self.cheats.apply(snes);
                 }
                 frames_run += 1;
+                // The frame the pending command was waiting for; its answer
+                // goes out here when it was the last one owed.
+                if let Some(live) = &mut self.assistant_live {
+                    live.frame_elapsed();
+                    // Its last frame ends the burst: an accelerated pass must
+                    // not run on into frames the assistant never asked for.
+                    if !live.owes_frames() {
+                        break;
+                    }
+                }
                 // Silent degradation: `next_deadline` is already the *next*
                 // presentation time (advanced by `pace` above), so passing it
                 // means the host cannot sustain the requested factor. Stop
@@ -1119,7 +1152,22 @@ impl App {
     /// cleared when they open), and the emulation keeps running behind them,
     /// so a controller left leaning on the desk must not play the game either.
     /// Same when the window is not focused (see `WindowEvent::Focused`).
+    ///
+    /// **While the assistant is driving, the pad is the assistant's** and the
+    /// player's own input reaches nothing. Two hands on one controller is not a
+    /// state anyone asked for, and the alternative — letting a stray key stop
+    /// the assistant — would break a run mid-jump on a hand resting on the
+    /// keyboard, and leave the assistant driving a console that has stopped
+    /// answering it. Stopping is a deliberate gesture instead: the sheet's
+    /// `Arrêter` button, one Escape away. Everything that is not a pad button
+    /// stays live throughout — pause, screenshot, save state, full screen.
     fn current_pads(&self) -> [JoypadState; 2] {
+        if let Some(live) = &self.assistant_live {
+            // No command in flight means no frame is being run at all (see
+            // `about_to_wait`); answering with a released pad is the honest
+            // value either way.
+            return [live.pad().unwrap_or_default(), JoypadState::default()];
+        }
         if self.settings.open || self.quit_confirm || !self.focused {
             return [JoypadState::default(); 2];
         }
@@ -1361,6 +1409,9 @@ impl App {
                 }
                 self.assistant_session = None;
                 self.assistant_line = None;
+                // Dropping the channel closes the port and gives the pad back:
+                // the player is in charge again on the very next frame.
+                self.assistant_live = None;
             }
             Action::ChooseAssistantTool => {
                 let current = self.claude.clone().or_else(|| {
@@ -1847,6 +1898,16 @@ impl App {
         } else {
             (None, None)
         };
+        // The game screen's own badge: whether the assistant has the pad right
+        // now, and the last thing it said. Resolved here, before the borrow
+        // below, and only on the screen that draws it.
+        let assistant = match (&self.assistant_live, home) {
+            (Some(live), false) => Some((live.owes_frames(), self.assistant_line.clone())),
+            _ => None,
+        };
+        // The home screen only needs to know *that* one is playing: it is the
+        // screen that suspends the console the assistant is waiting on.
+        let playing = self.assistant_live.is_some();
         // Resolved for the settings panel only, and only while it is up: the
         // library's own `dir` is still empty when a run went straight into a
         // game without ever showing the home screen.
@@ -1884,9 +1945,12 @@ impl App {
             assistant_line,
             claude,
             game_id,
+            native_buf,
             ..
         } = self;
         let assistant_on = prefs.assistant && claude.is_some();
+        // A frame is worth showing only when a console actually drew one.
+        let has_frame = game_id.is_some();
         let (Some(ui), Some(pixels)) = (ui.as_mut(), pixels.as_ref()) else {
             return Action::None;
         };
@@ -1917,10 +1981,15 @@ impl App {
                 crate::ui::home::show(
                     ctx,
                     &mut HomeModel {
+                        // The last frame the console drew, still in the buffer
+                        // the presenter fills — no copy, and no PNG written for
+                        // the sake of a picture that already exists in memory.
+                        session_frame: has_frame.then_some(native_buf.as_slice()),
                         assistant: assistant_on,
                         running: game_id.as_deref(),
                         wish,
                         assistant_says: assistant_line.as_deref(),
+                        assistant_playing: playing,
                         app_name: APP_NAME,
                         version: VERSION,
                         lang,
@@ -1942,7 +2011,9 @@ impl App {
                     },
                 )
             } else {
-                crate::ui::game::overlay(ctx, paused);
+                crate::ui::game::overlay(ctx, paused, assistant.as_ref().map(|(playing, says)| {
+                    crate::ui::game::Assistant { playing: *playing, says: says.as_deref() }
+                }), lang);
                 Action::None
             };
             // The quit confirmation sits over everything, including the
@@ -2607,6 +2678,44 @@ impl App {
         self.library.sheet = SheetData::default();
     }
 
+    /// Answer everything the assistant asked for since the last frame.
+    ///
+    /// Never blocks and never emulates: the frames a `step`/`press` wants are
+    /// run by `about_to_wait` itself, one per pass, so a command that asks for
+    /// five seconds of play cannot cost the window a single dropped frame.
+    fn pump_assistant_channel(&mut self) {
+        if self.assistant_live.is_none() {
+            return;
+        }
+        // No cartridge means nothing to drive; the channel is closed rather
+        // than left open on a console that no longer exists.
+        let Some(snes) = self.snes.as_mut() else {
+            self.assistant_live = None;
+            return;
+        };
+        let mut console = crate::live::Console {
+            snes,
+            cheats: &mut self.cheats,
+            paths: &self.paths,
+            rom: &self.current_rom_path,
+            sram_baseline: &mut self.sram_baseline,
+            cheats_changed: false,
+        };
+        if let Some(live) = &mut self.assistant_live {
+            live.pump(&mut console);
+        }
+        let cheats_changed = console.cheats_changed;
+        if cheats_changed {
+            // The sheet lists what is on disk; gather it again next frame.
+            self.library.sheet = SheetData::default();
+        }
+        // `quit`, or a client that hung up: the console goes back to the
+        // player, whatever the assistant process does next.
+        if self.assistant_live.as_ref().is_some_and(crate::live::Server::closed) {
+            self.assistant_live = None;
+        }
+    }
+
     /// Send the typed request off. The state it starts from is written first,
     /// which is also the state to come back to: an assistant that plays must
     /// never be the only copy of where the player was.
@@ -2626,9 +2735,29 @@ impl App {
             self.status = Some((format!("{e}"), Instant::now()));
             return;
         }
+        // Playing a passage drives the console the player is looking at, so the
+        // door for it is opened first: a request whose channel cannot be opened
+        // is never sent, rather than sent and left to fail on the far side.
+        // A cheat search opens nothing — its own process, its own console, and
+        // that is exactly why it is the harmless one.
+        let mut live = None;
+        if play {
+            match crate::live::Server::start(self.assistant_out_dir()) {
+                Ok(server) => live = Some(server),
+                Err(e) => {
+                    eprintln!("assistant: {e}");
+                    self.set_status(Msg::StatusNoChannel.text(self.prefs.lang()));
+                    return;
+                }
+            }
+        }
         let request = crate::assistant::Request {
             task: if play { crate::assistant::Task::Play } else { crate::assistant::Task::Cheat },
             wish,
+            attach: live.as_ref().map(|s| crate::assistant::Attach {
+                port: s.port(),
+                secret: s.secret().to_string(),
+            }),
             emulator: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("prisme")),
             rom,
             state,
@@ -2638,13 +2767,38 @@ impl App {
             Ok(session) => {
                 self.assistant_session = Some(session);
                 self.assistant_line = Some(String::new());
-                // The game stops while the assistant works: it is about to drive
-                // a console of its own, and two hands on one game is not a state
-                // anyone asked for.
-                self.paused = true;
+                match live {
+                    // Playing: the player asked to watch, so the game screen
+                    // comes back up and the console is handed to the channel.
+                    // It stays still until the assistant's first command — a
+                    // held picture, not a frozen application.
+                    Some(server) => {
+                        self.assistant_live = Some(server);
+                        self.paused = false;
+                        self.resume_game();
+                    }
+                    // Searching: a console of its own, so this one stops rather
+                    // than running unattended while the search takes its time.
+                    None => self.paused = true,
+                }
             }
-            Err(e) => self.status = Some((e, Instant::now())),
+            Err(e) => {
+                self.assistant_live = None;
+                self.status = Some((e, Instant::now()));
+            }
         }
+    }
+
+    /// Where an unnamed screenshot or save state of a live session lands: the
+    /// game's own sidecar folder, which is known to be writable, rather than a
+    /// path under `target/` relative to a working directory an installed
+    /// application has no say over.
+    fn assistant_out_dir(&self) -> PathBuf {
+        self.paths
+            .resume_write()
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(crate::agent::DEFAULT_OUT_DIR))
     }
 
     /// Drain what the assistant has to say, once per frame. A finished session
@@ -2660,6 +2814,7 @@ impl App {
                     self.status = Some((line, Instant::now()));
                     self.assistant_line = None;
                     self.assistant_session = None;
+                    self.assistant_live = None;
                     self.refresh_cheats();
                     return;
                 }
@@ -2668,6 +2823,7 @@ impl App {
         if session.finished() {
             self.assistant_line = None;
             self.assistant_session = None;
+            self.assistant_live = None;
             self.refresh_cheats();
         }
     }
@@ -3304,6 +3460,7 @@ mod overlay_tests {
             "MANETTE 1 DECONNECTEE",
             "MANETTE 2 CONNECTEE",
             "MANETTE 2 DECONNECTEE",
+            "CANAL IA IMPOSSIBLE",
         ];
         for msg in messages {
             for c in msg.chars().filter(|c| *c != ' ') {

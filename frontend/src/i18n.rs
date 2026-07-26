@@ -148,6 +148,9 @@ messages! {
                        / "Add a game from outside the folder — or drop its file on the window",
     Play              => "Jouer" / "Play",
     Resume            => "Reprendre" / "Resume",
+    SessionStillOn    => "Partie en cours" / "Game still running",
+    SessionStillOnHint => "Elle n'a pas été arrêtée : la console est en pause, exactement là où vous l'avez laissée."
+                       / "It was not stopped: the console is paused, exactly where you left it.",
     StartOver         => "Nouvelle partie" / "New game",
     StartOverHint     => "Démarre la cartouche à zéro. La partie en cours est conservée et reste reprenable."
                        / "Starts the cartridge from scratch. The suspended session is kept and stays resumable.",
@@ -332,12 +335,10 @@ messages! {
                        / "Claude Code is installed on this machine. The reasoning happens here, with no key and no account.",
     AssistantMissing  => "Claude Code est introuvable sur cette machine, l'assistant ne peut donc pas être activé."
                        / "Claude Code was not found on this machine, so the assistant cannot be enabled.",
-    AssistantGetIt    => "Installez-le, puis rouvrez cet écran." / "Install it, then reopen this screen.",
     AssistantTool     => "Chemin de l'outil" / "Path to the tool",
     AssistantLocate   => "Parcourir…" / "Browse…",
     AssistantOnPath   => "Trouvé dans le PATH" / "Found on the PATH",
     AssistantOk       => "Chemin valide" / "Path is valid",
-    AssistantCheck    => "Vérifier" / "Check",
 
     // --- Asking the assistant ------------------------------------------------
     AskHeading        => "Demander à l'IA" / "Ask the AI",
@@ -355,6 +356,12 @@ messages! {
                        / "Turn the assistant on in Settings → AI assistant.",
     AskNeedsSession   => "Lancez ce jeu d'abord : l'assistant part de l'état de votre partie."
                        / "Start this game first: the assistant works from your session's state.",
+    AskWatching       => "Il joue votre partie : revenez au jeu (Échap) pour le regarder faire. Tant que cet écran est ouvert, la partie est suspendue et il attend."
+                       / "It is playing your session: go back to the game (Esc) to watch it. While this screen is up the session is suspended and it waits.",
+    LiveDriving       => "L'IA joue · Échap pour reprendre la main"
+                       / "The AI is playing · Esc to take back control",
+    LiveThinking      => "L'IA réfléchit · la partie l'attend"
+                       / "The AI is thinking · the game is waiting for it",
     AssistantPathHint => "Laissez vide pour chercher dans le PATH. Une application lancée depuis le Finder n'hérite pas du PATH de votre terminal : c'est là qu'il faut indiquer le chemin complet."
                        / "Leave empty to look on the PATH. An application launched from the Finder does not inherit your terminal's PATH: that is when the full path belongs here.",
     AssistantBadPath  => "Ce chemin ne désigne aucun exécutable." / "That path is not an executable.",
@@ -490,6 +497,7 @@ messages! {
     StatusNoScreenshot => "CAPTURE IMPOSSIBLE" / "SCREENSHOT FAILED",
     StatusSpcFailed   => "EXPORT SPC ERREUR" / "SPC EXPORT ERROR",
     StatusSpcExported => "MUSIQUE SPC EXPORTEE" / "SPC MUSIC EXPORTED",
+    StatusNoChannel   => "CANAL IA IMPOSSIBLE" / "AI CHANNEL FAILED",
 
     // --- Native menu bar (macOS) -------------------------------------------
     MenuSettings      => "Réglages…" / "Settings…",

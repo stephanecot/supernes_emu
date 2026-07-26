@@ -156,6 +156,8 @@ pub struct SheetModel<'a> {
     pub wish: &'a mut String,
     /// The assistant's latest line, while one is running.
     pub assistant_says: Option<&'a str>,
+    /// That run is a `Jouer le passage`, which drives the live console.
+    pub assistant_playing: bool,
 }
 
 /// Draw the sheet and return what the player asked for.
@@ -803,6 +805,13 @@ fn ask_section(ui: &mut egui::Ui, model: &mut SheetModel) -> Option<Action> {
         ui.label(
             RichText::new(said).font(theme::mono(theme::SIZE_SMALL)).color(theme::TEXT_DIM),
         );
+        // Where to look: a run that plays drives the console on the game
+        // screen, and this screen suspends it — so the assistant is waiting on
+        // a player who is reading about it instead of watching it.
+        if model.assistant_playing {
+            ui.add_space(4.0);
+            note(ui, Msg::AskWatching.text(lang));
+        }
         return action;
     }
 
@@ -1084,6 +1093,7 @@ mod tests {
                 is_running: true,
                 wish: &mut String::new(),
                 assistant_says: None,
+                assistant_playing: false,
                         entry: &entry,
                         stats,
                         data,

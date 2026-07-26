@@ -986,14 +986,33 @@ impl Fixture {
         // open: the capture worth looking at is the one carrying the field.
         let running = self.library_ui.selected.clone();
         let mut wish = String::new();
+        // A plausible held frame: a sky gradient over ground, in the console's
+        // own 256x224 RGBA.
+        let session_frame: Vec<u8> = (0..crate::SCREEN_HEIGHT)
+            .flat_map(|y| {
+                (0..crate::SCREEN_WIDTH).flat_map(move |x| {
+                    let ground = y > crate::SCREEN_HEIGHT * 3 / 4;
+                    let shade = (x * 255 / crate::SCREEN_WIDTH) as u8;
+                    if ground {
+                        [40, 120 + shade / 4, 60, 255]
+                    } else {
+                        [70 + shade / 3, 110 + shade / 4, 200, 255]
+                    }
+                })
+            })
+            .collect();
         let pending: &HashSet<String> = if empty { &self.no_pending } else { &self.pending };
         super::home::show(
             ctx,
             &mut HomeModel {
+                // A frame the fixture draws itself: without one, the band that
+                // shows a game is still running could not be looked at at all.
+                session_frame: Some(&session_frame),
                 assistant: true,
                 running: running.as_deref(),
                 wish: &mut wish,
                 assistant_says: None,
+                assistant_playing: false,
                 app_name: crate::APP_NAME,
                 version: crate::VERSION,
                 lang: self.lang,

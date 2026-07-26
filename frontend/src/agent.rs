@@ -48,7 +48,7 @@ const MAX_MEM_LEN: u32 = 4096;
 const MAX_FRAMES: u32 = 100_000;
 
 /// The button names the rest of the codebase uses (`--script`, the keymap).
-const BUTTONS: [&str; 12] =
+pub(crate) const BUTTONS: [&str; 12] =
     ["A", "B", "X", "Y", "L", "R", "Start", "Select", "Up", "Down", "Left", "Right"];
 
 /// One line of the protocol, as understood after parsing.
@@ -152,13 +152,7 @@ impl Session {
     /// Tagged `"event": "ready"` rather than answering an `id`, so a client can
     /// tell it apart from a response to a request it made.
     pub fn greeting(&self) -> Value {
-        let mut v = self.describe();
-        let obj = v.as_object_mut().expect("describe returns an object");
-        obj.insert("ok".into(), Value::Bool(true));
-        obj.insert("event".into(), json!("ready"));
-        obj.insert("buttons".into(), json!(BUTTONS));
-        obj.insert("commands".into(), json!(HELP));
-        v
+        greeting(self.describe())
     }
 
     /// Parse one line, run it, and produce the single answer it is owed.
@@ -319,36 +313,20 @@ impl Session {
     /// Every cheat answer carries the whole list and the file it was written
     /// to: an agent that has just added one can check what the game will
     /// actually run without a second request.
-    fn cheat_state(&self, mut fields: Value) -> Value {
-        let obj = fields.as_object_mut().expect("cheat bodies are JSON objects");
-        obj.insert("cheats".into(), Value::Array(self.cheats.list().iter().map(cheat_json).collect()));
-        obj.insert("count".into(), json!(self.cheats.list().len()));
-        obj.insert("path".into(), json!(display_path(&self.paths.cheats_write())));
-        fields
+    fn cheat_state(&self, fields: Value) -> Value {
+        cheat_state(fields, &self.cheats, &self.paths.cheats_write())
     }
 
     /// Where the emulator is. Shared by `state`, `info` and the greeting.
     fn describe(&self) -> Value {
-        let cart = &self.snes.bus.cart;
-        json!({
-            "protocol": PROTOCOL_VERSION,
-            "frame": self.frame,
-            "rom": display_path(&self.rom_path),
-            "title": cart.title.trim(),
-            "region": match cart.region { Region::Pal => "PAL", Region::Ntsc => "NTSC" },
-            "mapping": match cart.mapping { Mapping::LoRom => "LoROM", Mapping::HiRom => "HiROM" },
-            "rom_bytes": cart.rom.len(),
-            "sram_bytes": cart.sram.len(),
-            "at_saved_state": self.at_saved_state,
-            "cheats": self.cheats.list().len(),
-            "last_state": match &self.last_state {
-                Some(p) => json!({
-                    "path": display_path(p),
-                    "frame": self.states.get(p),
-                }),
-                None => Value::Null,
-            },
-            "out_dir": display_path(&self.out_dir),
+        describe(Snapshot {
+            snes: &self.snes,
+            rom: &self.rom_path,
+            frame: self.frame,
+            at_saved_state: self.at_saved_state,
+            cheats: self.cheats.list().len(),
+            last_state: self.last_state.as_deref().map(|p| (p, self.states.get(p).copied())),
+            out_dir: &self.out_dir,
         })
     }
 
@@ -378,6 +356,65 @@ impl Session {
             .map_err(|e| format!("create {}: {e}", self.out_dir.display()))?;
         Ok(crate::unique_path(&self.out_dir, stem, ext))
     }
+}
+
+/// Everything `state` reports about a console, whichever channel is driving it.
+///
+/// The live channel (`live.rs`) drives the console in the window instead of one
+/// of its own, and fills this in from the running session — so the two can
+/// never come to describe the same emulator differently.
+pub(crate) struct Snapshot<'a> {
+    pub snes: &'a Snes,
+    pub rom: &'a Path,
+    pub frame: u64,
+    pub at_saved_state: bool,
+    pub cheats: usize,
+    /// Last state written or restored, and the frame it was taken at when this
+    /// session is the one that took it.
+    pub last_state: Option<(&'a Path, Option<u64>)>,
+    pub out_dir: &'a Path,
+}
+
+/// The `state` body.
+pub(crate) fn describe(s: Snapshot) -> Value {
+    let cart = &s.snes.bus.cart;
+    json!({
+        "protocol": PROTOCOL_VERSION,
+        "frame": s.frame,
+        "rom": display_path(s.rom),
+        "title": cart.title.trim(),
+        "region": match cart.region { Region::Pal => "PAL", Region::Ntsc => "NTSC" },
+        "mapping": match cart.mapping { Mapping::LoRom => "LoROM", Mapping::HiRom => "HiROM" },
+        "rom_bytes": cart.rom.len(),
+        "sram_bytes": cart.sram.len(),
+        "at_saved_state": s.at_saved_state,
+        "cheats": s.cheats,
+        "last_state": match s.last_state {
+            Some((path, frame)) => json!({ "path": display_path(path), "frame": frame }),
+            None => Value::Null,
+        },
+        "out_dir": display_path(s.out_dir),
+    })
+}
+
+/// Turn a `describe` body into the unsolicited first line of a channel.
+pub(crate) fn greeting(mut v: Value) -> Value {
+    let obj = v.as_object_mut().expect("describe returns an object");
+    obj.insert("ok".into(), Value::Bool(true));
+    obj.insert("event".into(), json!("ready"));
+    obj.insert("buttons".into(), json!(BUTTONS));
+    obj.insert("commands".into(), json!(HELP));
+    v
+}
+
+/// The body every cheat answer carries: the whole list, and the file it lives
+/// in.
+pub(crate) fn cheat_state(mut fields: Value, cheats: &Cheats, path: &Path) -> Value {
+    let obj = fields.as_object_mut().expect("cheat bodies are JSON objects");
+    obj.insert("cheats".into(), Value::Array(cheats.list().iter().map(cheat_json).collect()));
+    obj.insert("count".into(), json!(cheats.list().len()));
+    obj.insert("path".into(), json!(display_path(path)));
+    fields
 }
 
 /// Serve the channel until `quit` or EOF on stdin. Returns `Ok` on both: a
@@ -533,7 +570,7 @@ fn cheat_field(obj: &Map<String, Value>) -> Result<Cheat, String> {
 }
 
 /// One cheat, in the shape every cheat response uses.
-fn cheat_json(c: &Cheat) -> Value {
+pub(crate) fn cheat_json(c: &Cheat) -> Value {
     json!({
         "name": c.name,
         "addr": c.addr_text(),
@@ -546,7 +583,7 @@ fn cheat_json(c: &Cheat) -> Value {
 /// A name no cheat carries. The error says what the game *does* have, so an
 /// agent working from a stale list can fix its request without another round
 /// trip.
-fn unknown_cheat(name: &str, cheats: &Cheats) -> String {
+pub(crate) fn unknown_cheat(name: &str, cheats: &Cheats) -> String {
     let known = cheats.names();
     if known.is_empty() {
         return format!("no cheat named {name:?} (this game has none)");
@@ -650,14 +687,14 @@ pub fn parse_addr(s: &str) -> Result<u32, String> {
     u32::from_str_radix(s, 16).map_err(|_| format!("bad address: {s}"))
 }
 
-fn format_addr(addr: u32) -> String {
+pub(crate) fn format_addr(addr: u32) -> String {
     format!("{:02X}:{:04X}", (addr >> 16) as u8, addr as u16)
 }
 
 /// Bytes are consecutive on the 24-bit bus, so a read that starts near the end
 /// of a bank continues into the next one (`7E:FFFF` then `7F:0000` really is
 /// contiguous WRAM), wrapping at the top of the address space.
-fn step_addr(addr: u32, i: u32) -> u32 {
+pub(crate) fn step_addr(addr: u32, i: u32) -> u32 {
     addr.wrapping_add(i) & 0x00FF_FFFF
 }
 
@@ -681,7 +718,7 @@ pub fn check_addr(addr: u32) -> Result<(), String> {
 
 /// Validate the whole span before touching any of it, so a rejected
 /// `write-mem` leaves nothing half-written.
-fn check_range(addr: u32, len: u32) -> Result<(), String> {
+pub(crate) fn check_range(addr: u32, len: u32) -> Result<(), String> {
     for i in 0..len {
         check_addr(step_addr(addr, i))?;
     }
@@ -691,15 +728,15 @@ fn check_range(addr: u32, len: u32) -> Result<(), String> {
 /// Absolute when it can be (an agent's file reader wants absolute paths), the
 /// path as given otherwise — a path that does not exist yet cannot be
 /// canonicalized.
-fn resolve(p: &Path) -> PathBuf {
+pub(crate) fn resolve(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
-fn display_path(p: &Path) -> String {
+pub(crate) fn display_path(p: &Path) -> String {
     resolve(p).display().to_string()
 }
 
-fn reply(id: &Value, mut fields: Value) -> Value {
+pub(crate) fn reply(id: &Value, mut fields: Value) -> Value {
     let obj = fields.as_object_mut().expect("command bodies are JSON objects");
     obj.insert("ok".into(), Value::Bool(true));
     if !id.is_null() {
@@ -708,7 +745,7 @@ fn reply(id: &Value, mut fields: Value) -> Value {
     fields
 }
 
-fn error(id: &Value, msg: impl Into<String>) -> Value {
+pub(crate) fn error(id: &Value, msg: impl Into<String>) -> Value {
     let mut obj = Map::new();
     obj.insert("error".into(), Value::String(msg.into()));
     if !id.is_null() {

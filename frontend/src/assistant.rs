@@ -120,12 +120,24 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
+/// The door left open on the console the player is watching: the loopback port
+/// the shell is listening on, and the secret that has to be presented on the
+/// first line. Only a `Play` request has one — a cheat search wants a console
+/// of its own, and getting one is the whole point of it being harmless.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attach {
+    pub port: u16,
+    pub secret: String,
+}
+
 /// Everything one request needs. Built by the shell, which owns the paths.
 #[derive(Debug, Clone)]
 pub struct Request {
     pub task: Task,
     /// What the player typed, verbatim.
     pub wish: String,
+    /// Where to reach the running session, for the task that plays it.
+    pub attach: Option<Attach>,
     /// The emulator binary the assistant drives — resolved from
     /// `current_exe`, so an assistant launched from a bundle drives that same
     /// bundle rather than whatever a `PATH` lookup would have found.
@@ -145,18 +157,25 @@ pub struct Request {
 /// value the game reads. Both cost a real search on this project before they
 /// were written down (`docs/CHEATS.md`).
 pub fn prompt(request: &Request) -> String {
-    let Request { task, wish, emulator, rom, state, cheats } = request;
+    let Request { task, wish, attach, emulator, rom, state, cheats } = request;
     let (emulator, rom, state, cheats) = (
         emulator.display(),
         rom.display(),
         state.display(),
         cheats.display(),
     );
+    // Two doors, one protocol. A cheat search starts a console of its own from
+    // the saved state; playing a passage attaches to the one the player is
+    // looking at, so every frame it asks for is drawn in their window.
+    let start = match attach {
+        Some(a) => attach_command(&emulator.to_string(), a),
+        None => format!("{emulator} \"{rom}\" --agent --load-state \"{state}\""),
+    };
     let common = format!(
         "You are driving a SNES emulator on behalf of someone playing a game.\n\
          They asked, in their own words: \"{wish}\"\n\n\
          Start the control channel with:\n\
-         \x20 {emulator} \"{rom}\" --agent --load-state \"{state}\"\n\
+         \x20 {start}\n\
          It speaks one JSON object per line on stdin and answers one per line on\n\
          stdout. Send {{\"cmd\":\"help\"}} first: it lists every command and its\n\
          exact shape. The emulation is deterministic, so replaying the same\n\
@@ -183,16 +202,45 @@ pub fn prompt(request: &Request) -> String {
         ),
         Task::Play => format!(
             "{common}\n\
-             Your job: play from that state and get past what they asked about.\n\n\
+             Your job: play the game they are watching and get past what they\n\
+             asked about.\n\n\
+             This channel drives *their* console, the one on their screen. Every\n\
+             frame you ask for is played in their window as it happens, at the\n\
+             speed the console really runs — so they can see what you are doing,\n\
+             and stop you if they do not like it. Between your commands the game\n\
+             stands still and waits for you; it never runs on its own.\n\n\
              Look at the screen with screenshot and read the PNG before deciding\n\
              what to press — you cannot play what you have not looked at. Take a\n\
              save state whenever you make progress, so a mistake costs one\n\
              attempt and not the whole run.\n\n\
-             When you are done, leave the final state at:\n\
-             \x20 {state}.assistant\n\
-             That file is what the player comes back to, so only write it once\n\
-             you are satisfied with where the game is.\n"
+             There is nothing to hand back when you are done: the game is\n\
+             already where you left it. Just say what you did and stop. If you\n\
+             make things worse instead of better, put them back with\n\
+             {{\"cmd\":\"load-state\",\"path\":\"{state}\"}} — that file is the\n\
+             player's session exactly as it was when they asked.\n"
         ),
+    }
+}
+
+/// The one-line command that attaches to the running session.
+///
+/// The secret travels in the environment rather than in an argument: on a
+/// shared machine `ps` shows every other user the command lines of this one,
+/// and a secret they can read is not a secret. Windows' shells have no
+/// `VAR=value command` form, so it gets the flag instead — which is why the
+/// client accepts both.
+fn attach_command(emulator: &str, attach: &Attach) -> String {
+    let Attach { port, secret } = attach;
+    #[cfg(windows)]
+    {
+        format!("{emulator} --agent-attach 127.0.0.1:{port} --agent-secret {secret}")
+    }
+    #[cfg(not(windows))]
+    {
+        format!(
+            "{}={secret} {emulator} --agent-attach 127.0.0.1:{port}",
+            crate::live::SECRET_VAR
+        )
     }
 }
 
@@ -300,6 +348,7 @@ mod tests {
         Request {
             task,
             wish: "des vies infinies".to_string(),
+            attach: None,
             emulator: PathBuf::from("/Applications/Prisme.app/Contents/MacOS/prisme"),
             rom: PathBuf::from("/Users/vous/Jeux/Super Mario World.zip"),
             state: PathBuf::from("/tmp/session.state"),
@@ -325,8 +374,28 @@ mod tests {
         assert!(cheat.contains("docs/CHEATS.md"), "the two known traps are written down there");
 
         let play = prompt(&request(Task::Play));
-        assert!(play.contains(".assistant"), "a play run must leave a state");
+        assert!(play.contains("load-state"), "a play run must know the way back");
+        assert!(play.contains("/tmp/session.state"), "and where that state is");
         assert!(!play.contains("cheat-add"), "playing is not searching");
+    }
+
+    /// The defect this whole path exists to fix: a `Play` request must drive
+    /// the console already on screen, not start an invisible one.
+    #[test]
+    fn a_play_request_attaches_to_the_running_session_instead_of_starting_one() {
+        let mut r = request(Task::Play);
+        r.attach = Some(Attach { port: 51234, secret: "cafe".to_string() });
+        let p = prompt(&r);
+        assert!(p.contains("--agent-attach 127.0.0.1:51234"), "{p}");
+        assert!(p.contains("cafe"), "the secret has to reach the client: {p}");
+        assert!(!p.contains("--agent --load-state"), "it must not start a second emulator: {p}");
+        // And it is told what that changes for the person watching.
+        assert!(p.contains("their window"), "{p}");
+
+        // A cheat search is untouched: its own process, its own console.
+        let cheat = prompt(&request(Task::Cheat));
+        assert!(cheat.contains("--agent --load-state"), "{cheat}");
+        assert!(!cheat.contains("--agent-attach"), "{cheat}");
     }
 
     /// Both prompts end on the same instruction, and it is the one that keeps
