@@ -483,8 +483,46 @@ mod tests {
 
     /// One headless frame of the whole screen, returning what it asked for and
     /// every string it painted.
+    /// The band that says a game is still running must actually be painted.
+    /// It was reported missing twice, and each time the reasoning said it
+    /// should be there — so the code path is asserted rather than argued.
+    #[test]
+    fn a_suspended_session_is_shown_as_a_picture_not_only_as_a_chip() {
+        let mut state = super::super::library_view::LibraryUi::default();
+        let frame = vec![0u8; crate::SCREEN_WIDTH * crate::SCREEN_HEIGHT * 4];
+        let (_, text) = draw_with_frame(
+            Some("SUPER MARIOWORLD"),
+            Some(&frame),
+            &mut state,
+            egui::vec2(1100.0, 800.0),
+            Lang::Fr,
+        );
+        assert!(text.contains("Partie en cours"), "{text}");
+        assert!(text.contains("Reprendre"), "{text}");
+
+        // And nothing of it when no console is loaded.
+        let (_, none) = draw_with_frame(
+            None,
+            None,
+            &mut state,
+            egui::vec2(1100.0, 800.0),
+            Lang::Fr,
+        );
+        assert!(!none.contains("Partie en cours"), "{none}");
+    }
+
     fn draw(
         game_title: Option<&str>,
+        state: &mut super::super::library_view::LibraryUi,
+        size: egui::Vec2,
+        lang: Lang,
+    ) -> (Action, String) {
+        draw_with_frame(game_title, None, state, size, lang)
+    }
+
+    fn draw_with_frame(
+        game_title: Option<&str>,
+        session_frame: Option<&[u8]>,
         state: &mut super::super::library_view::LibraryUi,
         size: egui::Vec2,
         lang: Lang,
@@ -508,7 +546,7 @@ mod tests {
             produced = show(
                 ctx,
                 &mut HomeModel {
-                session_frame: None,
+                session_frame,
                 assistant: true,
                 running: None,
                 wish: &mut String::new(),
