@@ -203,6 +203,29 @@ messages! {
     CurrentThumbnail  => "Vignette actuelle du jeu" / "The game's current picture",
     UseAsThumbnail    => "Utiliser comme vignette" / "Use as the game's picture",
 
+    // --- Cheats -----------------------------------------------------------
+    Cheats            => "Triches" / "Cheats",
+    NoCheats          => "Aucune triche pour ce jeu. Demandez-en une à l'assistant : il cherche l'adresse lui-même, en jouant."
+                       / "No cheat for this game. Ask the assistant for one: it finds the address itself, by playing.",
+    CheatsHint        => "Décochez-en une pour jouer sans, sans la perdre."
+                       / "Untick one to play without it, without losing it.",
+    CheatFrozen       => "figée" / "frozen",
+    CheatOnce         => "une fois" / "once",
+    CheatFrozenHint   => "Réécrite après chaque image : le jeu ne peut pas la reprendre."
+                       / "Rewritten after every frame: the game cannot take it back.",
+    CheatOnceHint     => "Écrite une seule fois, au démarrage de la partie."
+                       / "Written a single time, when the game starts.",
+    CheatEnabledHint  => "Active cette triche dans la prochaine partie — et tout de suite si le jeu tourne."
+                       / "Turns this cheat on for the next game — and right away if it is running.",
+    CheatRemove       => "Retirer" / "Remove",
+    CheatRemoveHint   => "Oublie cette triche. La partie et la sauvegarde ne sont pas touchées."
+                       / "Forgets this cheat. The game and its save are untouched.",
+    // A real cheat's name is written by whoever found it and is never
+    // translated. These two are the fake ones `--ui-shot` puts on the sheet,
+    // and a capture of the English interface must not show French names.
+    DemoCheatLives    => "Vies infinies" / "Infinite lives",
+    DemoCheatHearts   => "Cœurs au maximum" / "Full hearts",
+
     // --- Cartridge facts --------------------------------------------------
     FactRegion        => "Région" / "Region",
     FactMapping       => "Mapping" / "Mapping",

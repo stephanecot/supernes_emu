@@ -47,10 +47,16 @@ frontend/src/
                                 # résolution via prefs.keymap + machine à états de capture (remapping)
   pad.rs                        # manettes gilrs → JoypadState (2 joueurs, hot-plug, OR avec le clavier,
                                 # remapping via prefs.pad_map)
-  paths.rs                      # emplacement des fichiers d'un jeu (.srm/.state/.resume) :
-                                # --save > prefs.save_dir (nommés par library::game_id, pas par
-                                # le fichier ROM) > à côté de la ROM, repli de lecture sur les
-                                # anciens emplacements (aucune sauvegarde perdue)
+  paths.rs                      # emplacement des fichiers d'un jeu (.srm/.state/.resume/
+                                # .cheats.json) : --save > prefs.save_dir (nommés par
+                                # library::game_id, pas par le fichier ROM) > à côté de la ROM,
+                                # repli de lecture sur les anciens emplacements (aucune
+                                # sauvegarde perdue)
+  agent.rs                      # canal de contrôle --agent : un objet JSON par ligne sur
+                                # stdin/stdout, une réponse par requête, erreurs en valeurs
+  cheats.rs                     # triches trouvées par l'agent : <jeu>.cheats.json, adresse bus
+                                # + octets + figée/une fois, réappliquées après chaque image
+                                # (docs/CHEATS.md décrit la recherche par intersections)
 ```
 
 ### Choix techniques clés

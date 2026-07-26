@@ -267,8 +267,14 @@ applique** la triche, en langage naturel.
   la valeur a évolué comme attendu ; répéter 3–5 fois jusqu'à isoler l'adresse. L'agent pilote
   lui-même ces itérations au lieu de faire cliquer l'utilisateur.
 - **Application :** figer la valeur (écriture continue) ou la fixer une fois, avec possibilité
-  d'annuler. Mémoriser les triches trouvées **par jeu** (dans les préférences) pour les réactiver
-  sans refaire la recherche.
+  d'annuler. Mémoriser les triches trouvées **par jeu** pour les réactiver sans refaire la
+  recherche. *Réalisé autrement que prévu ici :* pas dans `prefs.json` mais dans un fichier voisin
+  de la sauvegarde, `<jeu>.cheats.json` (`frontend/src/cheats.rs`), pour deux raisons — une session
+  headless ne doit jamais écrire les préférences du joueur (`Prefs::load`, drapeau `persist`), or
+  c'est précisément une session headless qui trouve la triche ; et un fichier posé à côté de la
+  sauvegarde est portable et lisible à l'œil nu. La procédure de recherche est écrite dans
+  `docs/CHEATS.md`, les commandes `cheat-list`/`cheat-add`/`cheat-remove`/`cheat-enable` sont dans
+  le canal de la Phase 10.
 - **Faisable parce que** les snapshots complets sont rapides, toute la WRAM est accessible, et
   l'émulation est déterministe (on peut rejouer le même événement à l'identique).
 - L'UI de la Phase 8 sert à présenter les triches trouvées et à les (dés)activer.

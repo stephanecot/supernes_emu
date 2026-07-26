@@ -60,6 +60,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use crate::cheats::CHEATS_EXT;
 use crate::save::SRM_EXT;
 use crate::state::{state_ext, RESUME_EXT};
 
@@ -260,6 +261,17 @@ impl GamePaths {
     /// Automatic session state, read target (legacy fallbacks).
     pub fn resume_read(&self) -> PathBuf {
         self.read_path(RESUME_EXT)
+    }
+
+    /// Cheats found for this game, write target. Deliberately not covered by
+    /// `--save`: that flag names one `.srm`, not the game's whole sidecar set.
+    pub fn cheats_write(&self) -> PathBuf {
+        self.write_path(CHEATS_EXT)
+    }
+
+    /// Cheats found for this game, read target (legacy fallbacks).
+    pub fn cheats_read(&self) -> PathBuf {
+        self.read_path(CHEATS_EXT)
     }
 }
 
@@ -489,7 +501,7 @@ mod tests {
     fn every_sidecar_of_a_session_has_its_own_name() {
         for dir in [None, Some(PathBuf::from("/saves"))] {
             let paths = GamePaths::new(Path::new("/roms/game.sfc"), ID, dir.clone(), None);
-            let mut all = vec![paths.srm_write(), paths.resume_write()];
+            let mut all = vec![paths.srm_write(), paths.resume_write(), paths.cheats_write()];
             all.extend((0..SLOT_COUNT).map(|s| paths.state_write(s)));
             let count = all.len();
             all.sort();

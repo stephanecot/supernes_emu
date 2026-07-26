@@ -207,6 +207,7 @@ pub fn run(launch: Option<Launch>, prefs: Prefs) -> Result<(), String> {
         title,
         snes,
         current_rom_path,
+        cheats: crate::cheats::Cheats::load(&game_paths),
         paths: game_paths,
         sram_baseline,
         frame_duration,
@@ -304,6 +305,11 @@ struct App {
     /// Post-load SRAM snapshot for the currently loaded cart; see
     /// `save::load_sram`/`save::save_if_dirty`.
     sram_baseline: Vec<u8>,
+    /// Cheats of the loaded game, read from its sidecar when it was loaded and
+    /// re-applied after every emulated frame (`cheats::Cheats::apply`). Empty
+    /// for the overwhelming majority of games, which is why applying them is
+    /// an early return rather than a branch in the hot loop.
+    cheats: crate::cheats::Cheats,
     frame_duration: Duration,
     /// Absolute wall-clock time the next emulated frame should be presented at.
     next_deadline: Instant,
@@ -666,6 +672,12 @@ impl ApplicationHandler for App {
             for i in 0..factor {
                 if let Some(snes) = &mut self.snes {
                     snes.run_frame(pads);
+                    // After the frame, and after *every* frame of an
+                    // accelerated pass: a frozen value must not be allowed to
+                    // survive as the game's own for even one frame, or the
+                    // logic that reads it (a death, a purchase) sees the value
+                    // the cheat exists to prevent.
+                    self.cheats.apply(snes);
                 }
                 frames_run += 1;
                 // Silent degradation: `next_deadline` is already the *next*
@@ -1284,8 +1296,43 @@ impl App {
                 self.dialogs.request(dialog::Request::SaveDir { current });
             }
             Action::ResetSaveDir => self.set_save_dir(None),
+            Action::ToggleCheat { id, name, enabled } => {
+                self.edit_cheats(&id, |cheats| {
+                    cheats.set_enabled(&name, enabled);
+                });
+            }
+            Action::RemoveCheat { id, name } => {
+                self.edit_cheats(&id, |cheats| {
+                    cheats.remove(&name);
+                });
+            }
             Action::OpenGuide => self.open_guide(),
         }
+    }
+
+    /// Change one game's cheat sidecar from the sheet, whether or not that game
+    /// is the one running.
+    ///
+    /// The file is the source of truth — it is read, edited and written back —
+    /// and the *running* console's list is refreshed from it when the sheet is
+    /// showing the game currently loaded, so a cheat ticked from the home
+    /// screen is in force the moment the player goes back in.
+    fn edit_cheats(&mut self, id: &str, edit: impl FnOnce(&mut crate::cheats::Cheats)) {
+        let Some(entry) = self.library.entries.iter().find(|e| e.id == id).cloned() else {
+            return;
+        };
+        let paths = self.sheet_paths(&entry);
+        let mut cheats = crate::cheats::Cheats::load(&paths);
+        edit(&mut cheats);
+        if let Err(e) = cheats.save(&paths) {
+            eprintln!("cheats: {e}");
+            return;
+        }
+        if self.paths.id() == id && self.current_rom_path == entry.path {
+            self.cheats = cheats;
+        }
+        // The sheet lists what is on disk; gather it again on the next frame.
+        self.library.sheet = SheetData::default();
     }
 
     /// Apply one option of the settings panel. Every arm goes through the same
@@ -1553,14 +1600,20 @@ impl App {
             Some(id) if self.library.sheet.id != id => {
                 let entry = self.library.entries.iter().find(|e| e.id == id).cloned();
                 self.library.sheet = match entry {
-                    Some(entry) => SheetData {
-                        states: library::save_states(&self.sheet_paths(&entry)),
-                        id,
-                        screenshots: library::screenshots(
-                            &library::screenshot_dir(&entry.path, &self.prefs),
-                            &entry.title,
-                        ),
-                    },
+                    Some(entry) => {
+                        let paths = self.sheet_paths(&entry);
+                        SheetData {
+                            states: library::save_states(&paths),
+                            id,
+                            screenshots: library::screenshots(
+                                &library::screenshot_dir(&entry.path, &self.prefs),
+                                &entry.title,
+                            ),
+                            // Read from disk like the states: an agent may have
+                            // written this file while the sheet was closed.
+                            cheats: crate::cheats::Cheats::load(&paths).list().to_vec(),
+                        }
+                    }
                     None => SheetData::default(),
                 };
             }
@@ -2170,6 +2223,9 @@ impl App {
                 // The slot's snapshot replaced `cart.sram` wholesale; see
                 // `resync_sram_baseline` (review point A).
                 self.resync_sram_baseline();
+                // The restored console no longer holds what a `once` cheat
+                // wrote, so it is owed another shot.
+                self.cheats.rearm();
                 self.set_status(status_slot(self.prefs.lang(), slot, SlotStatus::Loaded));
             }
             Err(e) => {
@@ -2278,6 +2334,7 @@ impl App {
                 }
                 self.set_status(Msg::StatusResumed.text(self.prefs.lang()));
                 self.resync_sram_baseline();
+                self.cheats.rearm();
             }
             Err(e) => {
                 eprintln!("resume: ignoring {} ({e})", path.display());
@@ -2547,6 +2604,7 @@ impl App {
         self.title = window_title(&cart.title);
         self.frame_duration = Duration::from_secs_f64(1.0 / cart.region.frames_per_second());
         self.snes = Some(Snes::new(cart));
+        self.cheats = crate::cheats::Cheats::load(&game_paths);
         self.paths = game_paths;
         self.sram_baseline = sram_baseline;
         self.pad = JoypadState::default();

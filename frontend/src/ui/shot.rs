@@ -838,6 +838,24 @@ impl Fixture {
             write_fake_picture(&path, FAKE_GAMES.len() + i)?;
             screenshots.push(path);
         }
+        // Two cheats of the kind an agent's search produces: one held every
+        // frame, one applied a single time and currently turned off.
+        let cheats = vec![
+            crate::cheats::Cheat::new(
+                crate::i18n::Msg::DemoCheatLives.text(lang).to_string(),
+                "7E:0DBE",
+                "63",
+                crate::cheats::Kind::Freeze,
+                true,
+            )?,
+            crate::cheats::Cheat::new(
+                crate::i18n::Msg::DemoCheatHearts.text(lang).to_string(),
+                "7E:0D23",
+                "A0",
+                crate::cheats::Kind::Once,
+                false,
+            )?,
+        ];
 
         Ok(Self {
             view,
@@ -848,7 +866,7 @@ impl Fixture {
             thumbs,
             pending,
             no_pending: HashSet::new(),
-            sheet: SheetData { id: sheet_id.clone(), states, screenshots },
+            sheet: SheetData { id: sheet_id.clone(), states, screenshots, cheats },
             library_ui: LibraryUi {
                 selected: (view == View::GameSheet).then_some(sheet_id),
                 tab: if view == View::Favorites { Tab::Favorites } else { Tab::Library },

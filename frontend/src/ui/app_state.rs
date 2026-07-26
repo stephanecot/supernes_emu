@@ -118,6 +118,14 @@ pub enum Action {
     ChooseSaveDir,
     /// Back to the default save location (beside the ROM).
     ResetSaveDir,
+    /// Turn one of a game's cheats on or off. `id` is the `library::game_id`
+    /// the sheet is showing, `name` the cheat's own identity in its sidecar.
+    /// Applies to the running console immediately when that game is the one
+    /// loaded.
+    ToggleCheat { id: String, name: String, enabled: bool },
+    /// Drop one cheat from a game's sidecar. Nothing else is touched — a cheat
+    /// is a note about an address, not a change to the save.
+    RemoveCheat { id: String, name: String },
     /// Open the pedagogical PDF in the platform's document reader.
     OpenGuide,
 }

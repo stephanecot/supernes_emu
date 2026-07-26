@@ -27,7 +27,9 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Map, Value};
 use snes_core::{JoypadState, Mapping, Region, Snes, SCREEN_HEIGHT, SCREEN_WIDTH};
 
+use crate::cheats::{Cheat, Cheats, Kind};
 use crate::input;
+use crate::paths::GamePaths;
 
 /// Bumped on any incompatible change to the shapes below; reported by the
 /// `ready` greeting and by `state`.
@@ -59,6 +61,12 @@ pub enum Request {
     WriteMem { addr: u32, bytes: Vec<u8> },
     SaveState { path: Option<PathBuf> },
     LoadState { path: Option<PathBuf> },
+    CheatList,
+    /// The end of a search: the address that survived every round, handed over
+    /// to the game the player will actually be playing.
+    CheatAdd { cheat: Box<Cheat> },
+    CheatRemove { name: String },
+    CheatEnable { name: String, enabled: bool },
     State,
     Ping,
     Help,
@@ -74,7 +82,7 @@ pub enum Reply {
 
 /// One command per line, with its accepted fields. Returned by `help`, and
 /// listed in the greeting so an agent needs no out-of-band documentation.
-pub const HELP: [&str; 12] = [
+pub const HELP: [&str; 16] = [
     "{\"cmd\":\"step\",\"frames\":N} - emulate N frames (default 1) with no button held",
     "{\"cmd\":\"press\",\"button\":\"Start\"|\"buttons\":[\"B\",\"Right\"],\"frames\":N,\"release\":M} - hold for N frames (default 1), then M frames released (default 0)",
     "{\"cmd\":\"screenshot\",\"path\":\"out.png\"} - write the 256x224 framebuffer as PNG (default: target/debug-out/agent/frame_NNNNN.png) and return its path",
@@ -82,6 +90,10 @@ pub const HELP: [&str; 12] = [
     "{\"cmd\":\"write-mem\",\"addr\":\"7E:0019\",\"hex\":\"05\"|\"bytes\":[5]} - write bytes to the bus",
     "{\"cmd\":\"save-state\",\"path\":\"s.state\"} - write a save state (default: target/debug-out/agent/state_NNNNN.state) and return its path",
     "{\"cmd\":\"load-state\",\"path\":\"s.state\"} - restore a save state (default: the last one taken this session)",
+    "{\"cmd\":\"cheat-list\"} - this game's cheats and the sidecar file they live in",
+    "{\"cmd\":\"cheat-add\",\"name\":\"Vies infinies\",\"addr\":\"7E:0DBE\",\"hex\":\"63\",\"kind\":\"freeze\"|\"once\",\"enabled\":true} - record a cheat found by the search (docs/CHEATS.md); an existing name is replaced",
+    "{\"cmd\":\"cheat-remove\",\"name\":\"Vies infinies\"} - drop one cheat",
+    "{\"cmd\":\"cheat-enable\",\"name\":\"Vies infinies\",\"enabled\":false} - turn one on or off",
     "{\"cmd\":\"state\"} - frame count, ROM title/region/mapping, last save state (alias: info)",
     "{\"cmd\":\"ping\"} - liveness check",
     "{\"cmd\":\"help\"} - this list",
@@ -94,6 +106,12 @@ pub const HELP: [&str; 12] = [
 pub struct Session {
     snes: Snes,
     rom_path: PathBuf,
+    /// Where this game's sidecars live; the channel only ever touches the
+    /// cheats one (the battery SRAM is never written from here).
+    paths: GamePaths,
+    /// This game's cheats, read at startup so a search run yesterday is
+    /// already in force, and re-applied after every emulated frame.
+    cheats: Cheats,
     /// Frames emulated since the session started. This is the agent's only
     /// clock — save states restore it, so a `load-state` really does put the
     /// session back where it was.
@@ -114,10 +132,13 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(snes: Snes, rom_path: PathBuf) -> Session {
+    pub fn new(snes: Snes, rom_path: PathBuf, paths: GamePaths) -> Session {
+        let cheats = Cheats::load(&paths);
         Session {
             snes,
             rom_path,
+            paths,
+            cheats,
             frame: 0,
             out_dir: PathBuf::from(DEFAULT_OUT_DIR),
             states: HashMap::new(),
@@ -244,6 +265,9 @@ impl Session {
                 let bytes = std::fs::read(&path)
                     .map_err(|e| format!("read {}: {e}", path.display()))?;
                 self.snes.load_state(&bytes)?;
+                // The restored console no longer holds what a `once` cheat
+                // wrote, so it is owed another shot.
+                self.cheats.rearm();
                 // A state written by an earlier process carries no frame
                 // count of ours, so the counter keeps running instead of
                 // silently claiming a frame number it cannot know.
@@ -260,6 +284,29 @@ impl Session {
                     "frame_restored": restored.is_some(),
                 }))
             }
+            Request::CheatList => Ok(self.cheat_state(json!({}))),
+            Request::CheatAdd { cheat } => {
+                let cheat = *cheat;
+                let value = cheat_json(&cheat);
+                let replaced = self.cheats.add(cheat);
+                self.cheats.save(&self.paths)?;
+                Ok(self.cheat_state(json!({ "cheat": value, "replaced": replaced })))
+            }
+            Request::CheatRemove { name } => {
+                if !self.cheats.remove(&name) {
+                    return Err(unknown_cheat(&name, &self.cheats));
+                }
+                self.cheats.save(&self.paths)?;
+                Ok(self.cheat_state(json!({ "removed": name })))
+            }
+            Request::CheatEnable { name, enabled } => {
+                let value = match self.cheats.set_enabled(&name, enabled) {
+                    Some(cheat) => cheat_json(cheat),
+                    None => return Err(unknown_cheat(&name, &self.cheats)),
+                };
+                self.cheats.save(&self.paths)?;
+                Ok(self.cheat_state(json!({ "cheat": value })))
+            }
             Request::State => Ok(self.describe()),
             Request::Ping => Ok(json!({ "frame": self.frame })),
             Request::Help => Ok(json!({ "commands": HELP, "buttons": BUTTONS })),
@@ -267,6 +314,17 @@ impl Session {
             // `exec` has no way to say.
             Request::Quit => unreachable!("quit is handled by the caller"),
         }
+    }
+
+    /// Every cheat answer carries the whole list and the file it was written
+    /// to: an agent that has just added one can check what the game will
+    /// actually run without a second request.
+    fn cheat_state(&self, mut fields: Value) -> Value {
+        let obj = fields.as_object_mut().expect("cheat bodies are JSON objects");
+        obj.insert("cheats".into(), Value::Array(self.cheats.list().iter().map(cheat_json).collect()));
+        obj.insert("count".into(), json!(self.cheats.list().len()));
+        obj.insert("path".into(), json!(display_path(&self.paths.cheats_write())));
+        fields
     }
 
     /// Where the emulator is. Shared by `state`, `info` and the greeting.
@@ -282,6 +340,7 @@ impl Session {
             "rom_bytes": cart.rom.len(),
             "sram_bytes": cart.sram.len(),
             "at_saved_state": self.at_saved_state,
+            "cheats": self.cheats.list().len(),
             "last_state": match &self.last_state {
                 Some(p) => json!({
                     "path": display_path(p),
@@ -298,6 +357,10 @@ impl Session {
     fn run_frames(&mut self, frames: u32, pad: JoypadState) {
         for _ in 0..frames {
             self.snes.run_frame([pad, JoypadState::default()]);
+            // After the frame, never before: a frozen value the game has just
+            // decremented is put back before anything can read it again, which
+            // is the whole difference between a cheat and a wish.
+            self.cheats.apply(&mut self.snes);
             self.snes.bus.apu.drain_samples(&mut self.audio_sink);
             self.audio_sink.clear();
             self.frame += 1;
@@ -319,8 +382,8 @@ impl Session {
 
 /// Serve the channel until `quit` or EOF on stdin. Returns `Ok` on both: a
 /// closed stdin is how a client detaches, not a failure.
-pub fn run(snes: Snes, rom_path: &Path) -> Result<(), String> {
-    let mut session = Session::new(snes, rom_path.to_path_buf());
+pub fn run(snes: Snes, rom_path: &Path, paths: GamePaths) -> Result<(), String> {
+    let mut session = Session::new(snes, rom_path.to_path_buf(), paths);
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     emit(&mut out, &session.greeting())?;
@@ -396,6 +459,13 @@ impl Request {
             }
             "save-state" => Ok(Request::SaveState { path: opt_path(obj, "path")? }),
             "load-state" => Ok(Request::LoadState { path: opt_path(obj, "path")? }),
+            "cheat-list" | "cheats" => Ok(Request::CheatList),
+            "cheat-add" => Ok(Request::CheatAdd { cheat: Box::new(cheat_field(obj)?) }),
+            "cheat-remove" => Ok(Request::CheatRemove { name: name_field(obj)? }),
+            "cheat-enable" => Ok(Request::CheatEnable {
+                name: name_field(obj)?,
+                enabled: bool_field(obj, "enabled")?.unwrap_or(true),
+            }),
             "state" | "info" => Ok(Request::State),
             "ping" => Ok(Request::Ping),
             "help" => Ok(Request::Help),
@@ -417,6 +487,71 @@ fn u32_field(obj: &Map<String, Value>, key: &str) -> Result<Option<u32>, String>
             u32::try_from(n).map(Some).map_err(|_| format!("\"{key}\" is too large: {n}"))
         }
     }
+}
+
+fn bool_field(obj: &Map<String, Value>, key: &str) -> Result<Option<bool>, String> {
+    match obj.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(b)) => Ok(Some(*b)),
+        Some(v) => Err(format!("\"{key}\" must be true or false, got {v}")),
+    }
+}
+
+/// The name a cheat is known by, which is also how `cheat-remove`/
+/// `cheat-enable` designate it.
+fn name_field(obj: &Map<String, Value>) -> Result<String, String> {
+    let v = obj.get("name").ok_or("missing \"name\"")?;
+    let s = v.as_str().ok_or_else(|| format!("\"name\" must be a string, got {v}"))?;
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("\"name\" must not be empty".into());
+    }
+    Ok(s.to_string())
+}
+
+/// A whole cheat from one `cheat-add` line. Everything is validated here — the
+/// address, the payload, the kind — so a typo is refused before it can be
+/// written to the game's sidecar, let alone to the bus.
+fn cheat_field(obj: &Map<String, Value>) -> Result<Cheat, String> {
+    let name = name_field(obj)?;
+    let addr = obj
+        .get("addr")
+        .or_else(|| obj.get("address"))
+        .ok_or("missing \"addr\"")?
+        .as_str()
+        .ok_or("\"addr\" must be a string like \"7E:0DBE\"")?
+        .to_string();
+    let bytes = write_bytes(obj)?;
+    let kind = match obj.get("kind") {
+        None | Some(Value::Null) => Kind::Freeze,
+        Some(Value::String(s)) => Kind::parse(s)?,
+        Some(v) => return Err(format!("\"kind\" must be a string, got {v}")),
+    };
+    let enabled = bool_field(obj, "enabled")?.unwrap_or(true);
+    let hex: String = bytes.iter().map(|b| format!("{b:02X}")).collect();
+    Cheat::new(name, &addr, &hex, kind, enabled)
+}
+
+/// One cheat, in the shape every cheat response uses.
+fn cheat_json(c: &Cheat) -> Value {
+    json!({
+        "name": c.name,
+        "addr": c.addr_text(),
+        "hex": c.hex(),
+        "kind": c.kind.as_str(),
+        "enabled": c.enabled,
+    })
+}
+
+/// A name no cheat carries. The error says what the game *does* have, so an
+/// agent working from a stale list can fix its request without another round
+/// trip.
+fn unknown_cheat(name: &str, cheats: &Cheats) -> String {
+    let known = cheats.names();
+    if known.is_empty() {
+        return format!("no cheat named {name:?} (this game has none)");
+    }
+    format!("no cheat named {name:?} (known: {})", known.join(", "))
 }
 
 fn frame_count(obj: &Map<String, Value>, key: &str, default: u32) -> Result<u32, String> {
@@ -475,7 +610,7 @@ fn write_bytes(obj: &Map<String, Value>) -> Result<Vec<u8>, String> {
                     .ok_or_else(|| format!("\"bytes\" holds 0..=255, got {v}"))
             })
             .collect(),
-        (None, None) => Err("write-mem needs \"hex\" or \"bytes\"".into()),
+        (None, None) => Err("the payload goes in \"hex\" or in \"bytes\"".into()),
         _ => Err("give either \"hex\" or \"bytes\", not both".into()),
     }
 }
@@ -531,7 +666,7 @@ fn step_addr(addr: u32, i: u32) -> u32 {
 /// port: a read there would change what the console does next, which is
 /// exactly the property this channel exists to preserve. WRAM, SRAM and ROM —
 /// everything a cheat search needs — are unaffected.
-fn check_addr(addr: u32) -> Result<(), String> {
+pub fn check_addr(addr: u32) -> Result<(), String> {
     let bank = (addr >> 16) as u8;
     let off = addr as u16;
     let system_bank = matches!(bank, 0x00..=0x3F | 0x80..=0xBF);
@@ -601,8 +736,27 @@ mod tests {
         rom[0x7FFC] = 0x00;
         rom[0x7FFD] = 0x80;
         let cart = Cartridge::from_bytes(rom).expect("cart");
-        let mut s = Session::new(Snes::new(cart), PathBuf::from("agent-test.sfc"));
-        s.out_dir = std::env::temp_dir().join(format!("prisme_agent_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("prisme_agent_{}", std::process::id()));
+        // The cheats sidecar of this session lands in the same scratch
+        // directory, never beside a real ROM.
+        let rom_path = dir.join("agent-test.sfc");
+        let paths = GamePaths::new(&rom_path, "AGENT_TEST-0000", Some(dir.clone()), None);
+        let mut s = Session::new(Snes::new(cart), rom_path, paths);
+        s.out_dir = dir;
+        s
+    }
+
+    /// A session whose cheats sidecar is its own file, so two tests writing
+    /// cheats cannot race on one path.
+    fn cheat_session(tag: &str) -> Session {
+        let dir = std::env::temp_dir()
+            .join(format!("prisme_agent_cheats_{}_{}", std::process::id(), tag));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let mut s = test_session();
+        s.paths = GamePaths::new(&dir.join("game.sfc"), "AGENT_TEST-0000", Some(dir.clone()), None);
+        s.cheats = Cheats::default();
+        s.out_dir = dir;
         s
     }
 
@@ -850,6 +1004,150 @@ mod tests {
         assert_eq!(g["buttons"].as_array().unwrap().len(), BUTTONS.len());
         assert_eq!(g["commands"].as_array().unwrap().len(), HELP.len());
         assert!(g.get("id").is_none(), "the greeting answers no request");
+    }
+
+    #[test]
+    fn every_cheat_command_shape_parses() {
+        assert_eq!(req(r#"{"cmd":"cheat-list"}"#).unwrap(), Request::CheatList);
+        assert_eq!(req(r#"{"cmd":"cheats"}"#).unwrap(), Request::CheatList);
+        let add = req(
+            r#"{"cmd":"cheat-add","name":"Vies infinies","addr":"7E:0DBE","hex":"63","kind":"freeze"}"#,
+        )
+        .unwrap();
+        let Request::CheatAdd { cheat } = add else { panic!("not an add") };
+        assert_eq!(cheat.name, "Vies infinies");
+        assert_eq!(cheat.addr, 0x7E_0DBE);
+        assert_eq!(cheat.bytes, vec![0x63]);
+        assert_eq!(cheat.kind, crate::cheats::Kind::Freeze);
+        assert!(cheat.enabled, "a cheat is on unless the request says otherwise");
+        // `bytes` is accepted like `write-mem`'s, `kind` defaults to freeze
+        // (the one that survives the game's own logic) and `enabled` is honoured.
+        let add =
+            req(r#"{"cmd":"cheat-add","name":"n","addr":"7E0000","bytes":[1,2],"enabled":false}"#)
+                .unwrap();
+        let Request::CheatAdd { cheat } = add else { panic!("not an add") };
+        assert_eq!(cheat.bytes, vec![1, 2]);
+        assert_eq!(cheat.kind, crate::cheats::Kind::Freeze);
+        assert!(!cheat.enabled);
+        assert_eq!(
+            req(r#"{"cmd":"cheat-remove","name":"n"}"#).unwrap(),
+            Request::CheatRemove { name: "n".into() }
+        );
+        assert_eq!(
+            req(r#"{"cmd":"cheat-enable","name":"n","enabled":false}"#).unwrap(),
+            Request::CheatEnable { name: "n".into(), enabled: false }
+        );
+        assert_eq!(
+            req(r#"{"cmd":"cheat-enable","name":"n"}"#).unwrap(),
+            Request::CheatEnable { name: "n".into(), enabled: true }
+        );
+
+        for line in [
+            r#"{"cmd":"cheat-add","addr":"7E:0000","hex":"01"}"#,          // no name
+            r#"{"cmd":"cheat-add","name":"","addr":"7E:0000","hex":"01"}"#,
+            r#"{"cmd":"cheat-add","name":"n","hex":"01"}"#,                 // no addr
+            r#"{"cmd":"cheat-add","name":"n","addr":"nope","hex":"01"}"#,
+            r#"{"cmd":"cheat-add","name":"n","addr":"00:2100","hex":"01"}"#, // MMIO
+            r#"{"cmd":"cheat-add","name":"n","addr":"7E:0000"}"#,            // no payload
+            r#"{"cmd":"cheat-add","name":"n","addr":"7E:0000","hex":"0"}"#,
+            r#"{"cmd":"cheat-add","name":"n","addr":"7E:0000","hex":"01","kind":"always"}"#,
+            r#"{"cmd":"cheat-add","name":"n","addr":"7E:0000","hex":"01","enabled":"yes"}"#,
+            r#"{"cmd":"cheat-remove"}"#,
+            r#"{"cmd":"cheat-enable","name":42}"#,
+        ] {
+            assert!(req(line).is_err(), "{line} should not parse");
+        }
+    }
+
+    /// The handover the whole feature exists for: a cheat added on the channel
+    /// is on the bus at once, and in a file the windowed session will read.
+    #[test]
+    fn a_cheat_added_on_the_channel_is_written_to_the_sidecar_and_held_every_frame() {
+        let mut s = cheat_session("handover");
+        let v = send(&mut s, r#"{"cmd":"cheat-list"}"#);
+        assert_eq!(v["count"], json!(0));
+        let file = PathBuf::from(v["path"].as_str().expect("path"));
+        assert!(file.to_string_lossy().ends_with(".cheats.json"), "{}", file.display());
+
+        let v = send(
+            &mut s,
+            r#"{"cmd":"cheat-add","name":"Vies infinies","addr":"7E:0DBE","hex":"63","kind":"freeze"}"#,
+        );
+        assert_eq!(v["ok"], json!(true), "{v}");
+        assert_eq!(v["replaced"], json!(false));
+        assert_eq!(v["count"], json!(1));
+        assert_eq!(v["cheat"]["addr"], json!("7E:0DBE"));
+        assert_eq!(v["cheat"]["hex"], json!("63"));
+        assert_eq!(v["cheat"]["kind"], json!("freeze"));
+
+        // On disk, readable by the windowed session.
+        assert!(file.is_file(), "{}", file.display());
+        assert_eq!(Cheats::read_from(&file).list().len(), 1);
+
+        // The game takes it back; the next frame puts it right again.
+        send(&mut s, r#"{"cmd":"write-mem","addr":"7E:0DBE","hex":"02"}"#);
+        assert_eq!(send(&mut s, r#"{"cmd":"read-mem","addr":"7E:0DBE","len":1}"#)["hex"], json!("02"));
+        send(&mut s, r#"{"cmd":"step","frames":1}"#);
+        assert_eq!(send(&mut s, r#"{"cmd":"read-mem","addr":"7E:0DBE","len":1}"#)["hex"], json!("63"));
+
+        // Turned off, the game keeps whatever it writes.
+        let v = send(&mut s, r#"{"cmd":"cheat-enable","name":"Vies infinies","enabled":false}"#);
+        assert_eq!(v["cheat"]["enabled"], json!(false), "{v}");
+        send(&mut s, r#"{"cmd":"write-mem","addr":"7E:0DBE","hex":"02"}"#);
+        send(&mut s, r#"{"cmd":"step","frames":2}"#);
+        assert_eq!(send(&mut s, r#"{"cmd":"read-mem","addr":"7E:0DBE","len":1}"#)["hex"], json!("02"));
+        // …and the file says so too.
+        assert!(!Cheats::read_from(&file).list()[0].enabled);
+
+        // Same name, new address: the search was re-run, not doubled.
+        let v = send(
+            &mut s,
+            r#"{"cmd":"cheat-add","name":"Vies infinies","addr":"7E:0DB4","hex":"05"}"#,
+        );
+        assert_eq!(v["replaced"], json!(true));
+        assert_eq!(v["count"], json!(1));
+
+        let v = send(&mut s, r#"{"cmd":"cheat-remove","name":"Vies infinies"}"#);
+        assert_eq!(v["count"], json!(0), "{v}");
+        assert!(Cheats::read_from(&file).is_empty());
+        let _ = std::fs::remove_dir_all(&s.out_dir);
+    }
+
+    #[test]
+    fn a_cheat_that_does_not_exist_is_an_error_naming_the_ones_that_do() {
+        let mut s = cheat_session("unknown");
+        let v = send(&mut s, r#"{"cmd":"cheat-remove","name":"Vies"}"#);
+        assert!(v["error"].as_str().unwrap().contains("this game has none"), "{v}");
+        send(&mut s, r#"{"cmd":"cheat-add","name":"Pièces","addr":"7E:0DBF","hex":"63"}"#);
+        let v = send(&mut s, r#"{"cmd":"cheat-enable","name":"Vies","enabled":true}"#);
+        let e = v["error"].as_str().unwrap();
+        assert!(e.contains("Pièces"), "{e}");
+        // …and the channel is still usable afterwards.
+        assert_eq!(send(&mut s, r#"{"cmd":"cheat-list"}"#)["count"], json!(1));
+        let _ = std::fs::remove_dir_all(&s.out_dir);
+    }
+
+    /// A `once` cheat is written a single time — and again after a save state
+    /// is loaded, since the restored console no longer holds it.
+    #[test]
+    fn a_once_cheat_fires_once_per_console_state() {
+        let mut s = cheat_session("once");
+        send(&mut s, r#"{"cmd":"save-state","path":"once.state"}"#);
+        send(
+            &mut s,
+            r#"{"cmd":"cheat-add","name":"Énergie","addr":"7E:0F00","hex":"63","kind":"once"}"#,
+        );
+        send(&mut s, r#"{"cmd":"step","frames":1}"#);
+        assert_eq!(send(&mut s, r#"{"cmd":"read-mem","addr":"7E:0F00","len":1}"#)["hex"], json!("63"));
+        send(&mut s, r#"{"cmd":"write-mem","addr":"7E:0F00","hex":"01"}"#);
+        send(&mut s, r#"{"cmd":"step","frames":3}"#);
+        assert_eq!(send(&mut s, r#"{"cmd":"read-mem","addr":"7E:0F00","len":1}"#)["hex"], json!("01"));
+
+        send(&mut s, r#"{"cmd":"load-state","path":"once.state"}"#);
+        send(&mut s, r#"{"cmd":"step","frames":1}"#);
+        assert_eq!(send(&mut s, r#"{"cmd":"read-mem","addr":"7E:0F00","len":1}"#)["hex"], json!("63"));
+        let _ = std::fs::remove_file("once.state");
+        let _ = std::fs::remove_dir_all(&s.out_dir);
     }
 
     #[test]

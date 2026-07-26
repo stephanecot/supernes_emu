@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 use egui::{Align, Layout, RichText, Sense, Stroke, Vec2};
 
+use crate::cheats::{Cheat, Kind};
 use crate::i18n::{Lang, Msg};
 use crate::library::{self, GameEntry, StateFile};
 use crate::prefs::GameStats;
@@ -98,6 +99,10 @@ pub struct SheetData {
     pub id: String,
     pub states: Vec<StateFile>,
     pub screenshots: Vec<PathBuf>,
+    /// This game's `<game>.cheats.json`, read from disk with the states — the
+    /// sheet is shown for games that are not running, and an agent may have
+    /// written the file while the application was on the home screen.
+    pub cheats: Vec<Cheat>,
 }
 
 impl SheetData {
@@ -278,6 +283,22 @@ pub fn show(ui: &mut egui::Ui, model: &mut SheetModel) -> Action {
             }
 
             ui.add_space(14.0);
+            super::home::heading(ui, Msg::Cheats.text(lang));
+            ui.add_space(8.0);
+            if model.data.cheats.is_empty() {
+                note(ui, Msg::NoCheats.text(lang));
+            } else {
+                note(ui, Msg::CheatsHint.text(lang));
+                ui.add_space(6.0);
+                for cheat in &model.data.cheats {
+                    if let Some(produced) = cheat_row(ui, &entry.id, cheat, lang) {
+                        action = produced;
+                    }
+                    ui.add_space(6.0);
+                }
+            }
+
+            ui.add_space(14.0);
             super::home::heading(ui, Msg::Screenshots.text(lang));
             ui.add_space(8.0);
             if model.data.screenshots.is_empty() {
@@ -413,6 +434,70 @@ fn slot_row(
                         .clicked()
                     {
                         *confirm = Some(state.path.clone());
+                    }
+                });
+            });
+        });
+    action
+}
+
+/// One cheat: a tick box carrying its name, the address and bytes it writes in
+/// the machine-data face, how long it holds, and the way out.
+///
+/// Written for someone who ran no agent at all: the row says in words what the
+/// cheat does to the game (`figée` / `une fois`), and the raw address is there
+/// for whoever wants it without being the thing that is read first.
+fn cheat_row(ui: &mut egui::Ui, id: &str, cheat: &Cheat, lang: Lang) -> Option<Action> {
+    let mut action = None;
+    egui::Frame::new()
+        .fill(theme::BG_CARD)
+        .stroke(Stroke::new(1.0, theme::STROKE))
+        .corner_radius(egui::CornerRadius::same(8))
+        .inner_margin(egui::Margin::same(SLOT_MARGIN as i8))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let mut enabled = cheat.enabled;
+                let toggled = ui
+                    .checkbox(&mut enabled, "")
+                    .on_hover_text(Msg::CheatEnabledHint.text(lang))
+                    .changed();
+                if toggled {
+                    action = Some(Action::ToggleCheat {
+                        id: id.to_string(),
+                        name: cheat.name.clone(),
+                        enabled,
+                    });
+                }
+                ui.vertical(|ui| {
+                    ui.label(
+                        RichText::new(&cheat.name)
+                            .font(theme::strong(theme::SIZE_BODY))
+                            .color(if cheat.enabled { theme::TEXT } else { theme::TEXT_DIM }),
+                    );
+                    let (kind, kind_hint) = match cheat.kind {
+                        Kind::Freeze => (Msg::CheatFrozen, Msg::CheatFrozenHint),
+                        Kind::Once => (Msg::CheatOnce, Msg::CheatOnceHint),
+                    };
+                    ui.label(
+                        RichText::new(format!(
+                            "{} = {} · {}",
+                            cheat.addr_text(),
+                            cheat.hex(),
+                            kind.text(lang)
+                        ))
+                        .font(theme::mono(theme::SIZE_MONO))
+                        .color(theme::TEXT_DIM),
+                    )
+                    .on_hover_text(kind_hint.text(lang));
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui
+                        .button(Msg::CheatRemove.text(lang))
+                        .on_hover_text(Msg::CheatRemoveHint.text(lang))
+                        .clicked()
+                    {
+                        action =
+                            Some(Action::RemoveCheat { id: id.to_string(), name: cheat.name.clone() });
                     }
                 });
             });
@@ -769,6 +854,7 @@ mod tests {
                 state_file(Some(3), None),
             ],
             screenshots: Vec::new(),
+            cheats: Vec::new(),
         };
         let mut confirm = None;
         let (produced, text) = draw(&data, &GameStats::default(), &mut confirm, Lang::Fr);
@@ -789,6 +875,7 @@ mod tests {
             id: "GAME-1234".to_string(),
             states: vec![state_file(Some(3), None)],
             screenshots: Vec::new(),
+            cheats: Vec::new(),
         };
         let mut confirm = None;
         let (_, text) = draw(&data, &GameStats::default(), &mut confirm, Lang::Fr);
@@ -803,6 +890,38 @@ mod tests {
         assert!(text.contains("Annuler"), "{text}");
     }
 
+    /// The cheats a search found are the player's to keep, switch off or drop —
+    /// and the row has to be readable by someone who never ran an agent.
+    #[test]
+    fn every_cheat_is_listed_with_what_it_does_to_the_game() {
+        let data = SheetData {
+            id: "GAME-1234".to_string(),
+            cheats: vec![
+                Cheat::new("Vies infinies".into(), "7E:0DBE", "63", Kind::Freeze, true).unwrap(),
+                Cheat::new("Pièces".into(), "7E:0DBF", "63", Kind::Once, false).unwrap(),
+            ],
+            ..Default::default()
+        };
+        let mut confirm = None;
+        let (produced, text) = draw(&data, &GameStats::default(), &mut confirm, Lang::Fr);
+        assert_eq!(produced, Action::None, "drawing alone must change nothing");
+        assert!(text.contains("Triches"), "{text}");
+        assert!(text.contains("Vies infinies"), "{text}");
+        // The address and the payload are there, in the machine-data face…
+        assert!(text.contains("7E:0DBE = 63"), "{text}");
+        // …and so is the word that says what it *does*, which is the part a
+        // player who ran no agent needs.
+        assert!(text.contains("figée"), "{text}");
+        assert!(text.contains("une fois"), "{text}");
+        assert!(text.contains("Retirer"), "{text}");
+
+        let (_, text) = draw(&data, &GameStats::default(), &mut confirm, Lang::En);
+        assert!(text.contains("Cheats"), "{text}");
+        assert!(text.contains("frozen"), "{text}");
+        assert!(text.contains("once"), "{text}");
+        assert!(text.contains("Remove"), "{text}");
+    }
+
     /// An empty section is never a void: it says what would fill it.
     #[test]
     fn the_empty_sections_say_what_fills_them() {
@@ -812,5 +931,6 @@ mod tests {
         assert!(text.contains("F5"), "{text}");
         assert!(text.contains("Aucune capture"), "{text}");
         assert!(text.contains("F12"), "{text}");
+        assert!(text.contains("Aucune triche"), "{text}");
     }
 }

@@ -4,6 +4,7 @@
 mod agent;
 mod atomic;
 mod audio;
+mod cheats;
 mod dialog;
 mod guide;
 mod i18n;
@@ -88,11 +89,16 @@ const USAGE: &str = "usage: prisme [rom.sfc|.smc|.zip] [flags]
                                         request per line on stdin, one JSON response per
                                         line on stdout (no window, no audio). Commands:
                                         step, press, screenshot, read-mem, write-mem,
-                                        save-state, load-state, state, ping, help, quit;
+                                        save-state, load-state, cheat-list, cheat-add,
+                                        cheat-remove, cheat-enable, state, ping, help, quit;
                                         send {\"cmd\":\"help\"} for the exact shapes.
                                         Unnamed screenshots/states land in
                                         target/debug-out/agent/. Honors --load-state to
                                         seed the session; never writes the battery SRAM.
+                                        cheat-* read and write <game>.cheats.json beside
+                                        the save, and a frozen cheat is re-applied after
+                                        every frame here as in the window. The search that
+                                        finds an address is described in docs/CHEATS.md.
   --dump-frame PATH.png                 write final framebuffer as PNG on exit
   --dump-frame-every N --dump-dir DIR   write DIR/frame_XXXXX.png every N frames
   --trace PATH [--trace-start-frame A --trace-end-frame B]
@@ -396,7 +402,7 @@ fn run(args: Args) -> Result<(), String> {
     // a lives counter must not commit that to the player's `.srm`; what it
     // wants to keep, it keeps with `save-state`.
     if args.agent {
-        return agent::run(snes, rom_path);
+        return agent::run(snes, rom_path, game_paths);
     }
 
     let mut trace_writer = match &args.trace {
