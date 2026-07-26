@@ -51,6 +51,15 @@ pub struct HomeModel<'a> {
     /// What the catalogues said, per game id — empty until the player asks for
     /// any of it (`ui::Action::FillSheet` / `FillLibrary`).
     pub meta: &'a std::collections::BTreeMap<String, crate::metadata::GameMeta>,
+    /// The assistant is switched on and its tool resolved.
+    pub assistant: bool,
+    /// `game_id` of the session currently loaded, if any: the assistant plays
+    /// from that session's state, so it can only play *this* game.
+    pub running: Option<&'a str>,
+    /// Edit buffer of the request being typed on the sheet.
+    pub wish: &'a mut String,
+    /// The assistant's latest line while one runs.
+    pub assistant_says: Option<&'a str>,
 }
 
 impl HomeModel<'_> {
@@ -156,6 +165,10 @@ fn library(ui: &mut egui::Ui, model: &mut HomeModel) -> Action {
                 picture: thumbs.get(&id).map(|p| p.as_path()),
                 pending: pending.contains(&id),
                 meta: model.meta.get(&id),
+                assistant: model.assistant,
+                is_running: model.running == Some(id.as_str()),
+                wish: model.wish,
+                assistant_says: model.assistant_says,
                 fetching: model.library.fetching.contains(&id),
                 textures: model.library.textures,
                 selected: &mut model.library.state.selected,
@@ -404,6 +417,10 @@ mod tests {
             produced = show(
                 ctx,
                 &mut HomeModel {
+                assistant: true,
+                running: None,
+                wish: &mut String::new(),
+                assistant_says: None,
                     app_name: "Prisme",
                     version: "0.0.0",
                     lang,
@@ -504,6 +521,10 @@ mod tests {
         let mut textures = super::super::textures::TextureStore::new();
         let sheet = SheetData::default();
         let mut m = HomeModel {
+                assistant: true,
+                running: None,
+                wish: &mut String::new(),
+                assistant_says: None,
             app_name: "Prisme",
             version: "0.0.0",
             lang: Lang::Fr,

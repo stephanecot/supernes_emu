@@ -982,10 +982,18 @@ impl Fixture {
         // library, not a different code path.
         let empty = self.view == View::Empty;
         let entries: &[GameEntry] = if empty { &[] } else { self.entries.as_slice() };
+        // The fixture shows the assistant available on the game whose sheet is
+        // open: the capture worth looking at is the one carrying the field.
+        let running = self.library_ui.selected.clone();
+        let mut wish = String::new();
         let pending: &HashSet<String> = if empty { &self.no_pending } else { &self.pending };
         super::home::show(
             ctx,
             &mut HomeModel {
+                assistant: true,
+                running: running.as_deref(),
+                wish: &mut wish,
+                assistant_says: None,
                 app_name: crate::APP_NAME,
                 version: crate::VERSION,
                 lang: self.lang,

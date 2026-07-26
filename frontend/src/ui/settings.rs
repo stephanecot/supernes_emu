@@ -36,6 +36,7 @@ use crate::prefs::{Prefs, FAST_FORWARD_FACTORS};
 use crate::render::{Aspect, Filter};
 use crate::state::SLOT_COUNT;
 
+use super::icons::{self, Icon};
 use super::pad_art;
 use super::tabs::{self, Tab};
 use super::theme;
@@ -993,20 +994,36 @@ fn assistant_section(ui: &mut egui::Ui, model: &mut SettingsModel) -> Action {
                 action = Action::Set(Setting::AssistantPath(path));
             }
         }
+        // Verdict right next to the field, not three lines below it: the
+        // question "is this path any good?" is asked while looking at the
+        // field, and an answer further away is an answer found too late.
+        let (icon, colour, tip) = if available {
+            (Icon::Check, theme::GREEN, Msg::AssistantOk)
+        } else {
+            (Icon::Close, theme::RED, Msg::AssistantBadPath)
+        };
+        icons::show(ui, icon, icons::SIZE, colour).on_hover_text(tip.text(lang));
+
         if ui.button(Msg::AssistantLocate.text(lang)).clicked() {
             action = Action::ChooseAssistantTool;
         }
     });
 
     let typed = !model.state.assistant_path.trim().is_empty();
-    if typed && !available {
+    if available {
+        // Which file actually answered — a path typed with a typo that still
+        // resolves (a symlink, a wrapper) is worth seeing.
+        if let Some(path) = model.claude {
+            path_line(ui, &super::home::shorten_path(path, 60));
+        }
+    } else {
         ui.label(
-            RichText::new(Msg::AssistantBadPath.text(lang))
-                .font(theme::font(theme::SIZE_SMALL))
-                .color(theme::RED),
+            RichText::new(
+                if typed { Msg::AssistantBadPath } else { Msg::AssistantMissing }.text(lang),
+            )
+            .font(theme::font(theme::SIZE_SMALL))
+            .color(theme::RED),
         );
-    } else if let Some(path) = model.claude.filter(|_| !typed) {
-        path_line(ui, &super::home::shorten_path(path, 60));
     }
     hint(ui, Msg::AssistantPathHint.text(lang));
     action
@@ -1451,11 +1468,11 @@ mod tests {
         // The order the brief fixes, top to bottom in the section column.
         assert_eq!(
             labels,
-            vec!["Affichage", "Audio", "Émulation", "Entrées", "Assistant", "Dossiers", "À propos"]
+            vec!["Affichage", "Audio", "Émulation", "Entrées", "Assistant IA", "Dossiers", "À propos"]
         );
         assert_eq!(
             Section::ALL.iter().map(|s| s.label(Lang::En)).collect::<Vec<_>>(),
-            vec!["Display", "Audio", "Emulation", "Controls", "Assistant", "Folders", "About"]
+            vec!["Display", "Audio", "Emulation", "Controls", "AI assistant", "Folders", "About"]
         );
         labels.sort_unstable();
         labels.dedup();

@@ -146,6 +146,16 @@ pub struct SheetModel<'a> {
     pub confirm_delete: &'a mut Option<PathBuf>,
     /// Language every string of the sheet is rendered in.
     pub lang: Lang,
+    /// The assistant may be summoned: switched on *and* its tool resolved.
+    pub assistant: bool,
+    /// This game is the one currently loaded — the assistant starts from the
+    /// live session's state, so it has nothing to work from otherwise.
+    pub is_running: bool,
+    /// What the player is typing. Lives in the shell so it survives the
+    /// immediate-mode rebuild of every frame.
+    pub wish: &'a mut String,
+    /// The assistant's latest line, while one is running.
+    pub assistant_says: Option<&'a str>,
 }
 
 /// Draw the sheet and return what the player asked for.
@@ -200,23 +210,26 @@ pub fn show(ui: &mut egui::Ui, model: &mut SheetModel) -> Action {
                         // The call to action takes the whole column: it is the one
                         // thing a sheet exists to offer.
                         ui.scope(|ui| {
-                            // Measured on the label actually rendered: `Jouer`
-                            // and `Play` do not pad out to the same button.
+                            // Every control of this column is laid out at
+                            // exactly `HERO_W`, whatever its label and whatever
+                            // the language: a stack of buttons of three
+                            // different widths reads as an accident. The
+                            // padding is the floor, `set_width` does the rest.
                             ui.spacing_mut().button_padding.x =
-                                (HERO_W - play_label_w(ui, lang)) / 2.0;
+                                column_button_padding(ui, lang);
+                            ui.set_width(HERO_W);
+                            ui.style_mut().spacing.button_padding.y = 6.0;
                             // A game whose file is gone offers the only two
                             // things that can still be done with it, in place of
                             // a `Jouer` that could only fail.
                             if entry.missing {
-                                if ui
-                                    .button(Msg::RelocateGame.text(lang))
+                                if wide_button(ui, Msg::RelocateGame.text(lang))
                                     .on_hover_text(Msg::RelocateHint.text(lang))
                                     .clicked()
                                 {
                                     action = Action::AddGame { replacing: Some(entry.path.clone()) };
                                 }
-                                if ui
-                                    .button(Msg::ForgetGame.text(lang))
+                                if wide_button(ui, Msg::ForgetGame.text(lang))
                                     .on_hover_text(Msg::ForgetHint.text(lang))
                                     .clicked()
                                 {
@@ -236,8 +249,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut SheetModel) -> Action {
                                     action =
                                         Action::Launch { path: entry.path.clone(), resume: true };
                                 }
-                                if ui
-                                    .button(Msg::StartOver.text(lang))
+                                if wide_button(ui, Msg::StartOver.text(lang))
                                     .on_hover_text(Msg::StartOverHint.text(lang))
                                     .clicked()
                                 {
@@ -272,8 +284,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut SheetModel) -> Action {
                                 } else {
                                     (Msg::FillSheet, Msg::FillSheetHint)
                                 };
-                                if ui
-                                    .button(label.text(lang))
+                                if wide_button(ui, label.text(lang))
                                     .on_hover_text(hint.text(lang))
                                     .clicked()
                                 {
@@ -325,6 +336,11 @@ pub fn show(ui: &mut egui::Ui, model: &mut SheetModel) -> Action {
                     }
                     ui.add_space(6.0);
                 }
+            }
+
+            ui.add_space(14.0);
+            if let Some(produced) = ask_section(ui, model) {
+                action = produced;
             }
 
             ui.add_space(14.0);
@@ -753,15 +769,111 @@ fn fact_label_w(ui: &egui::Ui, facts: &[(String, String)]) -> f32 {
     (widest + FACT_LABEL_GAP).ceil().min(FACT_LABEL_MAX_W)
 }
 
-/// Width of the `Jouer`/`Play` button's own content (icon, gap and label),
-/// used to pad it out to the full width of the left column.
-fn play_label_w(ui: &egui::Ui, lang: Lang) -> f32 {
-    let galley = ui.painter().layout_no_wrap(
-        Msg::Play.text(lang).to_owned(),
-        theme::font(theme::SIZE_BUTTON),
-        theme::TEXT,
+/// Where the player actually talks to the assistant.
+///
+/// It sits immediately above `Triches` on purpose: asking for infinite lives is
+/// what *produces* the list below it, and putting the request next to its
+/// result is what makes the pair legible without a word of explanation.
+fn ask_section(ui: &mut egui::Ui, model: &mut SheetModel) -> Option<Action> {
+    let lang = model.lang;
+    let mut action = None;
+    super::home::heading(ui, Msg::AskHeading.text(lang));
+    ui.add_space(8.0);
+
+    if !model.assistant {
+        note(ui, Msg::AskDisabled.text(lang));
+        return None;
+    }
+
+    // While one is running, the field is replaced by what it is saying: two
+    // requests at once is not a state this can be in, and a live line is worth
+    // more than a spinner — it says what the assistant is actually doing.
+    if let Some(said) = model.assistant_says {
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(Msg::AskWorking.text(lang))
+                    .font(theme::font(theme::SIZE_BODY))
+                    .color(theme::ACCENT),
+            );
+            if ui.button(Msg::AskStop.text(lang)).clicked() {
+                action = Some(Action::StopAssistant);
+            }
+        });
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(said).font(theme::mono(theme::SIZE_SMALL)).color(theme::TEXT_DIM),
+        );
+        return action;
+    }
+
+    ui.add(
+        egui::TextEdit::singleline(model.wish)
+            .desired_width(f32::INFINITY)
+            .hint_text(Msg::AskPlaceholder.text(lang))
+            .font(theme::font(theme::SIZE_BODY)),
     );
-    galley.size().x + icons::SIZE + icons::GAP
+    ui.add_space(8.0);
+
+    let asked = !model.wish.trim().is_empty();
+    ui.horizontal(|ui| {
+        // Both start from the session's own state — a search wants the game
+        // already at the place where the thing to find happens, not at a title
+        // screen it would have to navigate on its own.
+        if ui
+            .add_enabled(asked && model.is_running, egui::Button::new(Msg::AskFindCheat.text(lang)))
+            .on_hover_text(Msg::AskCheatHint.text(lang))
+            .clicked()
+        {
+            action = Some(Action::AskAssistant { id: model.entry.id.clone(), play: false });
+        }
+        if ui
+            .add_enabled(asked && model.is_running, egui::Button::new(Msg::AskPlay.text(lang)))
+            .on_hover_text(Msg::AskPlayHint.text(lang))
+            .clicked()
+        {
+            action = Some(Action::AskAssistant { id: model.entry.id.clone(), play: true });
+        }
+    });
+    if asked && !model.is_running {
+        ui.add_space(4.0);
+        note(ui, Msg::AskNeedsSession.text(lang));
+    }
+    action
+}
+
+/// A plain button spanning the whole left column.
+fn wide_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    let height = ui.spacing().interact_size.y.max(28.0);
+    ui.add_sized(Vec2::new(HERO_W, height), egui::Button::new(label))
+}
+
+/// Padding that makes every button of the left column exactly `HERO_W` wide.
+///
+/// Measured on the **widest** label the column can show, not on `Jouer`: one
+/// padding is set for the whole scope, so sizing it on the shortest label
+/// pushed `Nouvelle partie` past the column and wrapped it onto two lines.
+/// English hid the bug — `New game` fits where `Nouvelle partie` does not.
+fn column_button_padding(ui: &egui::Ui, lang: Lang) -> f32 {
+    let widest = [
+        (Msg::Play, true),
+        (Msg::Resume, true),
+        (Msg::StartOver, false),
+        (Msg::RelocateGame, false),
+        (Msg::ForgetGame, false),
+        (Msg::GeneratedThumbnail, false),
+    ]
+    .into_iter()
+    .map(|(msg, icon)| {
+        let galley = ui.painter().layout_no_wrap(
+            msg.text(lang).to_owned(),
+            theme::font(theme::SIZE_BUTTON),
+            theme::TEXT,
+        );
+        galley.size().x + if icon { icons::SIZE + icons::GAP } else { 0.0 }
+    })
+    .fold(0.0_f32, f32::max);
+    // A floor rather than a negative padding on a very narrow column.
+    ((HERO_W - widest) / 2.0).max(6.0)
 }
 
 /// One header fact: its name in the interface face, its value in the
@@ -968,6 +1080,10 @@ mod tests {
                 produced = show(
                     ui,
                     &mut SheetModel {
+                assistant: true,
+                is_running: true,
+                wish: &mut String::new(),
+                assistant_says: None,
                         entry: &entry,
                         stats,
                         data,

@@ -136,6 +136,13 @@ pub enum Action {
     /// Drop one cheat from a game's sidecar. Nothing else is touched — a cheat
     /// is a note about an address, not a change to the save.
     RemoveCheat { id: String, name: String },
+    /// Send what the player typed to the assistant. `play` picks which of the
+    /// two jobs it is: find a cheat (touches nothing of the session) or play
+    /// the passage (continues it, from a state saved first).
+    AskAssistant { id: String, play: bool },
+    /// Stop the assistant now. The player stays in charge of a thing that
+    /// looks at every frame and is therefore slow.
+    StopAssistant,
     /// Name the assistant's tool with the native file dialog.
     ChooseAssistantTool,
     /// Open the pedagogical PDF in the platform's document reader.

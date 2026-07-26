@@ -289,7 +289,7 @@ messages! {
     SectionAudio      => "Audio" / "Audio",
     SectionEmulation  => "Émulation" / "Emulation",
     SectionInputs     => "Entrées" / "Controls",
-    SectionAssistant  => "Assistant" / "Assistant",
+    SectionAssistant  => "Assistant IA" / "AI assistant",
     SectionFolders    => "Dossiers" / "Folders",
     SectionAbout      => "À propos" / "About",
     SettingsFooter    => "Échap : revenir · chaque changement est enregistré aussitôt"
@@ -336,6 +336,25 @@ messages! {
     AssistantTool     => "Chemin de l'outil" / "Path to the tool",
     AssistantLocate   => "Parcourir…" / "Browse…",
     AssistantOnPath   => "Trouvé dans le PATH" / "Found on the PATH",
+    AssistantOk       => "Chemin valide" / "Path is valid",
+    AssistantCheck    => "Vérifier" / "Check",
+
+    // --- Asking the assistant ------------------------------------------------
+    AskHeading        => "Demander à l'IA" / "Ask the AI",
+    AskPlaceholder    => "des vies infinies · passe-moi ce boss · de l'argent au maximum"
+                       / "infinite lives · get me past this boss · max out my money",
+    AskFindCheat      => "Chercher une triche" / "Find a cheat",
+    AskPlay           => "Jouer le passage" / "Play it for me",
+    AskStop           => "Arrêter" / "Stop",
+    AskWorking        => "L'assistant travaille…" / "The assistant is working…",
+    AskCheatHint      => "Cherche l'adresse mémoire et laisse une triche. Ne touche pas à votre partie."
+                       / "Finds the memory address and leaves a cheat behind. Your session is untouched.",
+    AskPlayHint       => "Joue depuis l'état actuel. Un état est sauvegardé avant, l'opération reste annulable."
+                       / "Plays from the current state. A state is saved first, so this stays undoable.",
+    AskDisabled       => "Activez l'assistant dans Réglages → Assistant IA."
+                       / "Turn the assistant on in Settings → AI assistant.",
+    AskNeedsSession   => "Lancez ce jeu d'abord : l'assistant part de l'état de votre partie."
+                       / "Start this game first: the assistant works from your session's state.",
     AssistantPathHint => "Laissez vide pour chercher dans le PATH. Une application lancée depuis le Finder n'hérite pas du PATH de votre terminal : c'est là qu'il faut indiquer le chemin complet."
                        / "Leave empty to look on the PATH. An application launched from the Finder does not inherit your terminal's PATH: that is when the full path belongs here.",
     AssistantBadPath  => "Ce chemin ne désigne aucun exécutable." / "That path is not an executable.",

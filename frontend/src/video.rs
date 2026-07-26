@@ -249,6 +249,9 @@ pub fn run(launch: Option<Launch>, prefs: Prefs) -> Result<(), String> {
         play_tick: Instant::now(),
         play_unsaved: 0,
         dialogs: dialog::Dialogs::new(),
+        wish: String::new(),
+        assistant_session: None,
+        assistant_line: None,
         claude,
         quit_confirm: false,
         quit_saved_pause: false,
@@ -413,6 +416,14 @@ struct App {
     /// `crate::dialog`: a native modal opened from a callback re-enters winit's
     /// event handler, which panics on purpose).
     dialogs: dialog::Dialogs,
+    /// What the player is typing into the assistant's field on a game sheet.
+    /// Held here rather than in the sheet: the sheet is rebuilt every frame.
+    wish: String,
+    /// The assistant currently running, if any. Dropping it kills the child,
+    /// so quitting mid-request cannot leave one emulating in the background.
+    assistant_session: Option<crate::assistant::Session>,
+    /// Its latest line, shown on the sheet in place of the field.
+    assistant_line: Option<String>,
     /// Path of the `claude` tool, resolved once at startup; `None` disables
     /// the assistant entirely. Looked up here rather than at each use so the
     /// settings screen can *say* why the row is inert, instead of failing on
@@ -647,6 +658,7 @@ impl ApplicationHandler for App {
         // its answer applied here, never from the callback that requested it
         // (see `crate::dialog`).
         self.pump_dialogs();
+        self.poll_assistant();
         // Scan results and finished thumbnails arrive here, one channel drain
         // per frame; the library thread never touches the UI itself.
         self.poll_library();
@@ -1342,6 +1354,14 @@ impl App {
                     cheats.remove(&name);
                 });
             }
+            Action::AskAssistant { id, play } => self.ask_assistant(&id, play),
+            Action::StopAssistant => {
+                if let Some(session) = &mut self.assistant_session {
+                    session.cancel();
+                }
+                self.assistant_session = None;
+                self.assistant_line = None;
+            }
             Action::ChooseAssistantTool => {
                 let current = self.claude.clone().or_else(|| {
                     self.prefs.assistant_tool().map(std::path::Path::to_path_buf)
@@ -1854,7 +1874,19 @@ impl App {
             JoypadState::default()
         };
         let lang = self.prefs.lang();
-        let Self { ui, pixels, library, prefs, settings, .. } = self;
+        let Self {
+            ui,
+            pixels,
+            library,
+            prefs,
+            settings,
+            wish,
+            assistant_line,
+            claude,
+            game_id,
+            ..
+        } = self;
+        let assistant_on = prefs.assistant && claude.is_some();
         let (Some(ui), Some(pixels)) = (ui.as_mut(), pixels.as_ref()) else {
             return Action::None;
         };
@@ -1885,6 +1917,10 @@ impl App {
                 crate::ui::home::show(
                     ctx,
                     &mut HomeModel {
+                        assistant: assistant_on,
+                        running: game_id.as_deref(),
+                        wish,
+                        assistant_says: assistant_line.as_deref(),
                         app_name: APP_NAME,
                         version: VERSION,
                         lang,
@@ -2562,6 +2598,78 @@ impl App {
     fn set_show_fps(&mut self, on: bool) {
         self.prefs.show_fps = on;
         self.prefs.save();
+    }
+
+    /// Re-read the running game's cheats from disk: a search that succeeded
+    /// wrote its find there, in a process of its own.
+    fn refresh_cheats(&mut self) {
+        self.cheats = crate::cheats::Cheats::load(&self.paths);
+        self.library.sheet = SheetData::default();
+    }
+
+    /// Send the typed request off. The state it starts from is written first,
+    /// which is also the state to come back to: an assistant that plays must
+    /// never be the only copy of where the player was.
+    fn ask_assistant(&mut self, id: &str, play: bool) {
+        let wish = self.wish.trim().to_string();
+        let Some(claude) = self.claude.clone() else { return };
+        let rom = self.current_rom_path.clone();
+        if wish.is_empty() || self.game_id.as_deref() != Some(id) {
+            return;
+        }
+        // A state of its own, not the session's `.resume`: that one is the
+        // player's way back and must not be overwritten by a request they may
+        // well cancel.
+        let state = self.paths.resume_write().with_extension("ask.state");
+        let Some(bytes) = self.snes.as_mut().map(|s| s.save_state()) else { return };
+        if let Err(e) = crate::atomic::write(&state, &bytes) {
+            self.status = Some((format!("{e}"), Instant::now()));
+            return;
+        }
+        let request = crate::assistant::Request {
+            task: if play { crate::assistant::Task::Play } else { crate::assistant::Task::Cheat },
+            wish,
+            emulator: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("prisme")),
+            rom,
+            state,
+            cheats: self.paths.cheats_write(),
+        };
+        match crate::assistant::Session::start(&claude, &request) {
+            Ok(session) => {
+                self.assistant_session = Some(session);
+                self.assistant_line = Some(String::new());
+                // The game stops while the assistant works: it is about to drive
+                // a console of its own, and two hands on one game is not a state
+                // anyone asked for.
+                self.paused = true;
+            }
+            Err(e) => self.status = Some((e, Instant::now())),
+        }
+    }
+
+    /// Drain what the assistant has to say, once per frame. A finished session
+    /// leaves its last line on screen and reloads the game's cheats, which is
+    /// where a successful search put its result.
+    fn poll_assistant(&mut self) {
+        let Some(session) = &mut self.assistant_session else { return };
+        for status in session.poll() {
+            match status {
+                crate::assistant::Status::Progress(line) => self.assistant_line = Some(line),
+                crate::assistant::Status::Done(line)
+                | crate::assistant::Status::Failed(line) => {
+                    self.status = Some((line, Instant::now()));
+                    self.assistant_line = None;
+                    self.assistant_session = None;
+                    self.refresh_cheats();
+                    return;
+                }
+            }
+        }
+        if session.finished() {
+            self.assistant_line = None;
+            self.assistant_session = None;
+            self.refresh_cheats();
+        }
     }
 
     /// Turning the assistant on is refused outright when `claude` was not
