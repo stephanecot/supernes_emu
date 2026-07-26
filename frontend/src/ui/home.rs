@@ -256,6 +256,11 @@ fn library(ui: &mut egui::Ui, model: &mut HomeModel) -> Action {
                 picture: thumbs.get(&id).map(|p| p.as_path()),
                 pending: pending.contains(&id),
                 meta: model.meta.get(&id),
+                // Only for the game that *is* running: another game's sheet
+                // has no business showing this one's picture.
+                session_frame: (model.running == Some(id.as_str()))
+                    .then_some(model.session_frame)
+                    .flatten(),
                 assistant: model.assistant,
                 is_running: model.running == Some(id.as_str()),
                 wish: model.wish,

@@ -144,6 +144,11 @@ pub struct SheetModel<'a> {
     pub selected: &'a mut Option<String>,
     /// Save state whose deletion is armed and waiting for a confirmation.
     pub confirm_delete: &'a mut Option<PathBuf>,
+    /// The frame this game's suspended session stopped on, when it *is* the
+    /// running one. Shown in place of the thumbnail: someone opening the sheet
+    /// of the game they are playing wants to see where they are, not a picture
+    /// of its title screen.
+    pub session_frame: Option<&'a [u8]>,
     /// Language every string of the sheet is rendered in.
     pub lang: Lang,
     /// The assistant may be summoned: switched on *and* its tool resolved.
@@ -198,14 +203,21 @@ pub fn show(ui: &mut egui::Ui, model: &mut SheetModel) -> Action {
                     Layout::top_down(Align::Min),
                     |ui| {
                         ui.set_min_width(HERO_W);
-                        library_view::thumbnail(
-                            ui,
-                            model.picture,
-                            Placeholder::game_pending(model.pending),
-                            model.textures,
-                            Vec2::new(HERO_W, HERO_H),
-                            lang,
-                        );
+                        match model.session_frame {
+                            Some(frame) => {
+                                session_hero(ui, frame, model.textures, lang);
+                            }
+                            None => {
+                                library_view::thumbnail(
+                                    ui,
+                                    model.picture,
+                                    Placeholder::game_pending(model.pending),
+                                    model.textures,
+                                    Vec2::new(HERO_W, HERO_H),
+                                    lang,
+                                );
+                            }
+                        }
                         ui.add_space(10.0);
                         // The call to action takes the whole column: it is the one
                         // thing a sheet exists to offer.
@@ -839,6 +851,43 @@ fn ask_section(ui: &mut egui::Ui, model: &mut SheetModel) -> Option<Action> {
     action
 }
 
+/// The running session's own frame, in the sheet's picture box, with a line
+/// saying what it is.
+///
+/// It replaces the thumbnail rather than sitting beside it: a sheet has one
+/// picture box, and of the two pictures the one showing where the player
+/// actually is beats a generated shot of the title screen.
+fn session_hero(
+    ui: &mut egui::Ui,
+    frame: &[u8],
+    textures: &mut TextureStore,
+    lang: Lang,
+) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(HERO_W, HERO_H), Sense::hover());
+    let key = Path::new(TextureStore::SESSION_FRAME);
+    let size = [crate::SCREEN_WIDTH, crate::SCREEN_HEIGHT];
+    let texture = textures.frame(ui.ctx(), key, frame, size).map(|t| t.id());
+    match texture {
+        Some(id) => {
+            ui.painter().image(
+                id,
+                rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        }
+        None => {
+            ui.painter().rect_filled(rect, 4.0, theme::BG_DEEP);
+        }
+    }
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new(Msg::SessionStillOn.text(lang))
+            .font(theme::font(theme::SIZE_SMALL))
+            .color(theme::GREEN),
+    );
+}
+
 /// A plain button spanning the whole left column.
 fn wide_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     let height = ui.spacing().interact_size.y.max(28.0);
@@ -1088,6 +1137,7 @@ mod tests {
                 produced = show(
                     ui,
                     &mut SheetModel {
+                session_frame: None,
                 assistant: true,
                 is_running: true,
                 wish: &mut String::new(),
