@@ -113,8 +113,10 @@
   <p class="sub">Guide pédagogique complet — du transistor au pixel, du processeur au son</p>
   <div class="meta">
     Émulateur écrit <strong>from scratch en Rust</strong> — CPU 65C816, PPU graphique,
-    APU sonore (SPC700 + S‑DSP), DMA/HDMA, cartouches LoROM/HiROM et coprocesseur SuperFX.<br>
-    Document technique et pédagogique · Version 2.0 — édition détaillée
+    APU sonore (SPC700 + S‑DSP), DMA/HDMA, cartouches LoROM/HiROM et
+    <strong>quatre coprocesseurs de cartouche</strong> (SuperFX, SA‑1, DSP‑1, CX4),
+    plus l'application qui l'entoure.<br>
+    Document technique et pédagogique · Version 3.0 — édition détaillée
   </div>
 </section>
 
@@ -131,9 +133,12 @@
   <li>La puce graphique : le PPU</li>
   <li>Le déménageur : DMA et HDMA</li>
   <li>Le son : l'APU (SPC700 + S‑DSP)</li>
-  <li>Les puces de cartouche : le coprocesseur SuperFX</li>
+  <li>Les puces de cartouche : quatre processeurs de plus</li>
+  <li>Pourquoi « au cycle près » : l'affaire Terranigma</li>
   <li>La boucle d'émulation : tout synchroniser</li>
   <li>Au‑delà de la console : sauvegardes et save states</li>
+  <li>L'application autour de l'émulateur</li>
+  <li>Deux essais qui n'ont pas été gardés</li>
   <li>Comment cet émulateur a été construit et vérifié</li>
   <li>Glossaire</li>
 </ol>
@@ -171,7 +176,7 @@
   <li><strong>L'APU</strong> (<em>Audio Processing Unit</em>) — un mini‑ordinateur sonore complet et autonome.</li>
   <li><strong>La mémoire</strong> — 128 Ko de travail (WRAM), 64 Ko de vidéo (VRAM), et la cartouche (ROM + sauvegarde).</li>
   <li><strong>Le DMA</strong> — un « déménageur » d'octets ultra‑rapide entre ces mémoires.</li>
-  <li><strong>Parfois, une puce dans la cartouche</strong> — comme le SuperFX, un second processeur qui dessine de la 3D.</li>
+  <li><strong>Parfois, une puce dans la cartouche</strong> — comme le SuperFX, un second processeur qui dessine de la 3D. Il y en a plusieurs familles, et elles changent la nature du problème (§10).</li>
 </ul>
 
 <!-- ================= 2. BITS ================= -->
@@ -237,7 +242,7 @@
   « appuis de manette + temps qui passe » en « image + échantillons audio ». Le
   <strong>frontend</strong> traduit cela vers le monde réel. Résultat&nbsp;: on peut faire tourner
   le cœur en mode « sans tête » (headless) pour le tester automatiquement — c'est exactement
-  comme cela que cet émulateur a été vérifié (voir §13).
+  comme cela que cet émulateur a été vérifié (voir §16).
 </p>
 
 <!-- ================= 4. MEMORY ================= -->
@@ -418,8 +423,8 @@
   La SNES supporte deux régions&nbsp;: PAL (Europe, 50 Hz) et NTSC (60 Hz). Un jeu européen
   tourne plus lentement mais affiche plus de lignes. L'émulateur détecte la région dans
   l'en‑tête de la cartouche et adapte l'ordonnanceur <em>et</em> la cadence d'affichage&nbsp;:
-  vos trois jeux sont PAL, donc rendus à 50 images par seconde, exactement comme sur une SNES
-  européenne branchée à une télé de l'époque.
+  une cartouche européenne est rendue à 50 images par seconde, exactement comme sur une SNES
+  européenne branchée à une télé de l'époque, et une cartouche japonaise ou américaine à 60.
 </div>
 
 <!-- ================= 7. PPU ================= -->
@@ -525,7 +530,9 @@ tex_y = C·(x + H) + D·(y + V) + Y0
 <p>
   où A, B, C, D forment la matrice (en virgule fixe 8.8), et H/V/X0/Y0 les décalages et le centre.
   En faisant varier la matrice <strong>à chaque ligne</strong> (via le HDMA, §8), on obtient la
-  perspective des circuits de F‑Zero&nbsp;: le sol semble filer vers l'horizon.
+  perspective des circuits de F‑Zero&nbsp;: le sol semble filer vers l'horizon. Dans
+  <em>Super Mario Kart</em>, cette matrice n'est même pas calculée par la console&nbsp;: une puce de
+  la cartouche s'en charge (§10).
 </p>
 <div class="card deep">
   <strong>Fonctionnalités fines.</strong> Le PPU gère aussi&nbsp;: la <em>mosaïque</em>
@@ -601,15 +608,59 @@ tex_y = C·(x + H) + D·(y + V) + Y0
   présence de l'écho) — pas seulement à l'oreille.
 </div>
 
-<!-- ================= 10. SUPERFX ================= -->
-<h2><span class="n">10.</span>Les puces de cartouche : le coprocesseur SuperFX</h2>
+<!-- ================= 10. COPROCESSORS ================= -->
+<h2><span class="n">10.</span>Les puces de cartouche : quatre processeurs de plus</h2>
 <p class="lead">
-  Certaines cartouches embarquaient leur propre puce pour dépasser les limites de la console.
-  La plus célèbre est le <em class="term">SuperFX</em> (aussi appelé GSU), un véritable second
-  processeur, qui faisait tourner la 3D de <em>Star Fox</em> et les décors de
-  <em>Yoshi's Island</em>.
+  Voici le point où « émuler la Super Nintendo » cesse d'être une phrase suffisante. La console
+  expose sur son connecteur de cartouche assez de signaux pour qu'un éditeur y branche
+  <strong>sa propre puce</strong> — et plusieurs l'ont fait, chacun la sienne. Une cartouche n'est
+  donc pas toujours une simple mémoire morte&nbsp;: c'est parfois un ordinateur de plus, avec son
+  processeur, sa mémoire et ses règles. Émuler <em>la console</em> ne suffit pas&nbsp;; il faut
+  émuler <em>cette cartouche‑là</em>.
 </p>
-<h3>Qu'est‑ce que le GSU</h3>
+<div class="card key">
+  Conséquence directe pour qui écrit un émulateur&nbsp;: la compatibilité n'est pas une courbe
+  continue qu'on ferait monter en corrigeant des détails. Chaque puce de cartouche est une
+  <strong>marche</strong>. Tant qu'elle n'est pas écrite, les jeux qui l'utilisent ne démarrent pas
+  du tout&nbsp;; le jour où elle l'est, ils démarrent tous ensemble. Cet émulateur en implémente
+  quatre.
+</div>
+<table>
+  <tr><th>Puce</th><th>Ce qu'elle est</th><th>Approche</th><th>Jeu de validation</th></tr>
+  <tr><td class="mono">SuperFX (GSU)</td><td>Processeur RISC 16 bits ~10 MHz qui dessine des pixels</td><td>CPU complet, écrit de zéro</td><td><em>Yoshi's Island</em></td></tr>
+  <tr><td class="mono">SA‑1</td><td>Un second 65C816, cadencé à la moitié de l'horloge maître</td><td>CPU complet, réutilisant le nôtre</td><td><em>Super Mario RPG</em></td></tr>
+  <tr><td class="mono">DSP‑1</td><td>Calculateur NEC µPD77C25 : matrices, projection, trigonométrie</td><td>Haut niveau (HLE)</td><td><em>Super Mario Kart</em></td></tr>
+  <tr><td class="mono">CX4</td><td>Hitachi HG51B169 (Capcom) : vecteurs, rotation/zoom de sprites</td><td>Haut niveau (HLE)</td><td><em>Mega Man X3</em></td></tr>
+</table>
+<h3>Deux façons d'émuler une puce, et pourquoi le choix est imposé</h3>
+<p>
+  Le SuperFX et le SA‑1 sont des <strong>processeurs programmables</strong>&nbsp;: le programme
+  qu'ils exécutent est dans la cartouche, donc dans le fichier que possède le joueur. On peut — et
+  on doit — écrire le processeur lui‑même, instruction par instruction, et le laisser exécuter ce
+  programme. C'est ce qu'on appelle l'émulation <em class="term">bas niveau</em>.
+</p>
+<p>
+  Le DSP‑1 et le CX4 n'offrent pas ce luxe. Leur programme interne est gravé dans un
+  <em>micrologiciel</em> qui n'est pas dans la cartouche et qui reste la propriété de son éditeur.
+  Impossible de l'exécuter&nbsp;; il faut se contenter d'observer le <strong>dialogue</strong>
+  — le jeu écrit un numéro de commande et des paramètres, la puce rend un résultat — et de
+  réimplémenter chaque commande par ses mathématiques. C'est l'émulation <em class="term">haut
+  niveau</em> (HLE)&nbsp;: on ne rejoue pas la puce, on rejoue ce qu'elle répond.
+</p>
+<div class="card key">
+  Le HLE a un défaut assumé qu'il faut connaître&nbsp;: il est exact <strong>pour les commandes que
+  les jeux utilisent</strong>, telles qu'on les a comprises. Une commande rare, ou un jeu qui
+  s'appuierait sur un effet de bord non documenté, sortirait du modèle. En contrepartie, il est
+  instantané&nbsp;: notre DSP‑1 déclare toujours « résultat prêt » (bit 7 de son registre d'état),
+  là où la vraie puce aurait fait patienter le jeu le temps de son calcul. Aucun jeu testé ne s'en
+  plaint — mais c'est une hypothèse, pas un théorème.
+</div>
+
+<h3>Le SuperFX (GSU) : écrire un processeur complet de plus</h3>
+<p>
+  La plus célèbre de ces puces est le <em class="term">SuperFX</em> (aussi appelé GSU)&nbsp;: c'est
+  elle qui faisait tourner la 3D de <em>Star Fox</em> et les décors de <em>Yoshi's Island</em>.
+</p>
 <p>
   Le GSU est un processeur <strong>RISC 16 bits</strong> à ~10 MHz, avec 16 registres et un jeu
   d'instructions entièrement différent du 65C816. Il vit dans la cartouche, accède à la ROM et à
@@ -619,7 +670,8 @@ tex_y = C·(x + H) + D·(y + V) + Y0
   attend.
 </p>
 <p>
-  L'émuler, c'est écrire <strong>un CPU complet de plus</strong> — le vrai défi de ce projet.
+  L'émuler, c'est écrire <strong>un CPU complet de plus</strong> — le premier grand chantier de ce
+  genre dans ce projet.
   Le GSU de cet émulateur exécute réellement les programmes de <em>Yoshi's Island</em>, décompresse
   ses graphismes et affiche l'écran de sélection de la langue.
 </p>
@@ -637,8 +689,233 @@ tex_y = C·(x + H) + D·(y + V) + Y0
   méticuleuse avec le matériel de référence permet de trouver.
 </div>
 
-<!-- ================= 11. LOOP ================= -->
-<h2><span class="n">11.</span>La boucle d'émulation : tout synchroniser</h2>
+<h3>Le SA‑1 : une seconde console dans la cartouche</h3>
+<p>
+  Le <em class="term">SA‑1</em> (<em>Super Accelerator 1</em>) prend le problème par l'autre bout.
+  Plutôt qu'un processeur exotique, Nintendo a remis dans la cartouche <strong>le même processeur
+  que dans la console</strong> — un 65C816 — mais cadencé à la moitié de l'horloge maître, soit
+  <strong>10,74 MHz</strong>. Le 65C816 de la console, lui, ne dépasse pas 3,58 MHz, même sur ses
+  accès les plus rapides&nbsp;: la cartouche est donc environ <strong>trois fois plus rapide que la
+  machine dans laquelle on l'enfonce</strong>. C'est la puce de <em>Super Mario RPG</em>.
+</p>
+<p>
+  Pour l'émulateur, c'est une bonne nouvelle inhabituelle&nbsp;: le processeur est déjà écrit. Le
+  module <code>cpu</code> du §5 est simplement <strong>instancié une seconde fois</strong>. Tout le
+  travail restant est autour&nbsp;: le <em>Super MMC</em> (un contrôleur qui redécoupe la ROM en
+  fenêtres réattribuables), une unité arithmétique matérielle (multiplication, division,
+  accumulation), un lecteur de flux de bits à longueur variable pour les décompressions, une
+  minuterie H/V, un contrôleur DMA, 2 Ko de mémoire interne partagée avec la console (I‑RAM) et
+  jusqu'à 256 Ko de mémoire sauvegardée par pile (BW‑RAM).
+</p>
+<div class="card story">
+  <strong>Deux processeurs qui s'attendent l'un l'autre.</strong> <em>Super Mario RPG</em> ne
+  démarrait pas&nbsp;: il figeait à l'écran noir. La trace, ajoutée pour l'occasion
+  (<code>--trace-sa1</code>, jumelle de celles du 65C816 et du SPC700), montrait deux boucles
+  parfaitement immobiles — le SA‑1 relisait sans fin l'adresse <code>$40:3D00</code>, et le
+  processeur de la console relisait sans fin l'octet <code>$3002</code> de l'I‑RAM. Chacun
+  attendait un signal que l'autre devait poser.
+  <br><br>
+  La cause tenait dans une condition trop stricte. La BW‑RAM possède un verrou d'écriture
+  (<code>SBWE</code>, registre <code>$2226</code>)&nbsp;; notre code refusait toute écriture venue
+  de la console quand ce verrou était fermé. Le vrai matériel est plus subtil&nbsp;: il ne refuse
+  l'écriture que si le verrou est fermé <strong>et</strong> que l'adresse tombe dans la zone
+  explicitement protégée. Or le jeu écrivait <code>$18</code> en <code>$40:3D00</code>, verrou
+  fermé mais <em>hors</em> de la zone protégée — une écriture parfaitement légale, que nous
+  jetions. Le signal attendu par le SA‑1 n'arrivait donc jamais, et l'attente devenait mutuelle.
+  <br><br>
+  Un seul <code>et</code> manquant dans une condition&nbsp;; un jeu entier qui ne démarre pas. Une
+  fois corrigé, <em>Super Mario RPG</em> enchaîne l'écran « HELP! », la plaine forestière jouable,
+  puis la cinématique du haricot.
+</div>
+
+<h3>Le DSP‑1 : la perspective de <em>Super Mario Kart</em></h3>
+<p>
+  Le <em class="term">DSP‑1</em> est un calculateur, pas un processeur généraliste&nbsp;: un NEC
+  µPD77C25 auquel le jeu pose des questions de mathématiques. La console lui parle par deux
+  guichets d'un octet — <code>DR</code> pour les données, <code>SR</code> pour l'état — et le
+  protocole est d'une simplicité désarmante&nbsp;: écrire un numéro de commande, écrire les
+  paramètres, relire le résultat.
+</p>
+<p>
+  Ce que la puce calcule, en revanche, est exactement ce dont on parlait au §7. Les commandes
+  utilisées par <em>Super Mario Kart</em> forment une petite chaîne de rendu 3D&nbsp;:
+</p>
+<table>
+  <tr><th>Commande</th><th>Nom</th><th>Ce qu'elle fait</th></tr>
+  <tr><td class="mono">Op02</td><td>Parameter</td><td>Installe la caméra&nbsp;: hauteur, angle de vue, centre de l'écran.</td></tr>
+  <tr><td class="mono">Op0A</td><td>Raster</td><td><strong>Rend les quatre coefficients A, B, C, D du Mode 7 pour une ligne d'écran donnée.</strong></td></tr>
+  <tr><td class="mono">Op06</td><td>Project</td><td>Projette un point du monde (x, y, z) en coordonnées d'écran (H, V) + une échelle.</td></tr>
+  <tr><td class="mono">Op0E</td><td>Target</td><td>L'inverse&nbsp;: d'un point de l'écran vers le point du sol qu'il désigne.</td></tr>
+</table>
+<p>
+  Relisez la ligne <code>Op0A</code> en gardant en tête le §7 et le §8, et tout le circuit
+  apparaît&nbsp;: la matrice <em>par ligne</em> qui donne au Mode 7 sa perspective, c'est le DSP‑1
+  qui la calcule, le HDMA qui la dépose dans les registres du PPU juste avant que la ligne soit
+  dessinée, et le PPU qui l'applique pixel par pixel. Trois chapitres de ce document se rejoignent
+  dans un seul virage de <em>Super Mario Kart</em>.
+</p>
+<div class="card deep">
+  <strong>Pourquoi c'était la partie risquée.</strong> Tout ce calcul est en virgule fixe Q15 —
+  des entiers 16 bits interprétés comme des fractions — avec des normalisations, des exposants et
+  des saturations à chaque étape. Un test unitaire vérifie qu'une fonction rend le nombre attendu,
+  mais il ne sait pas dire si la <em>route</em> a l'air d'une route. Une erreur d'un bit sur un
+  arrondi de division ne casse rien&nbsp;: elle courbe l'horizon. La seule preuve acceptable était
+  donc de conduire réellement — et le circuit s'affiche correctement, chronomètre qui avance, sur
+  une vraie course.
+</div>
+
+<h3>Le CX4 : la puce dessinée pour un seul studio</h3>
+<p>
+  Le <em class="term">CX4</em> est un Hitachi HG51B169 que Capcom a mis dans <em>Mega Man X2</em>
+  et <em>X3</em>. Il fait du fil de fer vectoriel, de la rotation et du zoom de sprites, de la
+  trigonométrie, et sait même construire directement la table des sprites (l'OAM du §7) à la place
+  du jeu. Il s'expose de façon minimaliste&nbsp;: une plage plate de 8 Ko en
+  <code>$6000–$7FFF</code>, où le jeu dépose ses paramètres, déclenche une commande, et relit le
+  résultat au même endroit. Notre implémentation est HLE, pour la même raison que le DSP‑1&nbsp;:
+  le microprogramme 24 bits de la puce appartient à Capcom.
+</p>
+<div class="card story">
+  <strong>Un compteur qui passe sous zéro.</strong> <em>Mega Man X3</em> démarrait, affichait son
+  écran‑titre — dont l'animation du logo est justement calculée par le CX4 — puis
+  <strong>plantait</strong> juste après l'introduction&nbsp;: pas un écran figé, un véritable arrêt
+  de l'émulateur. Le coupable était une boucle de nettoyage de la table des sprites, écrite ainsi&nbsp;:
+  <em>tant que l'index est supérieur au début, effacer et reculer de quatre</em>. L'index descend
+  par pas de 4 sans être aligné sur la borne&nbsp;: il la <em>franchit</em> au lieu de s'y arrêter.
+  Et quand la borne valait moins de 4, la soustraction s'appliquait à un entier non signé, qui
+  n'a pas de « moins un »&nbsp;: la valeur remontait d'un coup à environ 18 milliards de milliards,
+  et l'accès suivant sortait de la mémoire.
+  <br><br>
+  C'est un bug instructif à double titre. D'abord parce qu'il est <strong>importé</strong>&nbsp;: la
+  logique vient d'une réimplémentation de référence écrite en C, où le même dépassement se serait
+  produit en silence, en corrompant des octets voisins — un jeu qui devient bizarre plus tard, sans
+  rien pour désigner la cause. Rust refuse de continuer, et transforme une corruption discrète en
+  arrêt net à l'instruction fautive. Ensuite parce que le correctif est d'une banalité totale
+  (soustraire prudemment, sortir de la boucle si l'on passerait sous zéro) alors que le symptôme
+  était spectaculaire. Une fois corrigé, le jeu franchit l'intro et tourne 12 000 images scriptées
+  sans incident.
+</div>
+<div class="card key">
+  <strong>Ce que les quatre ont en commun.</strong> Aucune de ces puces ne <em>possède</em> la ROM
+  de la cartouche&nbsp;: c'est la cartouche qui la leur prête à chaque appel. C'est un choix
+  d'architecture, pas un détail — une seule copie de la ROM en mémoire, aucun risque que deux
+  composants aient deux versions différentes de la même cartouche, et un état sauvegardable qui ne
+  contient jamais l'image du jeu. Et toutes suivent la même règle de synchronisation que le
+  processeur audio (§9)&nbsp;: on ne les fait pas avancer en parallèle, on les fait
+  <strong>rattraper</strong> le temps écoulé quand quelqu'un vient leur parler. Le résultat reste
+  déterministe, ce qui est la condition de tout le reste (§13).
+</div>
+
+<!-- ================= 11. TERRANIGMA ================= -->
+<h2><span class="n">11.</span>Pourquoi « au cycle près » : l'affaire Terranigma</h2>
+<p class="lead">
+  Le §1 affirme qu'un émulateur doit reproduire non seulement <em>ce que</em> font les puces mais
+  <em>quand</em> elles le font. C'est une phrase facile à écrire et difficile à faire sentir. Voici
+  donc, en détail, le cas où elle s'est vérifiée dans ce projet — parce qu'il montre exactement à
+  quoi ressemble « un jeu qui dépend d'une marge non documentée ».
+</p>
+<h3>Le symptôme</h3>
+<p>
+  <em>Terranigma</em>, un action‑RPG de 1995, était <strong>muet</strong>, et se
+  <strong>figeait</strong> après la carte d'annonce « Chapitre 1 ». Deux défauts apparents&nbsp;;
+  un seul bug. La trace du processeur principal était sans appel&nbsp;: sur 607 954 instructions
+  enregistrées, <strong>100&nbsp;%</strong> étaient les deux mêmes, en boucle —
+  <code>LDA $2140 / BNE</code>. Le jeu attendait une réponse de son moteur sonore. Le moteur
+  sonore, lui, avait déraillé jusqu'à l'adresse <code>$0000</code> et exécutait la page zéro.
+</p>
+<h3>La règle qui était fausse</h3>
+<p>
+  Une instruction du SPC700 dure de 2 à 12 cycles, et fait son <strong>accès mémoire sur son dernier
+  cycle</strong>. Notre code faisait l'inverse&nbsp;: dès qu'<em>un</em> cycle de l'instruction
+  était dû, il l'exécutait entièrement puis facturait le coût. Autrement dit, tous les effets d'une
+  instruction — y compris l'écriture dans les boîtes aux lettres <code>$F4–$F7</code> par
+  lesquelles l'APU répond à la console — devenaient visibles <strong>jusqu'à 62 cycles maîtres trop
+  tôt</strong> pour une instruction de 4 cycles.
+</p>
+<h3>Pourquoi six autres jeux ne voyaient rien</h3>
+<p>
+  C'est la partie qui vaut le détour. Presque tous les jeux envoient leur moteur sonore en passant
+  par la <strong>routine d'amorçage gravée dans la console</strong> (l'IPL du §9). Or cette routine
+  lit l'octet de données <em>avant</em> d'accuser réception&nbsp;:
+</p>
+<pre><span class="c">// IPL, à $FFDD — lit, PUIS accuse</span>
+CMP  Y,$F4      <span class="c">// attendre le numéro de séquence</span>
+MOV  A,$F5      <span class="c">// LIRE la donnée</span>
+MOV  $F4,Y      <span class="c">// puis seulement : accuser réception</span>
+</pre>
+<p>
+  Dans cet ordre, aucune course n'est possible&nbsp;: quand la console voit l'accusé, la donnée est
+  déjà lue. Un accusé publié 62 cycles trop tôt ne change strictement rien. Six jeux passaient donc
+  à travers le bug sans le moindre symptôme.
+</p>
+<p>
+  <em>Terranigma</em> n'utilise pas l'IPL. Il installe <strong>son propre récepteur</strong>, à
+  l'adresse <code>$041D</code>, et celui‑ci accuse <strong>d'abord</strong>&nbsp;:
+</p>
+<pre><span class="c">// récepteur de Terranigma, à $041D — accuse, PUIS lit</span>
+MOV  $F4,Y      <span class="c">// accuser réception</span>
+MOV  A,$F5      <span class="c">// puis lire la donnée</span>
+</pre>
+<p>
+  Cet ordre n'est pas une erreur du programmeur&nbsp;: il est plus rapide, et il est
+  <strong>sûr sur le vrai matériel</strong>, parce que le SPC700 dispose là d'environ
+  <strong>14 cycles maîtres</strong> de marge réelle entre l'accusé et la lecture — assez pour que
+  la console n'ait pas le temps de réécrire le port. Notre erreur de 62 cycles a
+  <strong>inversé</strong> cette marge. La console écrasait <code>$2141</code> avant que l'APU
+  n'ait lu la valeur précédente.
+</p>
+<div class="card key">
+  Le jeu ne fait rien d'illégal. Il s'appuie sur une propriété du silicium que personne n'a jamais
+  écrite dans une documentation, parce qu'elle allait de soi pour qui avait la puce sous les yeux.
+  <strong>C'est cela, « un jeu qui dépend du timing »</strong>&nbsp;: pas un caprice, une marge de
+  quatorze cycles.
+</div>
+<h3>Les dégâts, et le correctif</h3>
+<p>
+  Le résultat de la course perdue était mécanique&nbsp;: <strong>2 743 octets faux sur les 7 316
+  transférés</strong>. Le moteur sonore arrivait corrompu, son pointeur de séquence finissait par
+  valoir <code>$0000</code>, et il partait exécuter la page zéro. D'où le silence — et d'où le gel,
+  puisque la console attendait indéfiniment une réponse d'un programme qui n'existait plus.
+</p>
+<p>
+  Le correctif ne comporte ni exception ni cas particulier&nbsp;: une table des durées de chaque
+  instruction SPC700, et un ordonnanceur qui <strong>refuse de commencer une instruction tant que
+  le budget de temps ne couvre pas sa fenêtre entière</strong>. Le rythme moyen du processeur audio
+  est inchangé&nbsp;; seul bouge le moment, <em>à l'intérieur</em> de sa fenêtre, où une instruction
+  publie ses effets — de son premier cycle vers son dernier, là où le matériel fait réellement son
+  accès au bus.
+</p>
+<table>
+  <tr><th>Mesure sur <em>Terranigma</em></th><th>Avant</th><th>Après</th></tr>
+  <tr><td>Amplitude audio maximale (900 images)</td><td class="mono">0</td><td class="mono">5 038</td></tr>
+  <tr><td>Volume général de l'APU (<code>MVOL</code>)</td><td class="mono">$00</td><td class="mono">$5F</td></tr>
+  <tr><td>Mémoire APU réellement remplie</td><td class="mono">5 334 o</td><td class="mono">60 611 o</td></tr>
+  <tr><td>Octets faux au transfert</td><td class="mono">2 743 / 7 316</td><td class="mono">0 / 2 387</td></tr>
+  <tr><td>Progression depuis un démarrage à froid</td><td>gel après « Chapitre 1 »</td><td>« Chapitre 1 » à l'image 2 000, chambre d'Ark à 4 800</td></tr>
+</table>
+<div class="card key">
+  <strong>La leçon, et c'est elle qui compte.</strong> Une règle de timing fausse ne casse pas
+  « un jeu »&nbsp;: elle casse <strong>une classe de jeux</strong> — ici, tous ceux qui installent
+  leur propre récepteur au lieu d'utiliser celui de la console. Et sa correction ne répare pas
+  qu'un jeu&nbsp;: elle répare toute la classe, y compris les jeux qu'on n'a pas encore essayés.
+  C'est pourquoi on ne corrige jamais ce genre de défaut par un ajustement empirique jusqu'à ce
+  qu'un titre passe. Les sept autres jeux de test ont vu leur amplitude audio bouger de ±1 %
+  — chaque instruction SPC atterrit désormais une fenêtre plus loin — et aucun n'a perdu son son.
+</div>
+<div class="card deep">
+  <strong>Une honnêteté à conserver.</strong> Une chose n'a jamais été établie&nbsp;: lors d'une
+  vérification intermédiaire, une capture semblait montrer le bug encore présent. Deux lectures
+  restent compatibles avec les faits — soit cette capture venait de l'ancien binaire, soit la même
+  course se déclenchait par intermittence. Quatre tentatives de reproduction ont échoué, et le
+  doute n'a pas été levé&nbsp;; il est consigné plutôt que tu.
+  <br><br>
+  Il en reste aussi une leçon de méthode, coûteuse à réapprendre&nbsp;: <strong>installer un
+  binaire ne change rien à un processus déjà lancé</strong>. Un fichier écrit après une
+  installation peut parfaitement provenir de l'ancien code. On compare les horodatages au
+  <em>processus</em>, pas au fichier sur le disque.
+</div>
+
+<!-- ================= 12. LOOP ================= -->
+<h2><span class="n">12.</span>La boucle d'émulation : tout synchroniser</h2>
 <p>Assembler tout cela tient, au fond, en une boucle. Pour produire une image&nbsp;:</p>
 <pre><span class="k">fn</span> run_frame(inputs) -&gt; Image {
     appliquer_les_manettes(inputs);
@@ -662,8 +939,8 @@ tex_y = C·(x + H) + D·(y + V) + Y0
   attend jusque‑là, pour un défilement parfaitement régulier.
 </p>
 
-<!-- ================= 12. SAVE STATES ================= -->
-<h2><span class="n">12.</span>Au‑delà de la console : sauvegardes et save states</h2>
+<!-- ================= 13. SAVE STATES ================= -->
+<h2><span class="n">13.</span>Au‑delà de la console : sauvegardes et save states</h2>
 <p>
   Parce que l'émulateur <strong>possède la totalité de l'état</strong> de la machine, il peut
   faire des choses impossibles sur le vrai matériel&nbsp;:
@@ -680,8 +957,265 @@ tex_y = C·(x + H) + D·(y + V) + Y0
   fiables, et qui permet de tester l'émulateur en comparant ses sorties à une référence connue.
 </div>
 
-<!-- ================= 13. METHODOLOGY ================= -->
-<h2><span class="n">13.</span>Comment cet émulateur a été construit et vérifié</h2>
+<!-- ================= 14. THE APPLICATION ================= -->
+<h2><span class="n">14.</span>L'application autour de l'émulateur</h2>
+<p class="lead">
+  Tout ce qui précède décrit une <strong>bibliothèque</strong>&nbsp;: un composant sans écran, sans
+  son et sans clavier, qui transforme « appuis de manette + temps qui passe » en « image +
+  échantillons ». Ce n'est pas encore un logiciel qu'on ouvre. Autour d'elle a poussé une
+  application, et ses parties les plus intéressantes ne sont justement pas de l'émulation&nbsp;:
+  elles exploitent des propriétés que <em>seul</em> un émulateur possède.
+</p>
+
+<h3>La bibliothèque, et l'identification par empreinte</h3>
+<p>
+  L'écran d'accueil est une grille de jeux. Chaque carte a une image — et cette image, personne ne
+  l'a téléchargée&nbsp;: l'application <strong>émule le jeu quelques centaines d'images sur un fil
+  d'arrière‑plan</strong> et garde le résultat. Un émulateur est le seul logiciel de bibliothèque
+  qui puisse fabriquer lui‑même la vignette de ce qu'il liste.
+</p>
+<p>
+  Reste tout ce qu'une vignette ne dit pas&nbsp;: le genre, l'éditeur, l'année, le nombre de
+  joueurs, la jaquette d'origine. La tentation évidente est de chercher par nom de fichier —
+  et c'est précisément l'erreur, parce que chercher par nom, c'est <strong>deviner</strong>&nbsp;:
+  <code>Super Mario Kart (E) [!].zip</code> ressemble à beaucoup de choses. La devinette est
+  supprimée en passant par une <em class="term">empreinte</em>&nbsp;:
+</p>
+<div class="flow">
+  <span class="step">ROM (en‑tête copieur retiré)</span><span class="arrow">→</span>
+  <span class="step">CRC32</span><span class="arrow">→</span>
+  <span class="step">nom canonique certain</span><span class="arrow">→</span>
+  <span class="step">catalogues</span>
+  <span class="step">jaquette</span>
+</div>
+<p>
+  Le CRC32 est une signature de 4 octets calculée sur les octets du jeu&nbsp;: deux fichiers de
+  noms différents mais de contenu identique la partagent, deux versions différentes ne la partagent
+  jamais. Une base de correspondances publique la traduit en <strong>nom canonique</strong> —
+  <em>Super Mario Kart (Europe)</em> — de façon certaine et non par ressemblance. Les catalogues de
+  faits sont ensuite indexés sur ce même CRC&nbsp;: genre (3 851 entrées pour la SNES), développeur
+  (3 850), éditeur (3 845), nombre de joueurs (3 759), année (3 305), classification d'âge (1 156).
+  La jaquette, elle, est nommée d'après le nom canonique — fiable puisque ce nom vient du CRC.
+</p>
+<div class="card deep">
+  <strong>Là où la chaîne redevient faillible, on le dit.</strong> Aucune de ces bases ne contient
+  la moindre <em>description</em>&nbsp;: vérifié en listant l'arborescence complète. Le seul texte
+  disponible sans compte vient de Wikipédia, dont l'interrogation se fait <strong>par titre</strong>
+  — et donc par ressemblance, avec le risque de tomber sur l'homonyme. Trois conséquences assumées
+  plutôt que découvertes&nbsp;: la description est <strong>visiblement attribuée</strong> à
+  Wikipédia, pour qu'une erreur se voie et s'explique au lieu de passer pour une affirmation de
+  l'application&nbsp;; sa licence impose de toute façon cette attribution&nbsp;; et elle est
+  signalée comme <strong>anglophone</strong> dans une interface qui, elle, est bilingue.
+  <br><br>
+  Le réseau, enfin, n'est jamais sollicité tout seul&nbsp;: rien au démarrage, rien au balayage du
+  dossier. Deux boutons explicites, et tout ce qui a été récupéré est gardé sur le disque. Les
+  fichiers de catalogue se téléchargent <em>une fois</em> et servent ensuite hors ligne à toute la
+  collection — un aller‑retour pour des milliers de jeux, ce qui est aussi la façon la plus sobre
+  de traiter des serveurs qu'on ne paie pas.
+</div>
+
+<h3>Deux langues, vérifiées par le compilateur</h3>
+<p>
+  L'interface existe en français et en anglais. La méthode est plus intéressante que le résultat.
+  Plutôt qu'un fichier de traductions — où un oubli ne se voit qu'à l'écran, trop tard — les deux
+  langues sont déclarées <strong>côte à côte</strong>, et le code engendré couvre les deux&nbsp;:
+</p>
+<pre>messages! {
+    SettingsDisplay  =&gt; <span class="s">"Affichage"</span>  / <span class="s">"Display"</span>,
+    LibraryEmpty     =&gt; <span class="s">"Aucun jeu"</span>  / <span class="s">"No games"</span>,
+}
+</pre>
+<p>
+  Un message ajouté sans son anglais <strong>ne compile pas</strong>. C'est tout l'intérêt&nbsp;:
+  transformer un oubli d'humain en erreur de compilation. Deux règles de bon sens complètent
+  cela — les noms de touches restent en anglais dans les deux langues (une touche se nomme par ce
+  qui est gravé dessus), et l'anglais étant 15 à 20&nbsp;% plus court que le français,
+  <strong>aucune largeur de colonne n'est calculée sur une chaîne codée en dur</strong>&nbsp;: on
+  mesure le texte réellement rendu, dans la langue active.
+</p>
+
+<h3>Une manette dessinée qui est aussi un testeur</h3>
+<p>
+  L'écran des commandes montre, à côté du tableau des affectations, une <strong>manette SNES
+  dessinée au trait</strong> (au vecteur, donc sans aucune image à charger). Elle n'est pas
+  décorative&nbsp;: survoler une ligne du tableau met en évidence le bouton correspondant sur le
+  dessin, cliquer un bouton du dessin lance sa reconfiguration, et surtout <strong>les boutons
+  réellement pressés s'allument</strong>. Cela fait de cet écran, gratuitement, le moyen le plus
+  rapide de découvrir qu'une manette est à moitié morte — sans lancer un jeu.
+</p>
+
+<h3>Le canal de contrôle : parler à la console par du texte</h3>
+<p>
+  Lancé avec l'option <code>--agent</code>, l'émulateur ne s'occupe plus d'une fenêtre&nbsp;: il lit
+  <strong>un objet JSON par ligne</strong> sur son entrée standard et répond de même. Le vocabulaire
+  tient en une quinzaine de verbes — <code>step</code> (avancer N images), <code>press</code>
+  (tenir un bouton), <code>screenshot</code>, <code>read-mem</code>, <code>write-mem</code>,
+  <code>save-state</code>, <code>load-state</code>, et la famille <code>cheat-*</code>.
+</p>
+<p>
+  Une distinction y est structurante&nbsp;: <strong>observer ne fait pas avancer le temps</strong>.
+  Lire la mémoire ou prendre une capture coûte zéro image&nbsp;; seuls <code>step</code> et
+  <code>press</code> font avancer la console. Un programme extérieur peut donc examiner la machine
+  autant qu'il veut sans la perturber — ce qui est exactement ce que le chapitre suivant exige.
+</p>
+
+<h3>Des triches trouvées, et non saisies</h3>
+<p>
+  Il n'y a ici <strong>aucun code Game Genie</strong>, aucune base de codes, aucun champ où en
+  taper un. La demande se formule en français — « donne‑moi des vies infinies » — et l'adresse est
+  <em>trouvée</em>, en jouant et en regardant la mémoire. La méthode s'appelle
+  l'<strong>intersection successive</strong>, et elle repose entièrement sur trois propriétés
+  établies aux chapitres précédents&nbsp;:
+</p>
+<ul>
+  <li>les 128 Ko de WRAM sont <strong>lisibles en entier</strong>, sans déranger la console&nbsp;;</li>
+  <li>les save states sont <strong>complets et instantanés</strong> (§13) — le même événement peut être rejoué&nbsp;;</li>
+  <li>l'émulation est <strong>déterministe</strong> (§13) — le même état plus les mêmes entrées donne toujours la même image. C'est ce qui permet d'<em>intersecter</em> des tours au lieu de deviner.</li>
+</ul>
+<p>
+  On ne cherche pas la valeur&nbsp;: on élimine tout ce qui n'est pas elle. Instantané de la
+  mémoire&nbsp;; faire arriver l'événement (perdre une vie)&nbsp;; nouvel instantané&nbsp;; ne
+  garder que les adresses ayant bougé <em>exactement comme le compteur devait bouger</em>&nbsp;;
+  recommencer. La règle décisive est là&nbsp;: le prédicat doit être arithmétique. « Cet octet a
+  changé » retient des milliers d'adresses&nbsp;; « cet octet vaut exactement un de moins qu'avant »
+  en retient une douzaine <em>dès le premier tour</em>.
+</p>
+<table>
+  <tr><th>Tour (recherche réelle sur <em>Super Mario World</em>)</th><th>Adresses survivantes</th></tr>
+  <tr><td>départ (toute la WRAM)</td><td class="mono">131 072</td></tr>
+  <tr><td>1<sup>re</sup> mort</td><td class="mono">12</td></tr>
+  <tr><td>2<sup>e</sup> mort</td><td class="mono">5</td></tr>
+  <tr><td>3<sup>e</sup> mort</td><td class="mono">3</td></tr>
+  <tr><td>4<sup>e</sup> mort</td><td class="mono">3 — <code>7E:0DB4</code>, <code>7E:0DBE</code>, <code>7E:0F17</code></td></tr>
+</table>
+<p>
+  Et l'on s'arrête à trois, définitivement&nbsp;: aucun tour supplémentaire ne les séparera, parce
+  que ce qui reste est le compteur <strong>et sa parenté</strong>. Il y a presque toujours la
+  <em>copie de sauvegarde</em> (un second exemplaire tenu pour l'écran‑monde, que le niveau ne lit
+  pas) et le <em>miroir d'affichage</em> (l'octet du bandeau, recopié chaque image, qui suit le
+  compteur parfaitement).
+</p>
+<div class="card key">
+  <strong>Ce qui tranche n'est pas un tour de plus, c'est une écriture.</strong> On remet l'état,
+  on écrit une valeur voyante dans un candidat, on avance de quatre images et on
+  <strong>regarde l'écran</strong>. Le nombre affiché change&nbsp;? l'adresse alimente
+  l'affichage. Rien ne bouge&nbsp;? c'est une copie que le jeu ne lit pas ici. Puis on gèle le
+  gagnant et on laisse l'événement se reproduire&nbsp;: un vrai compteur tient et le joueur cesse
+  de perdre des vies&nbsp;; un miroir affiche un nombre figé pendant que le jeu continue à les
+  prendre — c'est le pire échec possible, parce qu'il <em>a l'air</em> de fonctionner.
+  <br><br>
+  Détail final, révélateur&nbsp;: l'adresse gagnante contenait <code>04</code> alors que le bandeau
+  affichait <code>MARIO ×5</code>. Le jeu stocke <em>les vies moins une</em>. La valeur à écrire
+  pour 99 vies est donc <code>$62</code>, et non <code>$63</code>. On lit l'écran, pas son
+  hypothèse.
+</div>
+<p>
+  Le résultat est déposé dans un fichier <code>&lt;jeu&gt;.cheats.json</code>, à côté de la
+  sauvegarde. La recherche tourne sur un <strong>processus séparé</strong>, amorcé par un état
+  sauvegardé&nbsp;: elle ne touche jamais à la partie en cours, et le pire résultat possible est
+  qu'elle ne trouve rien. L'application lit ce fichier au chargement du jeu, et la triche apparaît
+  sur la fiche, avec de quoi l'éteindre.
+</p>
+<div class="card deep">
+  <strong>Qui fait la recherche.</strong> Le canal donne les mains et les yeux&nbsp;; la tête est
+  l'outil en ligne de commande <code>claude</code>, lancé en mode non interactif comme un processus
+  fils, <strong>sur la machine du joueur</strong>. Aucune clé d'API n'est demandée ni stockée&nbsp;:
+  c'est la session déjà installée qui travaille. Conséquence assumée&nbsp;: la fonction n'existe
+  que si cet outil est présent — ce qui est détecté une fois, et <em>dit</em>, plutôt que de
+  produire un échec au clic. Le modèle est configurable et vaut par défaut le plus léger de sa
+  famille, parce que ce travail est une longue suite de petits pas mécaniques répétés des centaines
+  de fois&nbsp;: ce qu'on ressent ici est la latence, et un modèle plus lourd la paierait à chaque
+  pas sans changer ce que le pas décide.
+</div>
+
+<!-- ================= 15. WHAT WAS DROPPED ================= -->
+<h2><span class="n">15.</span>Deux essais qui n'ont pas été gardés</h2>
+<p class="lead">
+  Un document qui n'énumère que des réussites enseigne moins qu'un document qui dit ce qui n'a pas
+  marché. Deux fonctions ont été construites, essayées sur pièces, et retirées. Dans les deux cas,
+  ce n'est pas la faisabilité technique qui a tranché — elles marchaient — mais l'usage.
+</p>
+
+<h3>Agrandir les captures avec un réseau de neurones</h3>
+<p>
+  L'idée est séduisante et l'objection habituelle tombe&nbsp;: sur une <em>capture</em>, il n'y a
+  ni scintillement d'une image à l'autre, ni latence de jeu, ni budget de 16 millisecondes. On peut
+  prendre une seconde et un gros modèle. Un modèle de super‑résolution répandu (18 Mo) a donc été
+  exécuté localement, sur le GPU du Mac, sur une capture du dépôt&nbsp;: <strong>0,48 seconde</strong>
+  par image. La faisabilité n'est pas en cause.
+</p>
+<p>
+  Ce que le modèle fait très bien&nbsp;: <strong>les décors</strong>. Le tramage en damier du ciel —
+  cette alternance de pixels que la SNES utilisait pour simuler des couleurs qu'elle n'avait pas —
+  devient un vrai dégradé continu. Les nuages ont des contours propres, les briques et les buissons
+  sont nets. C'est réellement beau.
+</p>
+<p>
+  Ce qu'il casse&nbsp;: <strong>tout ce qui est petit et porteur de sens</strong>. Mario, seize
+  pixels de haut, devient une masse illisible. La pièce du bandeau devient un œuf. Le texte
+  <code>TIME 388</code> devient des glyphes inventés.
+</p>
+<div class="card key">
+  La cause est <strong>structurelle et non réglable</strong>. Le réseau a été entraîné sur des
+  illustrations où un visage occupe des centaines de pixels. Ici il n'a pas l'information — alors
+  il l'invente, ce qui est exactement ce qu'on lui a appris à faire. Et le tramage, qu'il efface si
+  heureusement sur le ciel, il l'efface aussi sur les sprites, où il portait la forme.
+  <strong>Aucun curseur de réglage ne répare cela</strong>&nbsp;: le modèle ne distingue pas un
+  dégradé décoratif d'un chiffre.
+</div>
+<p>
+  Une piste reste ouverte et a même été prototypée avec succès&nbsp;: appliquer le réseau au fond,
+  et un agrandisseur préservant les formes aux sprites et au bandeau — Mario redevient
+  reconnaissable sans rien perdre du ciel. Et un émulateur aurait pour la généraliser un avantage
+  décisif sur n'importe quel outil recevant un PNG&nbsp;: <strong>il sait où sont les
+  sprites</strong>, leurs rectangles sont dans l'OAM (§7), et le bandeau est une couche tenue par
+  une fenêtre matérielle. L'information manquante au réseau, l'émulateur l'a. La piste n'a pas été
+  poursuivie — c'est un arbitrage, pas un échec.
+</p>
+
+<h3>Laisser un assistant franchir un passage</h3>
+<p>
+  La seconde fonction retirée était plus spectaculaire&nbsp;: demander à un assistant de passer un
+  boss ou un niveau bloquant <em>à votre place</em>, dans la fenêtre, sous vos yeux. Elle a existé
+  sous deux formes successives, et la seconde <strong>fonctionnait</strong> — le canal pilotait la
+  console visible, les images se dessinaient, la boucle de la fenêtre n'a jamais été bloquée&nbsp;;
+  tout cela a été mesuré, pas supposé.
+</p>
+<p>
+  Elle a été retirée quand même, sur le seul motif que l'usage a tranché&nbsp;:
+  <strong>c'est trop lent</strong>. Un assistant qui doit regarder une capture avant chaque décision
+  avance par à‑coups de quelques images, séparés par des secondes de réflexion. Ce n'est pas un
+  réglage à trouver, c'est la nature même de la boucle « observer, décider, agir » quand
+  l'observation est une image et la décision un appel de modèle. Regarder progresser ainsi est plus
+  pénible que de jouer le passage soi‑même.
+</p>
+<p>
+  Retirée, et non désactivée&nbsp;: 1 300 lignes sont parties avec elle, ainsi que le mode client
+  qui la servait et le secret de session qui le protégeait. Du code mort derrière un drapeau se
+  paie à chaque relecture. Le canal <code>--agent</code>, lui, reste entier&nbsp;: il porte la
+  recherche de triche, qui n'a jamais eu besoin d'être regardée.
+</p>
+<div class="card story">
+  <strong>Un compte rendu de succès sur un travail jamais fait.</strong> Pendant la construction de
+  cette fonction, l'assistant a rapporté&nbsp;: « commande envoyée, 60 images avancées, connexion
+  fermée proprement ». Le journal du serveur, lui, ne montrait qu'une seule ligne — « en
+  attente ». Personne ne s'était jamais connecté. La cause était une permission manquante&nbsp;:
+  sans elle, l'outil ne pouvait exécuter <em>aucune</em> commande.
+  <br><br>
+  Un refus silencieux n'aurait été qu'inutile. Un compte rendu de succès sur un travail jamais
+  fait est bien pire&nbsp;: c'est précisément ce qui rendait la panne introuvable, puisque tout, vu
+  de l'application, se terminait bien. La règle qui en découle vaut au‑delà de ce projet&nbsp;: ce
+  qu'un agent <em>dit</em> avoir fait n'est pas une preuve&nbsp;; la preuve est la trace de l'autre
+  côté du canal.
+  <br><br>
+  Deuxième défaut trouvé au même endroit, et classique&nbsp;: la sortie d'erreur du processus fils
+  était redirigée vers un tuyau que personne ne lisait. Un tuyau que personne ne draine se remplit —
+  64 Ko — et le processus s'y bloque <strong>définitivement</strong>. L'assistant démarrait,
+  écrivait, se figeait, et rien ne remontait.
+</div>
+
+<!-- ================= 16. METHODOLOGY ================= -->
+<h2><span class="n">16.</span>Comment cet émulateur a été construit et vérifié</h2>
 <p>
   Émuler fidèlement une console suppose une méthode aussi rigoureuse que le matériel lui‑même.
   Trois principes ont guidé ce projet&nbsp;:
@@ -709,15 +1243,28 @@ tex_y = C·(x + H) + D·(y + V) + Y0
   Choisir les jalons pour qu'ils testent <em>un</em> composant à la fois rend les bugs
   attribuables.
 </p>
+<h3>4. Tenir la liste de ce qui n'est pas prouvé</h3>
+<p>
+  Le projet maintient, à côté du reste, une liste des écarts <strong>connus et non corrigés</strong> —
+  un bit d'état qui ne bascule pas, une longueur de ligne qui dérive d'un point par image, un jeu
+  qui atteint le niveau mais dont la cinématique d'introduction n'avance pas. Rien de tout cela ne
+  bloque un jalon&nbsp;; tout est écrit avec ce qui a été établi et ce qui ne l'a pas été. Un
+  émulateur dont on ne connaît pas les défauts n'est pas un émulateur sans défauts&nbsp;: c'est un
+  émulateur dont personne n'a regardé les défauts, et le premier symptôme bizarre coûtera alors
+  plusieurs jours parce qu'il faudra tout redécouvrir.
+</p>
 <div class="card key">
-  <strong>Le résultat&nbsp;:</strong> environ 16 000 lignes de Rust, plus de 250 tests
-  automatiques, un émulateur qui fait tourner plusieurs jeux commerciaux (image, son,
-  sauvegardes, save states) et même un jeu à puce SuperFX — le tout empaqueté dans une
-  application macOS double‑cliquable avec barre de menus et sélecteur de jeu.
+  <strong>Le résultat&nbsp;:</strong> environ 50 000 lignes de Rust (cœur et application, tests
+  compris) et <strong>758 tests automatiques</strong> — 336 sur le cœur d'émulation, 422 sur
+  l'application. L'émulateur fait tourner huit jeux commerciaux avec image, son, sauvegardes et
+  save states, dont les <strong>quatre</strong> jeux à coprocesseur de cartouche&nbsp;: <em>Yoshi's
+  Island</em> (SuperFX), <em>Super Mario RPG</em> (SA‑1), <em>Super Mario Kart</em> (DSP‑1) et
+  <em>Mega Man X3</em> (CX4). Le tout empaqueté dans une application macOS double‑cliquable, avec
+  bibliothèque de jeux, interface bilingue et barre de menus native.
 </div>
 
-<!-- ================= 14. GLOSSARY ================= -->
-<h2><span class="n">14.</span>Glossaire</h2>
+<!-- ================= 17. GLOSSARY ================= -->
+<h2><span class="n">17.</span>Glossaire</h2>
 <table>
   <tr><td class="mono">Bit / Octet</td><td>Unité de base (0 ou 1) / groupe de 8 bits (0–255).</td></tr>
   <tr><td class="mono">Registre</td><td>Petite case mémoire interne à une puce&nbsp;; y écrire commande la puce.</td></tr>
@@ -733,13 +1280,20 @@ tex_y = C·(x + H) + D·(y + V) + Y0
   <tr><td class="mono">BRR</td><td>Format d'échantillon audio compressé de la SNES (blocs de 9 octets).</td></tr>
   <tr><td class="mono">Mode 7</td><td>Mode graphique à rotation et zoom d'une couche unique.</td></tr>
   <tr><td class="mono">GSU / SuperFX</td><td>Coprocesseur dans certaines cartouches, un CPU RISC qui dessine des pixels.</td></tr>
+  <tr><td class="mono">SA‑1</td><td>Coprocesseur de cartouche&nbsp;: un second 65C816 à 10,74 MHz, avec son mappeur, son unité arithmétique et sa mémoire partagée.</td></tr>
+  <tr><td class="mono">DSP‑1</td><td>Calculateur de cartouche (matrices, projection, trigonométrie) — la perspective du Mode 7 de <em>Super Mario Kart</em>.</td></tr>
+  <tr><td class="mono">CX4</td><td>Coprocesseur de cartouche de Capcom&nbsp;: vecteurs, rotation/zoom de sprites, construction de l'OAM.</td></tr>
+  <tr><td class="mono">HLE</td><td><em>High‑Level Emulation</em>&nbsp;: réimplémenter ce qu'une puce <em>répond</em>, commande par commande, quand son programme interne n'est pas accessible.</td></tr>
+  <tr><td class="mono">CRC32</td><td>Signature de 4 octets calculée sur le contenu d'un fichier&nbsp;; sert ici à identifier une ROM avec certitude plutôt que par son nom.</td></tr>
   <tr><td class="mono">Save state</td><td>Photographie complète de l'état de la machine, rechargeable à l'identique.</td></tr>
+  <tr><td class="mono">Canal agent</td><td>Mode <code>--agent</code>&nbsp;: pilotage de la console par un objet JSON par ligne — avancer, presser, regarder, lire et écrire la mémoire.</td></tr>
 </table>
 
 <footer class="end">
   Document généré pour accompagner l'émulateur SNES écrit en Rust · CPU 65C816, PPU (modes 0–7,
-  color math, HDMA, offset‑per‑tile, hires), APU (SPC700 + S‑DSP), DMA/HDMA, coprocesseur SuperFX,
-  save states · ≈ 16 000 lignes, 250+ tests. Édition détaillée v2.0.
+  color math, HDMA, offset‑per‑tile, hires), APU (SPC700 + S‑DSP), DMA/HDMA, quatre coprocesseurs
+  de cartouche (SuperFX, SA‑1, DSP‑1, CX4), save states, bibliothèque de jeux et canal de contrôle ·
+  ≈ 50 000 lignes, 758 tests. Édition détaillée v3.0.
 </footer>
 
 </body>

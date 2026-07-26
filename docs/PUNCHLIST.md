@@ -64,6 +64,23 @@ A methodology note worth keeping, because it cost a wasted round: an intermediat
 
 One thing was never established: whether that intermediate failure was old code, or the same race firing intermittently. Both readings fit the evidence, and no reproduction was ever obtained — four attempts, none of which made it fail on demand.
 
+## SA-1: la sauvegarde de cartouche n'est jamais écrite (BUG, confirmé)
+
+Trouvé en relisant la documentation, pas en jouant — et vérifiable sans lancer le jeu.
+
+`frontend/src/save.rs` ne persiste que `cart.sram`, et sort immédiatement quand ce champ est vide
+(`if cart.sram.is_empty() { return }`). Or `core/src/cartridge/mod.rs` le dit lui-même : « The SA-1
+owns the battery-backed BW-RAM; the plain `sram` field is unused for SA-1 carts. » La pile de
+sauvegarde d'un jeu SA-1 vit dans `Sa1::bwram`, que rien ne lit ni n'écrit sur disque.
+
+Conséquence : la partie d'un jeu SA-1 survit dans un save state et **disparaît d'une session à
+l'autre**. Confirmation sur disque : les cinq autres jeux du dossier ont un `.srm`, Super Mario RPG
+n'en a aucun.
+
+Correctif : faire persister `bwram` comme `sram`, en gardant la garde de taille exacte au
+chargement. Attention au nom du fichier — un `.srm` de taille différente ne doit pas être lu comme
+une SRAM ordinaire.
+
 ## Cartridge coprocessor decision (UPDATED)
 User provided a Yoshi's Island ROM = **SuperFX** (GSU-2), so the target chip pivoted from SA-1 to **SuperFX** (testable against a real ROM). SA-1 reference doc (references/sa1.md) was written and is kept for a future SA-1 pass; SA-1 core was never started. SuperFX is a from-scratch GSU CPU (new instruction set) — larger than SA-1 but now game-validatable on Yoshi's Island.
 

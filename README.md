@@ -1,8 +1,12 @@
 # Prisme
 
-A Super Nintendo (SNES / Super Famicom) emulator written from scratch in Rust — CPU, PPU, a full audio path, four cartridge coprocessors, and a library shell in French and English, with no platform SDKs beyond a pure-Rust window/input/audio stack.
+A Super Nintendo (SNES / Super Famicom) emulator written from scratch in Rust — CPU, PPU, a full audio path, four cartridge coprocessors, a library shell in French and English, and a JSON control channel that lets an outside program drive the console, with no platform SDKs beyond a pure-Rust window/input/audio stack.
 
-A plain-language walkthrough of how the whole thing works is in [`docs/emulateur-snes-explique.pdf`](docs/emulateur-snes-explique.pdf) (French).
+A plain-language walkthrough of how the whole thing works — from the 65C816 to the cartridge
+coprocessors, the timing bug that silenced Terranigma, the application around the emulator and the
+two experiments that were dropped — is in
+[`docs/emulateur-snes-explique.pdf`](docs/emulateur-snes-explique.pdf) (French, 26 pages; the
+`.html` source next to it is what generates it, via WeasyPrint).
 
 ![SMAS select menu](docs/screenshots/smas_menu.png)
 
@@ -10,7 +14,8 @@ A plain-language walkthrough of how the whole thing works is in [`docs/emulateur
 
 ## Status
 
-Playable rendering and audio for LoROM/HiROM games (NTSC and PAL), plus SuperFX cartridges.
+Version **1.4.0**. Playable rendering and audio for LoROM/HiROM games (NTSC and PAL), plus all four
+implemented cartridge coprocessors.
 
 | Area | State |
 |---|---|
@@ -18,19 +23,25 @@ Playable rendering and audio for LoROM/HiROM games (NTSC and PAL), plus SuperFX 
 | SPC700 + IPL | Complete; runs games' real sound drivers |
 | S-DSP audio | BRR, Gaussian interpolation, ADSR/GAIN, noise, pitch modulation, echo |
 | PPU | BG modes 0–7 (2/4/8bpp), sprites, windows, color math, mosaic, HDMA, offset-per-tile, hires (5/6), interlace |
-| Mode 7 | Rotation/scaling implemented + unit-tested; not yet gated on a real in-game screen |
-| Cartridge coprocessors | SuperFX (GSU), SA-1, DSP-1 (HLE), CX4 (HLE) — all boot & render their real games |
+| Mode 7 | Rotation/scaling; exercised in-game by Super Mario Kart's DSP-1 track (per-scanline matrix via HDMA) |
+| Cartridge coprocessors | SuperFX (GSU) and SA-1 as full CPU cores; DSP-1 and CX4 as HLE command sets — all four boot & render their real games |
 | DMA | GDMA + HDMA (indirect, per-line) |
 | Timing / IRQ | NMI, H/V IRQ ($4207–$420A), FastROM ($420D), open-bus (MDR) |
-| Cartridge | LoROM / HiROM / SuperFX detection, region detection, battery SRAM |
+| Cartridge | LoROM / HiROM mapping and coprocessor detection from the internal header, region detection, battery SRAM |
 | Frontend | winit + pixels window (resizable, fullscreen, window-size/filter/aspect presets), cpal audio, native macOS menu bar, ROM picker, save states, FPS overlay, headless PNG/WAV/trace dumps |
-| Shell | Game library with search, sort, favourites and per-game sheets; games addable from anywhere by button or drag-and-drop; drawn SNES pad that doubles as a controller tester; French and English interface |
+| Shell | Game library with search, sort, favourites and tabbed per-game sheets; games addable from anywhere by button or drag-and-drop; drawn SNES pad that doubles as a controller tester; French and English interface |
+| Library metadata | CRC32 fingerprint → No-Intro canonical name → catalogue facts, box art and an attributed Wikipedia summary; opt-in, cached, no account or API key ([`docs/METADATA.md`](docs/METADATA.md)) |
+| Agent channel | `--agent`: one JSON object per line on stdin/stdout — step, press, screenshot, read/write memory, save/load state, cheats |
+| Cheats | Found by memory search, not entered as codes; stored per game in `<game>.cheats.json` ([`docs/CHEATS.md`](docs/CHEATS.md)) |
+| Assistant | Optional — drives the agent channel through a locally installed `claude` CLI; absent tool disables the feature with a reason ([`docs/ASSISTANT.md`](docs/ASSISTANT.md)) |
 
-336 core unit tests pass. Verified end-to-end on eight commercial games: backgrounds, sprites,
-color-math menus, real in-game music (WAV-analysed), input-driven gameplay (Mario runs, jumps and
-scrolls a level), H/V-IRQ raster splits, battery saves, byte-identical save-state round-trips, and
-all four cartridge coprocessors booting and rendering their real games — Yoshi's Island (SuperFX),
-Super Mario RPG (SA-1), Super Mario Kart (DSP-1) and Mega Man X3 (CX4).
+**758 tests pass**: 336 in `snes-core` (`cargo test -p snes-core --lib`) and 422 in the frontend
+(`cargo test -p prisme`; 6 further tests are `#[ignore]`d). Verified end-to-end on eight commercial
+games: backgrounds, sprites, color-math menus, real in-game music (WAV-analysed), input-driven
+gameplay (Mario runs, jumps and scrolls a level), H/V-IRQ raster splits, battery saves,
+byte-identical save-state round-trips, and all four cartridge coprocessors booting and rendering
+their real games — Yoshi's Island (SuperFX), Super Mario RPG (SA-1), Super Mario Kart (DSP-1) and
+Mega Man X3 (CX4).
 
 <p>
   <img src="docs/screenshots/smrpg_sa1.png" width="47%" alt="Super Mario RPG (SA-1)">
@@ -42,15 +53,21 @@ Super Mario RPG (SA-1), Super Mario Kart (DSP-1) and Mega Man X3 (CX4).
 </p>
 
 All four coprocessors are validated in real gameplay: Yoshi's Island (SuperFX) boots and renders,
-Super Mario RPG (SA-1) plays the overworld, Mega Man X3 (CX4) reaches the title (with the CX4
+Super Mario RPG (SA-1) reaches forest-field gameplay and the beanstalk cutscene, Mega Man X3 (CX4)
+reaches the title (with the CX4
 scale/rotate logo animation) and opening-stage gameplay, and Super Mario Kart (DSP-1) renders a
 live Mode 7 race — its perspective-projection math, the highest-risk part, works on a real track.
 
 Known gaps: the Super Mario World *attract-mode intro* reaches gameplay but its cutscene state
-machine doesn't advance to the overworld (diagnosed, root cause not yet isolated); Mode 7,
-offset-per-tile, hires and interlace are implemented and unit-tested but not yet gated on a real
-in-game screen (the DSP-1 Mode 7 path is now exercised via Super Mario Kart). See
-`docs/PUNCHLIST.md` for the full list and `docs/IDEAS.md` for planned features.
+machine doesn't advance to the overworld (diagnosed, root cause not yet isolated); Secret of Mana's
+name-entry screen draws garbled characters (reported, not yet investigated); offset-per-tile, hires
+and interlace are implemented and unit-tested but not yet gated on a real in-game screen; and an
+SA-1 cartridge's battery data lives in the SA-1's own BW-RAM, which the `.srm` sidecar does not
+carry — such a save survives in a save state but not across sessions (`frontend/src/save.rs`
+persists `cart.sram` only, which SA-1 carts leave unused). See
+[`docs/PUNCHLIST.md`](docs/PUNCHLIST.md) for the full list — including the accuracy items that are
+knowingly deferred — and [`docs/IDEAS.md`](docs/IDEAS.md) / [`docs/ROADMAP.md`](docs/ROADMAP.md)
+for planned and abandoned features.
 
 ## Build & run
 
@@ -159,12 +176,15 @@ on a bare window.
   referenced — nothing is copied or moved. A game added this way whose file
   later moves stays listed as `File not found`, with the choice of relocating
   or forgetting it; forgetting never deletes the file.
-- **Game sheet.** Everything already known about one game, from the cartridge
-  header (title, region, mapping, sizes, battery SRAM, detected coprocessor),
-  the shell (play time, favourite) and the disk (save states *with a picture of
-  what each one holds*, and the player's own screenshots). Clicking a
-  screenshot promotes it as the game's thumbnail; the generated one is kept, so
-  the choice is reversible.
+- **Game sheet.** Everything already known about one game, in four tabs — what
+  the game *is* (cartridge header: title, region, mapping, sizes, battery SRAM,
+  detected coprocessor; plus the catalogue facts and description if fetched),
+  where you are (save states *with a picture of what each one holds*), what you
+  can change (an assistant request, then the cheats it found), and what you did
+  with it (your own screenshots). Clicking a screenshot promotes it as the
+  game's thumbnail; the generated one is kept, so the choice is reversible. The
+  sheet of the game *currently running* shows that session's picture in place of
+  its thumbnail.
 - **Controls.** The bindings table sits beside a **drawn SNES pad** that is not
   decoration: hovering either one highlights the other, clicking a button on
   the drawing starts rebinding it, the shape being rebound is ringed, and
@@ -180,6 +200,35 @@ the omission through to the screen instead. Keyboard key names (`Arrow Up`,
 `Right Shift`) stay English in both, like the pad's own letters: a key is named
 by what is engraved on it. Command-line help and diagnostic output are English
 only — that audience reads it, and the wording is an anchor for scripts.
+
+**Library metadata (opt-in, no account).** A game is identified by the **CRC32
+of its de-headered ROM**, not by its filename: the checksum resolves to a
+No-Intro canonical name *with certainty*, and every catalogue lookup keys off
+that same checksum. From there the sheet can carry genre, developer, publisher,
+player count, year and age rating, the official box art, and an English
+Wikipedia summary — the one step matched by *title*, and therefore visibly
+attributed and marked as English-only. Nothing is fetched at scan time or at
+startup: two explicit buttons trigger it, catalogue files are downloaded once
+and then read offline for the whole collection, and a network failure leaves the
+sheet exactly as it was. Design and the measured per-source coverage:
+[`docs/METADATA.md`](docs/METADATA.md).
+
+**Agent channel, cheats, assistant.** `--agent` runs the emulator as a
+line-oriented JSON server (one request object per line on stdin, one response
+per line on stdout): `step`, `press`, `screenshot`, `read-mem`, `write-mem`,
+`save-state`, `load-state`, `info`, and the `cheat-add` / `cheat-list` /
+`cheat-enable` / `cheat-remove` family. Observation costs no frames — only
+`step` and `press` advance the console — which is what makes the memory search
+reproducible. On top of that channel, cheats are *found* rather than entered:
+successive intersection over the 128 KB of WRAM with an arithmetic predicate,
+replayed from a save state, narrowing 131 072 candidates to a handful in three
+to five rounds, then settled by writing to each survivor and looking at the
+screen. The method, its traps and a worked end-to-end example are in
+[`docs/CHEATS.md`](docs/CHEATS.md). Results land in `<game>.cheats.json` beside
+the save, and the windowed application applies and lists them. Driving that
+search from the UI needs a `claude` CLI on the host; when it is absent the
+feature is disabled with a stated reason rather than failing on click
+([`docs/ASSISTANT.md`](docs/ASSISTANT.md)).
 
 On macOS the windowed build also installs a native menu bar (top of screen).
 Every item there also has a plain-keyboard equivalent (listed above) that
@@ -199,14 +248,13 @@ exist:
 | Emulation | Save state | Cmd+S | `F5` |
 | Emulation | Load state | Cmd+L | `F9` |
 | Emulation | Next slot | — | `F7` |
-| Display | Full screen | — | `F11` |
+| Display | Full screen | Ctrl+Cmd+F | `F11` |
 
 The menu deliberately carries **actions only**. Every *setting* — window size,
 filter, aspect, volume, mute, FPS overlay, fast-forward factor, save slot,
 instant resume, quit confirmation — lives on the settings screen, where the
 current value is visible at a glance instead of being buried behind a
 submenu's checkmark. The keyboard shortcuts above still reach all of them.
-| Affichage | Plein écran | Ctrl+Cmd+F | `F11` |
 
 Keyboard hotkeys keep working alongside the menu; the checkable items
 (mute, confirm-on-quit, show FPS, resume-on-launch, the slot,
@@ -245,12 +293,21 @@ cargo run --release -p prisme -- game.sfc --disasm                # 65C816 disas
 cargo run --release -p prisme -- game.sfc --trace t.log --trace-start-frame 0 --trace-end-frame 2      # 65C816
 cargo run --release -p prisme -- game.sfc --trace-spc s.log --trace-start-frame 0 --trace-end-frame 2  # SPC700
 cargo run --release -p prisme -- superfx.sfc --trace-gsu g.log --trace-start-frame 0 --trace-end-frame 2  # SuperFX GSU
+cargo run --release -p prisme -- sa1.sfc --trace-sa1 a.log --trace-start-frame 0 --trace-end-frame 2     # SA-1 65C816
 cargo run --release -p prisme -- game.sfc --headless --frames 300 --script inputs.txt  # scripted joypad
+cargo run --release -p prisme -- game.sfc --headless --frames 900 --save-state-at 900 out.state
+cargo run --release -p prisme -- game.sfc --load-state out.state --headless --frames 60
+cargo run --release -p prisme -- game.sfc --headless --frames 600 --watch 7E:0DBE   # every write to an address, all mirrors
 cargo run --release -p prisme -- game.sfc --save /path/to/slot1.srm  # override the default .srm sidecar
+cargo run --release -p prisme -- game.sfc --agent            # JSON control channel on stdin/stdout
+cargo run --release -p prisme -- --ui-shot settings-display@en out.png   # render a UI screen headless
 ```
 
-The 65C816 trace is Mesen2-compatible for diffing against a reference emulator; the SPC700 and
-GSU traces use the same idea for the audio CPU and the SuperFX coprocessor.
+The 65C816 trace is Mesen2-compatible for diffing against a reference emulator; the SPC700, GSU and
+SA-1 traces use the same idea for the audio CPU and the two coprocessors that are real CPU cores.
+`--ui-shot` renders any interface screen without a window — the mechanism that made the UI
+reviewable at all on a headless machine (see [`docs/UI-BRIEF.md`](docs/UI-BRIEF.md)); the `@en` /
+`@fr` suffix picks the language, since a screen validated in one language is validated by half.
 
 ### macOS app bundle
 
@@ -267,11 +324,27 @@ Launched from Finder with no arguments, the app opens the ROM picker.
 ## Layout
 
 - `core/` — `snes-core`, the pure emulation library (no I/O), fully testable headless.
-  - `cpu/`, `ppu/`, `apu/`, `bus.rs`, `scheduler.rs`, `dma.rs`, `cartridge/`, `coprocessor/` (SuperFX/GSU), `debug/`
+  - `cpu/`, `ppu/`, `apu/`, `bus.rs`, `scheduler.rs`, `dma.rs`, `cartridge/`, `debug/`
+  - `coprocessor/` — `superfx/` (GSU core), `sa1/` (second 65C816 + Super MMC, arithmetic unit, I-RAM/BW-RAM), `dsp1/` (HLE command set), `cx4/` (HLE command set)
 - `frontend/` — `prisme`, the winit/pixels/cpal binary and CLI (picker, menu bar, save states, FPS overlay, `render.rs` zoom/filter/aspect compositing).
+  - `ui/` — the egui shell: `library_view.rs`, `game_sheet.rs`, `settings.rs`, `pad_art.rs` (the drawn pad), `icons.rs`, `theme.rs`, `shot.rs` (`--ui-shot` offscreen rendering).
+  - `agent.rs` (JSON control channel), `cheats.rs`, `assistant.rs`, `metadata.rs` + `net.rs` (catalogues, box art), `i18n.rs`, `library.rs`, `thumbs.rs`, `paths.rs`.
   - `frontend/assets/fonts/` — the two typefaces embedded in the binary (`include_bytes!`, see `ui/theme.rs`): **Space Grotesk** Regular/Bold for the interface and **IBM Plex Mono** Regular for machine data (region, mapping, checksum, sizes, key bindings, paths). Both are under the SIL Open Font License 1.1, whose text ships beside them (`SpaceGrotesk-OFL.txt`, `IBMPlexMono-OFL.txt`).
 - `scripts/` — `make-app.sh` (macOS `.app` bundler); `packaging/` — app icon assets.
-- `docs/` — architecture, the pedagogical PDF, `PUNCHLIST.md` (known accuracy gaps), `IDEAS.md` (planned features).
+- `docs/` — the pedagogical walkthrough (`emulateur-snes-explique.html` / `.pdf`, French) and the
+  notes that record the decisions behind each area:
+  | Document | What it records |
+  |---|---|
+  | `ARCHITECTURE.md` | The original plan, milestones and key technical choices |
+  | `ROADMAP.md` | Phase-by-phase status, including the phases that were **abandoned after being tried** |
+  | `PUNCHLIST.md` | Known accuracy gaps, and the diagnosed bugs — the Terranigma SPC700 timing story lives here |
+  | `IDEAS.md` | The backlog the roadmap was derived from |
+  | `UI-BRIEF.md` | The interface redesign brief, and why the UI had to be made visible headless first |
+  | `I18N.md` | How the two languages are declared so a missing translation fails to compile |
+  | `METADATA.md` | The CRC32 → No-Intro → catalogue chain, with per-source coverage measured |
+  | `CHEATS.md` | The memory-search method, written for the agent that runs it |
+  | `ASSISTANT.md` | What the assistant may do, what it may not, and what was removed |
+  | `REWIND.md` | Measured sizing for a rewind buffer (design only — not implemented) |
 - `.claude/` — development tooling: subagent definitions and a condensed, source-verified SNES hardware reference (`skills/snes-refs/references/`).
 
 ## ROMs
