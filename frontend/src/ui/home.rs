@@ -269,6 +269,7 @@ fn library(ui: &mut egui::Ui, model: &mut HomeModel) -> Action {
                 textures: model.library.textures,
                 selected: &mut model.library.state.selected,
                 confirm_delete: &mut model.library.state.confirm_delete,
+                tab: &mut model.library.state.sheet_tab,
                 lang: model.lang,
             };
             return game_sheet::show(ui, &mut sheet);

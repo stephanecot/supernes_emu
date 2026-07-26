@@ -1,5 +1,8 @@
 //! The tab bar of the home screen: `Bibliothèque · Favoris · Récents ·
-//! Réglages`, underlined by the spectral rule.
+//! Réglages`, underlined by the spectral rule — and the bar itself, which the
+//! game sheet borrows for its own entries (`bar`, `Entry`). One drawing routine
+//! for both: a second strip of a different shape inside a screen of this
+//! application would read as a different application.
 //!
 //! The rule is drawn **once per frame**, under the active tab only: it is the
 //! product's signature element and its job here is to say where the player is
@@ -94,23 +97,68 @@ const TAB_H: f32 = 30.0;
 const ICON_GAP: f32 = 6.0;
 /// Gap between the label and the rule under it.
 const RULE_GAP: f32 = 5.0;
+/// Gap between a tab's label and the count after it.
+const COUNT_GAP: f32 = 7.0;
 /// Length of the hover/focus transition, in seconds — short enough to feel
 /// like a response to the pointer rather than an animation.
 pub const TRANSITION: f32 = 0.12;
 
-/// Draw the bar and return the tab the player asked for, if any. `active` is
-/// the entry the spectral rule is drawn under, which the caller resolves (the
-/// settings panel takes the underline while it is open).
+/// One entry of a bar: what it is called, an icon before the label, and a
+/// count after it.
+#[derive(Debug, Clone, Copy)]
+pub struct Entry<'a> {
+    pub label: &'a str,
+    pub icon: Option<Icon>,
+    /// How many things the entry leads to, in the machine-data face. `None`
+    /// where a count would mean nothing — an entry that opens a panel, or a
+    /// page of prose. It is what makes a tab worth clicking before it is
+    /// clicked.
+    pub count: Option<usize>,
+}
+
+impl<'a> Entry<'a> {
+    pub fn new(label: &'a str) -> Self {
+        Self { label, icon: None, count: None }
+    }
+
+    pub fn with_count(mut self, count: Option<usize>) -> Self {
+        self.count = count;
+        self
+    }
+}
+
+/// Draw the shell's bar and return the tab the player asked for, if any.
+/// `active` is the entry the spectral rule is drawn under, which the caller
+/// resolves (the settings panel takes the underline while it is open).
 pub fn show(ui: &mut egui::Ui, active: Tab, lang: Lang) -> Option<Tab> {
+    let entries: Vec<Entry> = Tab::ALL
+        .iter()
+        .map(|tab| Entry { label: tab.label(lang), icon: tab.icon(), count: None })
+        .collect();
+    let current = Tab::ALL.iter().position(|tab| *tab == active).unwrap_or(0);
+    bar(ui, &entries, current).map(|i| Tab::ALL[i])
+}
+
+/// Draw a bar of `entries` with the spectral rule under the `active` one, and
+/// return the index the player asked for.
+///
+/// The whole behaviour of the bar lives here — hover, keyboard focus, the
+/// arrow keys walking it, the rule — so that every bar of the application is
+/// the same object with different words in it.
+pub fn bar(ui: &mut egui::Ui, entries: &[Entry], active: usize) -> Option<usize> {
     let mut chosen = None;
     let mut focused = None;
-    let mut responses: Vec<Response> = Vec::with_capacity(Tab::ALL.len());
-    ui.horizontal(|ui| {
+    let mut responses: Vec<Response> = Vec::with_capacity(entries.len());
+    // Wrapped, not clipped: a bar wider than its window would put its last
+    // entry past the right edge, and a tab nobody can click is a section
+    // nobody can reach. At every width the shell actually opens at, the entries
+    // fit on one row and this behaves exactly like `horizontal`.
+    ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
-        for (i, tab) in Tab::ALL.into_iter().enumerate() {
-            let response = tab_button(ui, tab, tab == active, lang);
+        for (i, entry) in entries.iter().enumerate() {
+            let response = tab_button(ui, entry, i == active);
             if response.clicked() {
-                chosen = Some(tab);
+                chosen = Some(i);
             }
             if response.has_focus() {
                 focused = Some(i);
@@ -125,11 +173,11 @@ pub fn show(ui: &mut egui::Ui, active: Tab, lang: Lang) -> Option<Tab> {
             i32::from(input.key_pressed(Key::ArrowRight))
                 - i32::from(input.key_pressed(Key::ArrowLeft))
         });
-        if step != 0 {
-            let count = Tab::ALL.len() as i32;
-            let next = ((i as i32 + step) % count + count) % count;
-            responses[next as usize].request_focus();
-            chosen = Some(Tab::ALL[next as usize]);
+        if step != 0 && !entries.is_empty() {
+            let count = entries.len() as i32;
+            let next = (((i as i32 + step) % count + count) % count) as usize;
+            responses[next].request_focus();
+            chosen = Some(next);
         }
     }
     chosen
@@ -140,12 +188,22 @@ pub fn height() -> f32 {
     TAB_H + RULE_GAP + theme::SPECTRAL_RULE_H
 }
 
-fn tab_button(ui: &mut egui::Ui, tab: Tab, active: bool, lang: Lang) -> Response {
+fn tab_button(ui: &mut egui::Ui, tab: &Entry, active: bool) -> Response {
     let font = if active { theme::strong(theme::SIZE_BODY) } else { theme::font(theme::SIZE_BODY) };
     let galley =
-        ui.painter().layout_no_wrap(tab.label(lang).to_owned(), font, egui::Color32::PLACEHOLDER);
-    let icon_w = tab.icon().map_or(0.0, |_| icons::SIZE + ICON_GAP);
-    let size = Vec2::new(galley.size().x + icon_w + 2.0 * PAD_X, height());
+        ui.painter().layout_no_wrap(tab.label.to_owned(), font, egui::Color32::PLACEHOLDER);
+    // Laid out, never measured from a string: `Sauvegardes` and `Save states`
+    // are not the same length, and neither are `4` and `12`.
+    let count = tab.count.map(|n| {
+        ui.painter().layout_no_wrap(
+            n.to_string(),
+            theme::mono(theme::SIZE_SMALL),
+            egui::Color32::PLACEHOLDER,
+        )
+    });
+    let count_w = count.as_ref().map_or(0.0, |g| COUNT_GAP + g.size().x);
+    let icon_w = tab.icon.map_or(0.0, |_| icons::SIZE + ICON_GAP);
+    let size = Vec2::new(galley.size().x + icon_w + count_w + 2.0 * PAD_X, height());
     let (rect, response) = ui.allocate_at_least(size, Sense::CLICK | Sense::FOCUSABLE);
     if !ui.is_rect_visible(rect) {
         return response;
@@ -163,8 +221,8 @@ fn tab_button(ui: &mut egui::Ui, tab: Tab, active: bool, lang: Lang) -> Response
         // it: the only feedback a tab needs.
         theme::TEXT_DIM.lerp_to_gamma(theme::TEXT, lit)
     };
-    let text_left = rect.center().x - (galley.size().x + icon_w) / 2.0 + icon_w;
-    if let Some(icon) = tab.icon() {
+    let text_left = rect.center().x - (galley.size().x + icon_w + count_w) / 2.0 + icon_w;
+    if let Some(icon) = tab.icon {
         let icon_rect = Rect::from_min_size(
             egui::pos2(text_left - icon_w, rect.top() + (TAB_H - icons::SIZE) / 2.0),
             Vec2::splat(icons::SIZE),
@@ -172,7 +230,17 @@ fn tab_button(ui: &mut egui::Ui, tab: Tab, active: bool, lang: Lang) -> Response
         icon.draw(ui.painter(), icon_rect, colour);
     }
     let text_pos = egui::pos2(text_left, rect.top() + (TAB_H - galley.size().y) / 2.0);
+    let label_w = galley.size().x;
     ui.painter().galley(text_pos, galley, colour);
+    if let Some(count) = count {
+        // Dim in every state, active included: the count answers a question
+        // the label has already asked, and must never outweigh it.
+        let pos = egui::pos2(
+            text_left + label_w + COUNT_GAP,
+            rect.top() + (TAB_H - count.size().y) / 2.0,
+        );
+        ui.painter().galley(pos, count, theme::TEXT_DIM);
+    }
 
     if active {
         let rule = Rect::from_min_size(
@@ -286,6 +354,62 @@ mod tests {
             assert_eq!(segments.len(), theme::ACCENTS.len(), "{active:?}: {segments:?}");
             assert_eq!(segments, theme::ACCENTS.to_vec(), "{active:?}");
         }
+    }
+
+    /// The bar the game sheet borrows: it paints the labels, it paints the
+    /// counts beside them, and a counted entry claims the room for its count
+    /// instead of printing it over its neighbour.
+    #[test]
+    fn a_borrowed_bar_paints_its_labels_and_the_counts_beside_them() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let entries = [
+            Entry::new("Sauvegardes d'état").with_count(Some(4)),
+            Entry::new("Captures d'écran").with_count(None),
+        ];
+        let mut widths = Vec::new();
+        let mut text = String::new();
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 200.0))),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    assert_eq!(bar(ui, &entries, 0), None, "drawing alone must not switch tab");
+                    // The same two entries again, uncounted, to compare against.
+                    let plain = [Entry::new("Sauvegardes d'état"), Entry::new("Captures d'écran")];
+                    ui.horizontal(|ui| {
+                        for (i, pair) in [(&entries[0], &plain[0]), (&entries[1], &plain[1])]
+                            .into_iter()
+                            .enumerate()
+                        {
+                            let counted = tab_button(ui, pair.0, i == 0);
+                            let bare = tab_button(ui, pair.1, i == 0);
+                            widths.push((counted.rect.width(), bare.rect.width()));
+                        }
+                    });
+                });
+            },
+        );
+        fn walk(shape: &egui::Shape, out: &mut String) {
+            match shape {
+                egui::Shape::Text(t) => {
+                    out.push_str(t.galley.text());
+                    out.push('\n');
+                }
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut text);
+        }
+        for label in ["Sauvegardes d'état", "Captures d'écran", "4"] {
+            assert!(text.contains(label), "{label:?} was not painted: {text}");
+        }
+        assert!(widths[0].0 > widths[0].1, "the count claimed no room: {:?}", widths[0]);
+        assert_eq!(widths[1].0, widths[1].1, "an uncounted entry must claim none");
     }
 
     #[test]

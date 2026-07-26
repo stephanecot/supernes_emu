@@ -38,6 +38,7 @@ use crate::i18n::{self, Lang, Msg};
 use crate::library::{self, GameEntry, SortMode};
 use crate::prefs::GameStats;
 
+use super::game_sheet;
 use super::icons::{self, Icon};
 use super::tabs::{Tab, TRANSITION};
 use super::textures::TextureStore;
@@ -83,6 +84,10 @@ pub struct LibraryUi {
     pub tab: Tab,
     /// `game_id` of the open game sheet; `None` shows the grid.
     pub selected: Option<String>,
+    /// Tab the open sheet shows. Kept for the length of a sheet and no longer:
+    /// opening another game starts on the first tab again, rather than on
+    /// `Triches` because that is where the last sheet was left three games ago.
+    pub sheet_tab: game_sheet::SheetTab,
     /// Save state the sheet is waiting for a confirmation to delete. Armed by
     /// the first click on `Supprimer`, cleared by anything else — deleting a
     /// slot is irreversible, so it never happens on a single click.
@@ -340,6 +345,10 @@ pub fn show(ui: &mut egui::Ui, model: &mut LibraryModel) -> Action {
                         action = Action::Launch { path: entry.path.clone(), resume: true };
                     } else if hit.open {
                         model.state.selected = Some(entry.id.clone());
+                        // A sheet always opens on the tab that says what the
+                        // game is; the previous sheet's tab belonged to the
+                        // previous game.
+                        model.state.sheet_tab = game_sheet::SheetTab::default();
                     }
                 }
             }
@@ -956,8 +965,60 @@ mod tests {
         assert_eq!(state.tab, Tab::Library);
         assert_eq!(state.selected, None);
         assert_eq!(state.confirm_delete, None);
+        assert_eq!(state.sheet_tab, game_sheet::SheetTab::About);
         assert!(!state.scanning);
         assert_eq!(state.error, None);
+    }
+
+    /// A sheet opens on what the game is, whatever tab the last one was left
+    /// on: reopening on `Triches` because that is where the player was three
+    /// games ago is the state the tab is deliberately *not* remembered in.
+    #[test]
+    fn opening_a_sheet_starts_on_the_tab_that_says_what_the_game_is() {
+        let e = entry();
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let mut textures = TextureStore::new();
+        // Left on the last game's tab, as the shell would have it.
+        let mut state = LibraryUi { sheet_tab: game_sheet::SheetTab::Cheats, ..Default::default() };
+        let card_id = egui::Id::new(("prisme-card", &e.id));
+        for pass in 0..4 {
+            // Opened from the keyboard, which is `hit.open` with neither the
+            // star nor `Jouer` under a pointer to compete with it.
+            let events = if pass == 3 {
+                vec![egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Default::default(),
+                }]
+            } else {
+                Vec::new()
+            };
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1024.0, 896.0),
+                )),
+                time: Some(pass as f64 * 0.5),
+                events,
+                ..Default::default()
+            };
+            ctx.memory_mut(|memory| memory.request_focus(card_id));
+            model_frame(
+                &ctx,
+                input,
+                std::slice::from_ref(&e),
+                &BTreeMap::new(),
+                &HashMap::new(),
+                &mut state,
+                &mut textures,
+                Lang::Fr,
+            );
+        }
+        assert_eq!(state.selected.as_deref(), Some("GAME-0001"), "the card never opened");
+        assert_eq!(state.sheet_tab, game_sheet::SheetTab::About);
     }
 
     /// The defect the brief opens with: a row must never be wider than the

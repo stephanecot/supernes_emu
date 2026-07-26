@@ -8,6 +8,16 @@
 //! right, machine values in the monospace face — the distinction that says at a
 //! glance which strings the cartridge wrote and which ones the application did.
 //!
+//! The right column is **tabbed** (`SheetTab`). The sheet had grown into one
+//! long scroll — facts, catalogue, description, assistant, states, cheats,
+//! captures stacked head to tail — where reaching the captures meant scrolling
+//! past everything else and nothing said they were there. The four tabs answer
+//! four different questions (what this game *is*, where you are in it, what you
+//! can change about it, what you made of it), the bar is the shell's own
+//! (`ui::tabs::bar`, spectral rule included), and the identity of the sheet —
+//! picture, actions, title — sits outside them so that changing tab never looks
+//! like loading another screen.
+//!
 //! Everything above the `Catalogue` heading comes from the machine itself:
 //! `library::GameEntry` (cartridge header), `prefs.games` (play time /
 //! favourite / promoted thumbnail) and the file system (states, their
@@ -123,6 +133,54 @@ impl SheetData {
     }
 }
 
+/// The four tabs of the sheet, in display order.
+///
+/// None of them ever disappears, however empty it is: a bar whose entries come
+/// and go cannot be learnt, and "there is no save state yet" is a sentence
+/// worth reading — it says which key writes one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SheetTab {
+    /// What the game *is*: the cartridge's own facts, what a catalogue claims
+    /// about it, and the description. First, because someone opening a sheet
+    /// wants to know what the game is before what they saved in it.
+    #[default]
+    About,
+    /// Where the player is in it.
+    States,
+    /// What they can change about it: the assistant, and the cheats it found.
+    Cheats,
+    /// What they made of it.
+    Shots,
+}
+
+impl SheetTab {
+    pub const ALL: [SheetTab; 4] =
+        [SheetTab::About, SheetTab::States, SheetTab::Cheats, SheetTab::Shots];
+
+    pub fn label(self, lang: Lang) -> &'static str {
+        match self {
+            SheetTab::About => Msg::SheetTabAbout.text(lang),
+            SheetTab::States => Msg::SaveStates.text(lang),
+            SheetTab::Cheats => Msg::Cheats.text(lang),
+            SheetTab::Shots => Msg::Screenshots.text(lang),
+        }
+    }
+
+    /// How many things the tab leads to — what makes it worth clicking before
+    /// it is clicked. `None` where a number would say nothing: the descriptive
+    /// tab is prose, and an empty tab shows no `0` because the sentence waiting
+    /// inside it says more than a zero could.
+    pub fn count(self, data: &SheetData) -> Option<usize> {
+        let held = match self {
+            SheetTab::About => return None,
+            SheetTab::States => data.states.len(),
+            SheetTab::Cheats => data.cheats.len(),
+            SheetTab::Shots => data.screenshots.len(),
+        };
+        (held > 0).then_some(held)
+    }
+}
+
 /// Everything the sheet draws, borrowed for one UI frame.
 pub struct SheetModel<'a> {
     pub entry: &'a GameEntry,
@@ -144,6 +202,10 @@ pub struct SheetModel<'a> {
     pub selected: &'a mut Option<String>,
     /// Save state whose deletion is armed and waiting for a confirmation.
     pub confirm_delete: &'a mut Option<PathBuf>,
+    /// Tab the sheet is open on. Lives in the shell, so it survives the frame;
+    /// it is reset when a sheet is opened on another game, which is why it is
+    /// not remembered per game (see `library_view::LibraryUi`).
+    pub tab: &'a mut SheetTab,
     /// The frame this game's suspended session stopped on, when it *is* the
     /// running one. Shown in place of the thumbnail: someone opening the sheet
     /// of the game they are playing wants to see where they are, not a picture
@@ -314,99 +376,186 @@ pub fn show(ui: &mut egui::Ui, model: &mut SheetModel) -> Action {
                             .font(theme::mono(theme::SIZE_SMALL))
                             .color(theme::TEXT_DIM),
                     );
-                    ui.add_space(10.0);
                     if let Some(chip) = &entry.coprocessor {
+                        ui.add_space(8.0);
                         icons::chip_badge(ui, chip);
-                        ui.add_space(6.0);
                     }
-                    let facts = facts(lang, entry, model.stats);
-                    let label_w = fact_label_w(ui, &facts);
-                    for (label, value) in &facts {
-                        fact_row(ui, label, value, label_w);
+                    ui.add_space(12.0);
+                    // The bar sits beside the picture rather than under the
+                    // whole identity block: the left column is 350 points tall
+                    // and a bar below it would leave a tab's content two
+                    // hundred points of window at 800.
+                    tab_bar(ui, model);
+                    ui.add_space(10.0);
+                    if let Some(produced) = match *model.tab {
+                        SheetTab::About => about_tab(ui, model),
+                        SheetTab::States => states_tab(ui, model),
+                        SheetTab::Cheats => cheats_tab(ui, model),
+                        SheetTab::Shots => shots_tab(ui, model),
+                    } {
+                        action = produced;
                     }
                 });
             });
+        });
+    });
 
-            ui.add_space(20.0);
-            super::home::heading(ui, Msg::Catalog.text(lang));
-            ui.add_space(8.0);
-            if let Some(produced) = catalog_section(ui, model.meta, lang) {
-                action = produced;
-            }
+    action
+}
 
-            ui.add_space(20.0);
-            // Its own place, and deliberately not next to `Triches`: playing a
-            // passage for someone is not cheating, and filing the two together
-            // said it was.
-            if let Some(produced) = ask_section(ui, model) {
-                action = produced;
-            }
+/// The sheet's own bar, drawn by the shell's widget so that it carries the
+/// same spectral rule, the same hover and the same keyboard behaviour: a
+/// second strip of a different shape would read as a second application.
+fn tab_bar(ui: &mut egui::Ui, model: &mut SheetModel) {
+    let entries: Vec<super::tabs::Entry> = SheetTab::ALL
+        .iter()
+        .map(|tab| {
+            super::tabs::Entry::new(tab.label(model.lang)).with_count(tab.count(model.data))
+        })
+        .collect();
+    let current = SheetTab::ALL.iter().position(|tab| *tab == *model.tab).unwrap_or(0);
+    if let Some(chosen) = super::tabs::bar(ui, &entries, current) {
+        *model.tab = SheetTab::ALL[chosen];
+        // Leaving the list also disarms whatever deletion was armed on it: a
+        // confirmation the player cannot see must not be waiting for them.
+        *model.confirm_delete = None;
+    }
+}
 
-            ui.add_space(20.0);
-            super::home::heading(ui, Msg::SaveStates.text(lang));
-            ui.add_space(8.0);
-            if model.data.states.is_empty() {
-                note(ui, Msg::NoSaveStates.text(lang));
-            } else {
-                for state in &model.data.states {
-                    if let Some(produced) =
-                        slot_row(ui, state, model.confirm_delete, model.textures, lang)
-                    {
-                        action = produced;
-                    }
-                    ui.add_space(6.0);
-                }
-            }
+/// What the game is: the cartridge's own facts, then the catalogue's claim and
+/// the description.
+fn about_tab(ui: &mut egui::Ui, model: &mut SheetModel) -> Option<Action> {
+    let lang = model.lang;
+    let cartridge = facts(lang, model.entry, model.stats);
+    let catalogue = model
+        .meta
+        .filter(|meta| meta.matched())
+        .map(|meta| crate::metadata::facts(lang, meta));
 
-            ui.add_space(14.0);
-            super::home::heading(ui, Msg::Cheats.text(lang));
-            ui.add_space(8.0);
-            if model.data.cheats.is_empty() {
-                note(ui, Msg::NoCheats.text(lang));
-            } else {
-                note(ui, Msg::CheatsHint.text(lang));
-                ui.add_space(6.0);
-                for cheat in &model.data.cheats {
-                    if let Some(produced) = cheat_row(ui, &entry.id, cheat, lang) {
-                        action = produced;
-                    }
-                    ui.add_space(6.0);
-                }
-            }
+    // Side by side wherever the two fit: what the cartridge says and what a
+    // catalogue claims about the same game are read against each other, and
+    // stacking them made this tab a scroll of its own. Measured on the lists
+    // actually rendered — the labels are not the same length in the two
+    // languages, and the values are not the same length in any.
+    let room = ui.available_width();
+    let side_by_side = catalogue.as_ref().is_some_and(|catalogue| {
+        !catalogue.is_empty()
+            && facts_w(ui, &cartridge) + COLUMN_GAP + facts_w(ui, catalogue) <= room
+    });
+    if side_by_side {
+        ui.columns(2, |columns| {
+            fact_block(&mut columns[0], Msg::Cartridge.text(lang), &cartridge);
+            catalog_block(&mut columns[1], model.meta, lang);
+        });
+    } else {
+        fact_block(ui, Msg::Cartridge.text(lang), &cartridge);
+        ui.add_space(18.0);
+        catalog_block(ui, model.meta, lang);
+    }
+    ui.add_space(18.0);
+    description_block(ui, model.meta, lang)
+}
 
-            ui.add_space(14.0);
-            super::home::heading(ui, Msg::Screenshots.text(lang));
-            ui.add_space(8.0);
-            if model.data.screenshots.is_empty() {
-                note(ui, Msg::NoScreenshots.text(lang));
-            } else {
-                note(ui, Msg::PromoteHint.text(lang));
-                ui.add_space(6.0);
-                // Laid out by hand rather than with `horizontal_wrapped`: the row
-                // is what decides where a capture goes, and a cell wider than the
-                // space left must start the next row instead of being clipped at
-                // the right edge.
-                let cell = SHOT_W + 2.0 * (SHOT_MARGIN + 1.0);
-                let spacing = ui.spacing().item_spacing.x;
-                let columns =
-                    (((ui.available_width() + spacing) / (cell + spacing)).floor() as usize).max(1);
-                for row in model.data.screenshots.chunks(columns) {
-                    ui.horizontal(|ui| {
-                        for shot in row {
-                            let promoted = model.stats.thumbnail.as_deref() == Some(shot.as_path());
-                            if capture(ui, shot, promoted, model.textures, lang).clicked() {
-                                action = Action::SetThumbnail {
-                                    id: entry.id.clone(),
-                                    source: shot.clone(),
-                                };
-                            }
-                        }
+/// A heading and the fact list under it.
+fn fact_block(ui: &mut egui::Ui, heading: &str, facts: &[(String, String)]) {
+    super::home::heading(ui, heading);
+    ui.add_space(8.0);
+    let label_w = fact_label_w(ui, facts);
+    for (label, value) in facts {
+        fact_row(ui, label, value, label_w);
+    }
+}
+
+/// Width a fact list needs to be drawn without wrapping: its measured label
+/// column plus its widest value.
+fn facts_w(ui: &egui::Ui, facts: &[(String, String)]) -> f32 {
+    let font = theme::mono(theme::SIZE_MONO);
+    let widest = facts
+        .iter()
+        .map(|(_, value)| {
+            ui.painter().layout_no_wrap(value.clone(), font.clone(), theme::TEXT).size().x
+        })
+        .fold(0.0_f32, f32::max);
+    fact_label_w(ui, facts) + widest
+}
+
+/// Where the player is in the game.
+fn states_tab(ui: &mut egui::Ui, model: &mut SheetModel) -> Option<Action> {
+    let lang = model.lang;
+    // Copied out of the model, not borrowed from it: the rows want the texture
+    // store and the armed deletion at the same time, and both live in there.
+    let data = model.data;
+    if data.states.is_empty() {
+        note(ui, Msg::NoSaveStates.text(lang));
+        return None;
+    }
+    let mut action = None;
+    for state in &data.states {
+        if let Some(produced) = slot_row(ui, state, model.confirm_delete, model.textures, lang) {
+            action = Some(produced);
+        }
+        ui.add_space(6.0);
+    }
+    action
+}
+
+/// What the player can change about the game.
+///
+/// The request comes first and the list second, because the request is what
+/// produces the list — and each keeps its own heading, so nothing here says
+/// that asking for a passage to be played is cheating.
+fn cheats_tab(ui: &mut egui::Ui, model: &mut SheetModel) -> Option<Action> {
+    let lang = model.lang;
+    let (data, entry) = (model.data, model.entry);
+    let mut action = ask_section(ui, model);
+    ui.add_space(18.0);
+    super::home::heading(ui, Msg::Cheats.text(lang));
+    ui.add_space(8.0);
+    if data.cheats.is_empty() {
+        note(ui, Msg::NoCheats.text(lang));
+        return action;
+    }
+    note(ui, Msg::CheatsHint.text(lang));
+    ui.add_space(6.0);
+    for cheat in &data.cheats {
+        if let Some(produced) = cheat_row(ui, &entry.id, cheat, lang) {
+            action = Some(produced);
+        }
+        ui.add_space(6.0);
+    }
+    action
+}
+
+/// What the player made of the game.
+fn shots_tab(ui: &mut egui::Ui, model: &mut SheetModel) -> Option<Action> {
+    let lang = model.lang;
+    let (data, entry, stats) = (model.data, model.entry, model.stats);
+    if data.screenshots.is_empty() {
+        note(ui, Msg::NoScreenshots.text(lang));
+        return None;
+    }
+    let mut action = None;
+    note(ui, Msg::PromoteHint.text(lang));
+    ui.add_space(8.0);
+    // Laid out by hand rather than with `horizontal_wrapped`: the row is what
+    // decides where a capture goes, and a cell wider than the space left must
+    // start the next row instead of being clipped at the right edge.
+    let cell = SHOT_W + 2.0 * (SHOT_MARGIN + 1.0);
+    let spacing = ui.spacing().item_spacing.x;
+    let columns = (((ui.available_width() + spacing) / (cell + spacing)).floor() as usize).max(1);
+    for row in data.screenshots.chunks(columns) {
+        ui.horizontal(|ui| {
+            for shot in row {
+                let promoted = stats.thumbnail.as_deref() == Some(shot.as_path());
+                if capture(ui, shot, promoted, model.textures, lang).clicked() {
+                    action = Some(Action::SetThumbnail {
+                        id: entry.id.clone(),
+                        source: shot.clone(),
                     });
                 }
             }
         });
-    });
-
+    }
     action
 }
 
@@ -430,19 +579,21 @@ fn note(ui: &mut egui::Ui, text: &str) {
     ui.label(RichText::new(text).font(theme::font(theme::SIZE_BODY)).color(theme::TEXT_DIM));
 }
 
-/// What a catalogue says about this game: how it was identified, the facts
-/// that came back, and the description — each with its provenance attached.
+/// What a catalogue says about this game: how it was identified and the facts
+/// that came back, provenance attached.
 ///
 /// Three states, all of them deliberate: nothing has been fetched yet, the
 /// fingerprint matched nothing, or there is a sheet. None of them is a hole.
-fn catalog_section(ui: &mut egui::Ui, meta: Option<&GameMeta>, lang: Lang) -> Option<Action> {
+fn catalog_block(ui: &mut egui::Ui, meta: Option<&GameMeta>, lang: Lang) {
+    super::home::heading(ui, Msg::Catalog.text(lang));
+    ui.add_space(8.0);
     let Some(meta) = meta else {
         note(ui, Msg::NoCatalogEntry.text(lang));
-        return None;
+        return;
     };
     if !meta.matched() {
         note(ui, Msg::NotInNoIntro.text(lang));
-        return None;
+        return;
     }
     // The canonical name first, in the machine-data face: it is the answer the
     // fingerprint gave, and the one line that shows at a glance whether the
@@ -471,8 +622,13 @@ fn catalog_section(ui: &mut egui::Ui, meta: Option<&GameMeta>, lang: Lang) -> Op
                 .color(theme::TEXT_DIM),
         );
     }
+}
 
-    ui.add_space(14.0);
+/// The paragraph a catalogue matched **by title**, credited and linked. Its own
+/// block, under both fact columns: prose has a reading width that a half column
+/// does not give it.
+fn description_block(ui: &mut egui::Ui, meta: Option<&GameMeta>, lang: Lang) -> Option<Action> {
+    let meta = meta.filter(|meta| meta.matched())?;
     super::home::heading(ui, Msg::Description.text(lang));
     ui.add_space(8.0);
     let Some(description) = &meta.description else {
@@ -1103,16 +1259,18 @@ mod tests {
     /// One headless frame of the sheet, returning what it asked for and every
     /// string it painted.
     fn draw(
+        tab: SheetTab,
         data: &SheetData,
         stats: &GameStats,
         confirm: &mut Option<PathBuf>,
         lang: Lang,
     ) -> (Action, String) {
-        draw_with(data, stats, confirm, None, lang)
+        draw_with(tab, data, stats, confirm, None, lang)
     }
 
     /// The same, with a catalogue sheet in place.
     fn draw_with(
+        tab: SheetTab,
         data: &SheetData,
         stats: &GameStats,
         confirm: &mut Option<PathBuf>,
@@ -1132,11 +1290,13 @@ mod tests {
             ..Default::default()
         };
         let mut produced = Action::Quit;
+        let mut tab = tab;
         let output = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 produced = show(
                     ui,
                     &mut SheetModel {
+                tab: &mut tab,
                 session_frame: None,
                 assistant: true,
                 is_running: true,
@@ -1188,7 +1348,7 @@ mod tests {
             cheats: Vec::new(),
         };
         let mut confirm = None;
-        let (produced, text) = draw(&data, &GameStats::default(), &mut confirm, Lang::Fr);
+        let (produced, text) = draw(SheetTab::States, &data, &GameStats::default(), &mut confirm, Lang::Fr);
         assert_eq!(produced, Action::None, "drawing alone must delete nothing");
         assert!(text.contains("Reprise"), "{text}");
         assert!(text.contains("Slot 3"), "{text}");
@@ -1209,14 +1369,14 @@ mod tests {
             cheats: Vec::new(),
         };
         let mut confirm = None;
-        let (_, text) = draw(&data, &GameStats::default(), &mut confirm, Lang::Fr);
+        let (_, text) = draw(SheetTab::States, &data, &GameStats::default(), &mut confirm, Lang::Fr);
         assert!(text.contains("Supprimer…"), "{text}");
         assert!(!text.contains("Supprimer définitivement"), "{text}");
 
         // Armed (what the first click does): the row now offers the real
         // deletion and a way out of it.
         let mut confirm = Some(PathBuf::from("/roms/game.state3"));
-        let (_, text) = draw(&data, &GameStats::default(), &mut confirm, Lang::Fr);
+        let (_, text) = draw(SheetTab::States, &data, &GameStats::default(), &mut confirm, Lang::Fr);
         assert!(text.contains("Supprimer définitivement"), "{text}");
         assert!(text.contains("Annuler"), "{text}");
     }
@@ -1234,7 +1394,7 @@ mod tests {
             ..Default::default()
         };
         let mut confirm = None;
-        let (produced, text) = draw(&data, &GameStats::default(), &mut confirm, Lang::Fr);
+        let (produced, text) = draw(SheetTab::Cheats, &data, &GameStats::default(), &mut confirm, Lang::Fr);
         assert_eq!(produced, Action::None, "drawing alone must change nothing");
         assert!(text.contains("Triches"), "{text}");
         assert!(text.contains("Vies infinies"), "{text}");
@@ -1246,7 +1406,7 @@ mod tests {
         assert!(text.contains("une fois"), "{text}");
         assert!(text.contains("Retirer"), "{text}");
 
-        let (_, text) = draw(&data, &GameStats::default(), &mut confirm, Lang::En);
+        let (_, text) = draw(SheetTab::Cheats, &data, &GameStats::default(), &mut confirm, Lang::En);
         assert!(text.contains("Cheats"), "{text}");
         assert!(text.contains("frozen"), "{text}");
         assert!(text.contains("once"), "{text}");
@@ -1282,7 +1442,7 @@ mod tests {
         let meta = filled_meta();
         let mut confirm = None;
         let (produced, text) =
-            draw_with(&SheetData::default(), &GameStats::default(), &mut confirm, Some(&meta), Lang::Fr);
+            draw_with(SheetTab::About, &SheetData::default(), &GameStats::default(), &mut confirm, Some(&meta), Lang::Fr);
         assert_eq!(produced, Action::None, "drawing alone must fetch nothing");
         // The canonical name the fingerprint resolved to is on screen: it is
         // what makes a wrong match visible at a glance.
@@ -1303,7 +1463,7 @@ mod tests {
         assert!(text.contains("Actualiser la fiche"), "{text}");
 
         let (_, text) =
-            draw_with(&SheetData::default(), &GameStats::default(), &mut confirm, Some(&meta), Lang::En);
+            draw_with(SheetTab::About, &SheetData::default(), &GameStats::default(), &mut confirm, Some(&meta), Lang::En);
         assert!(text.contains("Wikipedia"), "{text}");
         assert!(text.contains("1993-01"), "{text}");
         assert!(text.contains("Refresh the sheet"), "{text}");
@@ -1316,6 +1476,7 @@ mod tests {
         let unmatched = GameMeta { crc32: 0xDEAD_BEEF, ..Default::default() };
         let mut confirm = None;
         let (_, text) = draw_with(
+            SheetTab::About,
             &SheetData::default(),
             &GameStats::default(),
             &mut confirm,
@@ -1335,25 +1496,102 @@ mod tests {
     fn an_unfetched_sheet_offers_the_button_and_nothing_else() {
         let mut confirm = None;
         let (produced, text) =
-            draw_with(&SheetData::default(), &GameStats::default(), &mut confirm, None, Lang::Fr);
+            draw_with(SheetTab::About, &SheetData::default(), &GameStats::default(), &mut confirm, None, Lang::Fr);
         assert_eq!(produced, Action::None);
         assert!(text.contains("Catalogue"), "{text}");
         assert!(text.contains("Compléter la fiche…"), "{text}");
         assert!(!text.contains("Actualiser la fiche"), "{text}");
         let (_, text) =
-            draw_with(&SheetData::default(), &GameStats::default(), &mut confirm, None, Lang::En);
+            draw_with(SheetTab::About, &SheetData::default(), &GameStats::default(), &mut confirm, None, Lang::En);
         assert!(text.contains("Fill in the sheet…"), "{text}");
     }
 
-    /// An empty section is never a void: it says what would fill it.
+    /// An empty tab is never a void and never absent: the bar keeps all four
+    /// entries, and the one that is empty says what would fill it.
     #[test]
-    fn the_empty_sections_say_what_fills_them() {
+    fn an_empty_tab_stays_in_the_bar_and_says_what_fills_it() {
+        let empty = SheetData::default();
         let mut confirm = None;
-        let (_, text) = draw(&SheetData::default(), &GameStats::default(), &mut confirm, Lang::Fr);
-        assert!(text.contains("Aucune sauvegarde d'état"), "{text}");
-        assert!(text.contains("F5"), "{text}");
-        assert!(text.contains("Aucune capture"), "{text}");
-        assert!(text.contains("F12"), "{text}");
-        assert!(text.contains("Aucune triche"), "{text}");
+        let expected = [
+            (SheetTab::States, "Aucune sauvegarde d'état", "F5"),
+            (SheetTab::Shots, "Aucune capture", "F12"),
+            (SheetTab::Cheats, "Aucune triche", "assistant"),
+        ];
+        for (tab, sentence, hint) in expected {
+            let (_, text) = draw(tab, &empty, &GameStats::default(), &mut confirm, Lang::Fr);
+            assert!(text.contains(sentence), "{tab:?}: {text}");
+            assert!(text.contains(hint), "{tab:?}: {text}");
+            // …and every other tab is still one click away from it.
+            for other in SheetTab::ALL {
+                assert!(text.contains(other.label(Lang::Fr)), "{other:?} left the bar: {text}");
+            }
+        }
+    }
+
+    /// The bar the sheet draws is the shell's own, so its four entries have to
+    /// be reachable, distinct, and counted where a count means something.
+    #[test]
+    fn every_tab_of_the_sheet_is_reachable_and_named_in_both_languages() {
+        assert_eq!(SheetTab::default(), SheetTab::About, "a sheet opens on what the game is");
+        for lang in Lang::ALL {
+            let labels: Vec<&str> = SheetTab::ALL.iter().map(|t| t.label(lang)).collect();
+            let mut unique = labels.clone();
+            unique.sort_unstable();
+            unique.dedup();
+            assert_eq!(unique.len(), labels.len(), "two tabs read alike in {lang}: {labels:?}");
+            assert!(labels.iter().all(|l| !l.trim().is_empty()));
+
+            // Each tab actually draws its own content, and the bar under it.
+            let mut confirm = None;
+            for tab in SheetTab::ALL {
+                let (produced, text) =
+                    draw(tab, &populated(), &GameStats::default(), &mut confirm, lang);
+                assert_eq!(produced, Action::None, "{tab:?}: drawing alone must ask nothing");
+                for entry in SheetTab::ALL {
+                    assert!(text.contains(entry.label(lang)), "{tab:?}: {entry:?} missing");
+                }
+                let own = match tab {
+                    SheetTab::About => Msg::Catalog.text(lang),
+                    SheetTab::States => "Slot 3",
+                    SheetTab::Cheats => Msg::AskHeading.text(lang),
+                    SheetTab::Shots => Msg::PromoteHint.text(lang),
+                };
+                assert!(text.contains(own), "{tab:?} drew none of its own content: {text}");
+            }
+        }
+    }
+
+    /// The count is what makes a tab worth clicking before it is clicked — and
+    /// a tab holding nothing shows no `0`: the sentence inside it says more.
+    #[test]
+    fn a_tab_counts_what_it_holds_and_an_empty_one_counts_nothing() {
+        let data = populated();
+        assert_eq!(SheetTab::About.count(&data), None, "prose is not counted");
+        assert_eq!(SheetTab::States.count(&data), Some(2));
+        assert_eq!(SheetTab::Cheats.count(&data), Some(1));
+        assert_eq!(SheetTab::Shots.count(&data), Some(3));
+        for tab in SheetTab::ALL {
+            assert_eq!(tab.count(&SheetData::default()), None, "{tab:?} counts an empty sheet");
+        }
+        // The numbers reach the bar: a count kept in the model and never drawn
+        // would pass every assertion above.
+        let mut confirm = None;
+        let (_, text) = draw(SheetTab::About, &data, &GameStats::default(), &mut confirm, Lang::Fr);
+        for n in ["2", "1", "3"] {
+            assert!(text.contains(n), "the bar shows no count: {text}");
+        }
+    }
+
+    /// Two states, one cheat, three captures — counts that cannot be confused
+    /// with one another.
+    fn populated() -> SheetData {
+        SheetData {
+            id: "GAME-1234".to_string(),
+            states: vec![state_file(None, None), state_file(Some(3), None)],
+            screenshots: (0..3).map(|i| PathBuf::from(format!("/roms/shot{i}.png"))).collect(),
+            cheats: vec![
+                Cheat::new("Vies infinies".into(), "7E:0DBE", "63", Kind::Freeze, true).unwrap(),
+            ],
+        }
     }
 }

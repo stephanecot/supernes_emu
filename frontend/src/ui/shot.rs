@@ -31,7 +31,7 @@ use crate::i18n::Lang;
 use crate::library::{GameEntry, StateFile};
 use crate::prefs::{GameStats, Prefs};
 
-use super::game_sheet::SheetData;
+use super::game_sheet::{SheetData, SheetTab};
 use super::home::HomeModel;
 use super::library_view::{LibraryModel, LibraryUi};
 use super::settings::{Section, SettingsModel, SettingsUi};
@@ -47,8 +47,15 @@ pub enum View {
     /// The same grid on the `Favoris` tab, which is also how the tab bar's
     /// other states are looked at.
     Favorites,
-    /// Home screen with a game's sheet open.
-    GameSheet,
+    /// Home screen with a game's sheet open, on one of its tabs. One view per
+    /// tab, for the same reason the settings panel has one per section: the
+    /// sheet shows a single tab at a time, and a tab nobody can capture is a
+    /// tab nobody will look at.
+    GameSheet(SheetTab),
+    /// The sheet of a game with no state, no cheat and no capture, opened on
+    /// `Sauvegardes`: the tab that is empty says so instead of disappearing,
+    /// and that is the half of the bar the full fixture can never show.
+    EmptySheet,
     /// The settings view, which owns the whole window as the library does,
     /// opened on one section. One view per section: it shows a single section
     /// at a time, so a capture of only the first one leaves the five others —
@@ -89,10 +96,14 @@ impl View {
     /// Names accepted on the command line, in the order `--help` lists them.
     /// One name per screen the shell can show, the settings panel counting one
     /// per section since that is what it draws at a time.
-    pub const ALL: [(&'static str, View); 14] = [
+    pub const ALL: [(&'static str, View); 18] = [
         ("library", View::Library),
         ("favorites", View::Favorites),
-        ("game-sheet", View::GameSheet),
+        ("game-sheet", View::GameSheet(SheetTab::About)),
+        ("game-sheet-states", View::GameSheet(SheetTab::States)),
+        ("game-sheet-cheats", View::GameSheet(SheetTab::Cheats)),
+        ("game-sheet-shots", View::GameSheet(SheetTab::Shots)),
+        ("game-sheet-empty", View::EmptySheet),
         ("settings-display", View::Settings(Section::Display)),
         ("settings-audio", View::Settings(Section::Audio)),
         ("settings-emulation", View::Settings(Section::Emulation)),
@@ -111,6 +122,15 @@ impl View {
     /// section, so a command line written before them keeps working.
     pub const ALIASES: [(&'static str, View); 1] =
         [("settings", View::Settings(Section::Display))];
+
+    /// Whether this view opens a game sheet, and on which tab.
+    fn sheet_tab(self) -> Option<SheetTab> {
+        match self {
+            View::GameSheet(tab) => Some(tab),
+            View::EmptySheet => Some(SheetTab::States),
+            _ => None,
+        }
+    }
 
     /// Parse a `--ui-shot` argument: a view name, optionally suffixed with the
     /// language to render it in (`settings-display@en`).
@@ -918,9 +938,16 @@ impl Fixture {
             no_pending: HashSet::new(),
             meta,
             no_fetching: HashSet::new(),
-            sheet: SheetData { id: sheet_id.clone(), states, screenshots, cheats },
+            // The empty sheet is the same game with nothing saved for it: a
+            // game whose sheet is worth capturing precisely because every one
+            // of its tabs has to say so rather than vanish.
+            sheet: match view {
+                View::EmptySheet => SheetData { id: sheet_id.clone(), ..Default::default() },
+                _ => SheetData { id: sheet_id.clone(), states, screenshots, cheats },
+            },
             library_ui: LibraryUi {
-                selected: (view == View::GameSheet).then_some(sheet_id),
+                selected: view.sheet_tab().map(|_| sheet_id),
+                sheet_tab: view.sheet_tab().unwrap_or_default(),
                 tab: if view == View::Favorites { Tab::Favorites } else { Tab::Library },
                 ..Default::default()
             },
@@ -1118,7 +1145,7 @@ mod tests {
     fn every_view_is_named_on_the_command_line() {
         assert_eq!(View::parse("library"), Ok(View::Library));
         assert_eq!(View::parse("favorites"), Ok(View::Favorites));
-        assert_eq!(View::parse("game-sheet"), Ok(View::GameSheet));
+        assert_eq!(View::parse("game-sheet"), Ok(View::GameSheet(SheetTab::About)));
         assert_eq!(View::parse("empty"), Ok(View::Empty));
         assert_eq!(View::parse("library-hover"), Ok(View::Hover));
         // Only the two views that exist to show a hover state carry a pointer,
@@ -1181,6 +1208,28 @@ mod tests {
         // section the panel opens on.
         assert_eq!(View::parse("settings"), Ok(View::Settings(Section::default())));
         assert_eq!(View::Settings(Section::Display).name(), "settings-display");
+    }
+
+    /// Every tab of the sheet has a capture of its own, plus the one state the
+    /// full fixture cannot show: a tab with nothing in it.
+    #[test]
+    fn each_tab_of_the_game_sheet_has_its_own_view() {
+        for tab in SheetTab::ALL {
+            let view = View::GameSheet(tab);
+            assert_eq!(View::parse(view.name()), Ok(view), "{tab:?}");
+            assert_eq!(view.sheet_tab(), Some(tab));
+        }
+        assert_eq!(View::parse("game-sheet-empty"), Ok(View::EmptySheet));
+        assert_eq!(View::Library.sheet_tab(), None);
+        // The plain name still opens the tab a sheet opens on, so a command
+        // line written before the tabs existed keeps meaning what it meant.
+        assert_eq!(View::parse("game-sheet"), Ok(View::GameSheet(SheetTab::default())));
+        // …and the empty one is empty on every tab, not only the one it opens.
+        let fixture = Fixture::new(View::EmptySheet, Lang::Fr).expect("fixture");
+        assert!(fixture.sheet.states.is_empty());
+        assert!(fixture.sheet.cheats.is_empty());
+        assert!(fixture.sheet.screenshots.is_empty());
+        assert!(!fixture.sheet.id.is_empty(), "an empty sheet is still a game's sheet");
     }
 
     #[test]

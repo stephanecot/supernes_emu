@@ -186,6 +186,15 @@ messages! {
     ForgetHint        => "Le fichier lui-même n'est pas supprimé" / "The file itself is not deleted",
 
     // --- Game sheet -------------------------------------------------------
+    // The only tab of the sheet that had no name of its own: the three others
+    // are labelled by the headings they used to carry (`SaveStates`,
+    // `Cheats`, `Screenshots`), which is what keeps the tab and its content
+    // saying the same word.
+    SheetTabAbout     => "Présentation" / "Overview",
+    // Heading of the facts read off the cartridge itself, opposite the
+    // catalogue's claim about the same game: the two are read against each
+    // other, so each says where it comes from.
+    Cartridge         => "Cartouche" / "Cartridge",
     GeneratedThumbnail => "Vignette générée" / "Generated picture",
     GeneratedThumbnailHint => "Revenir à la miniature produite par l'émulateur"
                        / "Go back to the picture the emulator produced",

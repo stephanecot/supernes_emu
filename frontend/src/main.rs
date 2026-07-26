@@ -119,7 +119,9 @@ const USAGE: &str = "usage: prisme [rom.sfc|.smc|.zip] [flags]
   --load-state FILE                     headless: load a save-state before frame 0
   --save-state-at FRAME FILE            headless: write a save-state after FRAME
   --ui-shot VIEW[@LANG] out.png         render a screen of the interface offscreen and exit
-                                        (VIEW: library, favorites, game-sheet, empty,
+                                        (VIEW: library, favorites, game-sheet,
+                                        game-sheet-states, game-sheet-cheats,
+                                        game-sheet-shots, game-sheet-empty, empty,
                                         library-hover, settings-display, settings-audio,
                                         settings-emulation, settings-inputs, settings-folders,
                                         settings-about; `settings` = settings-display.
