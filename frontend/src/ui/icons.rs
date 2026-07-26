@@ -48,6 +48,8 @@ pub enum Icon {
     ArrowLeft,
     /// Add something to the library.
     Plus,
+    /// A check: something was verified and holds.
+    Check,
 }
 
 impl Icon {
@@ -55,7 +57,7 @@ impl Icon {
     /// the family's stroke weight and stays inside its box. Compiled in tests
     /// only — the screens name the icon they want.
     #[cfg(test)]
-    pub const ALL: [Icon; 10] = [
+    pub const ALL: [Icon; 11] = [
         Icon::Play,
         Icon::Star,
         Icon::StarFilled,
@@ -66,6 +68,7 @@ impl Icon {
         Icon::Close,
         Icon::ArrowLeft,
         Icon::Plus,
+        Icon::Check,
     ];
 
     /// Draw the icon inside `rect` in `color`. The drawing is inscribed in the
@@ -155,6 +158,10 @@ impl Icon {
             Icon::Plus => {
                 painter.line_segment([p(0.50, 0.18), p(0.50, 0.82)], stroke);
                 painter.line_segment([p(0.18, 0.50), p(0.82, 0.50)], stroke);
+            }
+            Icon::Check => {
+                painter.line_segment([p(0.16, 0.52), p(0.40, 0.76)], stroke);
+                painter.line_segment([p(0.40, 0.76), p(0.84, 0.24)], stroke);
             }
             Icon::ArrowLeft => {
                 painter.line_segment([p(0.86, 0.50), p(0.16, 0.50)], stroke);
@@ -362,9 +369,6 @@ mod tests {
             .collect()
     }
 
-    /// Every icon must draw something at every size the shell uses it at — an
-    /// icon that silently emitted nothing would leave a hole in a button.
-    #[test]
     /// `ALL` is what every other test in this module walks, so an icon missing
     /// from it is an icon nothing checks — which is exactly what happened when
     /// `Plus` was added and the list was not. The match below is the guard: a
@@ -384,12 +388,15 @@ mod tests {
                 | Icon::Search
                 | Icon::Close
                 | Icon::ArrowLeft
-                | Icon::Plus => named += 1,
+                | Icon::Plus
+                | Icon::Check => named += 1,
             }
         }
-        assert_eq!(named, 10, "every icon named in the match must be listed in ALL");
+        assert_eq!(named, 11, "every icon named in the match must be listed in ALL");
     }
 
+    /// Every icon must draw something at every size the shell uses it at — an
+    /// icon that silently emitted nothing would leave a hole in a button.
     #[test]
     fn every_icon_draws_at_every_size_the_shell_uses() {
         for icon in Icon::ALL {

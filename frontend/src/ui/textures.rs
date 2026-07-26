@@ -36,6 +36,11 @@ pub struct TextureStore {
 }
 
 impl TextureStore {
+    /// Key the suspended session's frame is uploaded under. Not a real path:
+    /// nothing on disk holds this picture, and the store only ever compares
+    /// keys.
+    pub const SESSION_FRAME: &str = "<session-frame>";
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -54,6 +59,48 @@ impl TextureStore {
         let entry = self.entries.get_mut(path)?;
         entry.used = clock;
         entry.texture.as_ref()
+    }
+
+    /// Texture holding one 256x224 frame straight from the console, uploaded
+    /// under `key` and replaced whenever `frame` differs from what is there.
+    ///
+    /// The store is otherwise keyed by file path, because everything else it
+    /// holds is a picture on disk. The suspended session's last frame is not:
+    /// it exists only in memory, and writing a PNG on every trip to the home
+    /// screen to make it fit the existing shape would be a file written for
+    /// the sake of an interface.
+    pub fn frame(
+        &mut self,
+        ctx: &egui::Context,
+        key: &Path,
+        frame: &[u8],
+        size: [usize; 2],
+    ) -> Option<&egui::TextureHandle> {
+        if frame.len() != size[0] * size[1] * 4 {
+            return None;
+        }
+        self.clock += 1;
+        let image = egui::ColorImage::from_rgba_unmultiplied(size, frame);
+        match self.entries.get_mut(key) {
+            // `set` re-uploads in place, so a paused session that is left and
+            // re-entered does not leak a texture per visit.
+            Some(entry) => {
+                if let Some(texture) = &mut entry.texture {
+                    texture.set(image, egui::TextureOptions::NEAREST);
+                }
+                entry.used = self.clock;
+            }
+            None => {
+                if self.entries.len() >= MAX_TEXTURES {
+                    self.evict_oldest();
+                }
+                let texture =
+                    ctx.load_texture(key.to_string_lossy(), image, egui::TextureOptions::NEAREST);
+                self.entries
+                    .insert(key.to_path_buf(), Entry { texture: Some(texture), used: self.clock });
+            }
+        }
+        self.entries.get(key)?.texture.as_ref()
     }
 
     /// Drop the least recently drawn picture. Called only when the store is
@@ -113,6 +160,29 @@ impl TextureStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The frame of a suspended session is uploaded from memory and *replaced*
+    /// in place on every visit to the home screen: a new texture per visit
+    /// would leak one for each trip in and out of a game.
+    #[test]
+    fn a_session_frame_is_uploaded_once_and_then_replaced() {
+        let ctx = egui::Context::default();
+        let mut store = TextureStore::new();
+        let key = Path::new(TextureStore::SESSION_FRAME);
+        let size = [4, 2];
+        let green = vec![0, 255, 0, 255].repeat(8);
+        let red = vec![255, 0, 0, 255].repeat(8);
+
+        assert!(store.frame(&ctx, key, &green, size).is_some());
+        assert_eq!(store.len(), 1);
+        assert!(store.frame(&ctx, key, &red, size).is_some());
+        assert_eq!(store.len(), 1, "the second frame replaces the first");
+
+        // A buffer that does not match the size it claims is refused rather
+        // than uploaded as garbage.
+        assert!(store.frame(&ctx, key, &green, [8, 8]).is_none());
+    }
+
 
     /// Unique scratch directory per test — no test may share a path with
     /// another test or with another run (they run concurrently). Nothing is

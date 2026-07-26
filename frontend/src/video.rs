@@ -8,7 +8,7 @@
 //! coarse — a few ms on some hosts — so a plain sleep-to-deadline would
 //! frequently overshoot).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -118,6 +118,13 @@ struct LibraryState {
     thumbs: HashMap<String, PathBuf>,
     /// Games whose thumbnail is queued on the worker.
     pending: HashSet<String>,
+    /// Games whose sheet is being fetched from the catalogues, i.e. the only
+    /// requests this application ever has in flight.
+    fetching: HashSet<String>,
+    /// What the catalogues said, per game id. Read once from `metadata.json`
+    /// when the library starts, and updated as the worker answers; the worker
+    /// owns the file and writes it, exactly as it owns `library.json`.
+    meta: BTreeMap<String, crate::metadata::GameMeta>,
     /// Files listed by the open sheet, refreshed when the selection changes.
     sheet: SheetData,
 }
@@ -132,6 +139,8 @@ impl LibraryState {
             textures: TextureStore::new(),
             thumbs: HashMap::new(),
             pending: HashSet::new(),
+            fetching: HashSet::new(),
+            meta: BTreeMap::new(),
             sheet: SheetData::default(),
         }
     }
@@ -157,6 +166,8 @@ impl LibraryState {
 /// `prefs` carries the persisted user options (loaded by `main`); it is stored
 /// on `App`, written back after every option change and once more on exit.
 pub fn run(launch: Option<Launch>, prefs: Prefs) -> Result<(), String> {
+    // Resolved before `prefs` is moved into the application.
+    let claude = crate::assistant::find_claude(prefs.assistant_tool());
     let (title, snes, current_rom_path, game_paths, sram_baseline, frame_duration, game_id) =
         match launch {
             Some(l) => {
@@ -207,6 +218,7 @@ pub fn run(launch: Option<Launch>, prefs: Prefs) -> Result<(), String> {
         title,
         snes,
         current_rom_path,
+        cheats: crate::cheats::Cheats::load(&game_paths),
         paths: game_paths,
         sram_baseline,
         frame_duration,
@@ -237,6 +249,11 @@ pub fn run(launch: Option<Launch>, prefs: Prefs) -> Result<(), String> {
         play_tick: Instant::now(),
         play_unsaved: 0,
         dialogs: dialog::Dialogs::new(),
+        session_frame: vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT * 4],
+        wish: String::new(),
+        assistant_session: None,
+        assistant_line: None,
+        claude,
         quit_confirm: false,
         quit_saved_pause: false,
         #[cfg(target_os = "macos")]
@@ -304,6 +321,11 @@ struct App {
     /// Post-load SRAM snapshot for the currently loaded cart; see
     /// `save::load_sram`/`save::save_if_dirty`.
     sram_baseline: Vec<u8>,
+    /// Cheats of the loaded game, read from its sidecar when it was loaded and
+    /// re-applied after every emulated frame (`cheats::Cheats::apply`). Empty
+    /// for the overwhelming majority of games, which is why applying them is
+    /// an early return rather than a branch in the hot loop.
+    cheats: crate::cheats::Cheats,
     frame_duration: Duration,
     /// Absolute wall-clock time the next emulated frame should be presented at.
     next_deadline: Instant,
@@ -395,6 +417,26 @@ struct App {
     /// `crate::dialog`: a native modal opened from a callback re-enters winit's
     /// event handler, which panics on purpose).
     dialogs: dialog::Dialogs,
+    /// The frame the console stopped on, taken when the game is left. Shown on
+    /// the home screen so that "I opened the menu" never looks like "I closed
+    /// the game".
+    session_frame: Vec<u8>,
+    /// What the player is typing into the assistant's field on a game sheet.
+    /// Held here rather than in the sheet: the sheet is rebuilt every frame.
+    wish: String,
+    /// The assistant currently running, if any. Dropping it kills the child,
+    /// so quitting mid-request cannot leave one emulating in the background.
+    assistant_session: Option<crate::assistant::Session>,
+    /// Its latest line, shown on the sheet in place of the field — and, while
+    /// it is playing, under the badge on the game screen itself.
+    assistant_line: Option<String>,
+    /// The control channel the assistant drives *this* console through, open
+    /// only while a `Jouer le passage` request is running. Its presence is what
+    /// Path of the `claude` tool, resolved once at startup; `None` disables
+    /// the assistant entirely. Looked up here rather than at each use so the
+    /// settings screen can *say* why the row is inert, instead of failing on
+    /// the click.
+    claude: Option<PathBuf>,
     /// The quit confirmation modal (`ui::confirm`) is up. It replaces the
     /// native alert this used to show, for the same reentrancy reason.
     quit_confirm: bool,
@@ -624,6 +666,11 @@ impl ApplicationHandler for App {
         // its answer applied here, never from the callback that requested it
         // (see `crate::dialog`).
         self.pump_dialogs();
+        self.poll_assistant();
+        // The assistant's requests are answered here, between two frames, and
+        // the one command that costs frames is only *armed* — it spends them
+        // one per pass through this function, which is what keeps the window
+        // drawing while it plays (see `live.rs`).
         // Scan results and finished thumbnails arrive here, one channel drain
         // per frame; the library thread never touches the UI itself.
         self.poll_library();
@@ -662,10 +709,18 @@ impl ApplicationHandler for App {
                 1
             };
             let mut frames_run = 0u32;
-            let pads = self.current_pads();
             for i in 0..factor {
+                // Resolved per frame, not per pass: a `press` hands the pad
+                // back mid-burst when its hold is over and its release begins.
+                let pads = self.current_pads();
                 if let Some(snes) = &mut self.snes {
                     snes.run_frame(pads);
+                    // After the frame, and after *every* frame of an
+                    // accelerated pass: a frozen value must not be allowed to
+                    // survive as the game's own for even one frame, or the
+                    // logic that reads it (a death, a purchase) sees the value
+                    // the cheat exists to prevent.
+                    self.cheats.apply(snes);
                 }
                 frames_run += 1;
                 // Silent degradation: `next_deadline` is already the *next*
@@ -728,6 +783,12 @@ impl ApplicationHandler for App {
                 aspect,
             );
             let (buf_w, buf_h) = (self.out_w as usize, self.out_h as usize);
+            // Sized from the monitor, not from the picture: the readout is
+            // meant to be read, so it keeps one apparent size whatever the
+            // window does (see `font_scale`).
+            let scale = font_scale(
+                self.window.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0),
+            );
             let frame = pixels.frame_mut();
             if self.prefs.show_fps {
                 let measured = self.fps_counter.fps();
@@ -743,10 +804,10 @@ impl ApplicationHandler for App {
                 // Space between the "FPS" label and the numbers so the
                 // readout doesn't read as one run-together token.
                 let text = format!("FPS {:.0}/{:.0}", measured, target);
-                draw_overlay_text(frame, buf_w, buf_h, &text, color);
+                draw_overlay_text(frame, buf_w, buf_h, scale, &text, color);
             }
             if let Some((text, _)) = &self.status {
-                draw_status_text(frame, buf_w, buf_h, text, STATUS_COLOR);
+                draw_status_text(frame, buf_w, buf_h, scale, text, STATUS_COLOR);
             }
         }
         // Always request a redraw, even while paused, so the compositor keeps
@@ -1072,6 +1133,15 @@ impl App {
     /// cleared when they open), and the emulation keeps running behind them,
     /// so a controller left leaning on the desk must not play the game either.
     /// Same when the window is not focused (see `WindowEvent::Focused`).
+    ///
+    /// **While the assistant is driving, the pad is the assistant's** and the
+    /// player's own input reaches nothing. Two hands on one controller is not a
+    /// state anyone asked for, and the alternative — letting a stray key stop
+    /// the assistant — would break a run mid-jump on a hand resting on the
+    /// keyboard, and leave the assistant driving a console that has stopped
+    /// answering it. Stopping is a deliberate gesture instead: the sheet's
+    /// `Arrêter` button, one Escape away. Everything that is not a pad button
+    /// stays live throughout — pause, screenshot, save state, full screen.
     fn current_pads(&self) -> [JoypadState; 2] {
         if self.settings.open || self.quit_confirm || !self.focused {
             return [JoypadState::default(); 2];
@@ -1127,6 +1197,13 @@ impl App {
     fn go_home(&mut self) {
         if !self.state.go_home(self.paused) {
             return;
+        }
+        // Take the picture *here*, at the moment the game is left, rather than
+        // relying on a buffer the presenter happens to have filled: the home
+        // screen shows this frame to say the session is still there, and it
+        // must not depend on which path the last frame took.
+        if let Some(snes) = &self.snes {
+            snes.framebuffer.to_rgba(&mut self.session_frame);
         }
         self.paused = true;
         self.frame_advance = false;
@@ -1188,8 +1265,8 @@ impl App {
                 event_loop.exit();
             }
             Action::CancelQuit => self.cancel_quit(),
-            Action::Launch(path) => {
-                if let Err(e) = self.switch_rom(&path, true) {
+            Action::Launch { path, resume } => {
+                if let Err(e) = self.switch_rom(&path, resume) {
                     eprintln!("error: could not load {}: {e}", path.display());
                     self.library.ui.error = Some(crate::i18n::cannot_load(
                         self.prefs.lang(),
@@ -1219,6 +1296,25 @@ impl App {
                 self.refresh_thumbnails();
             }
             Action::DeleteState(path) => self.delete_state(&path),
+            Action::FillSheet(id) => self.fill_sheets(&[id]),
+            Action::FillLibrary => {
+                // Only the games that have nothing yet: pressing this twice
+                // must not re-ask two public servers for four thousand
+                // pictures they already gave.
+                let wanted: Vec<String> = self
+                    .library
+                    .entries
+                    .iter()
+                    .filter(|e| !e.missing && !self.library.meta.contains_key(&e.id))
+                    .map(|e| e.id.clone())
+                    .collect();
+                self.fill_sheets(&wanted);
+            }
+            Action::OpenUrl(url) => {
+                if let Err(e) = crate::guide::open_url(&url) {
+                    eprintln!("{e}");
+                }
+            }
             Action::Rescan => self.rescan_library(),
             Action::AddGame { replacing } => {
                 // A relocation opens where the game used to live: the file has
@@ -1278,8 +1374,57 @@ impl App {
                 self.dialogs.request(dialog::Request::SaveDir { current });
             }
             Action::ResetSaveDir => self.set_save_dir(None),
+            Action::ToggleCheat { id, name, enabled } => {
+                self.edit_cheats(&id, |cheats| {
+                    cheats.set_enabled(&name, enabled);
+                });
+            }
+            Action::RemoveCheat { id, name } => {
+                self.edit_cheats(&id, |cheats| {
+                    cheats.remove(&name);
+                });
+            }
+            Action::AskAssistant { id } => self.ask_assistant(&id),
+            Action::StopAssistant => {
+                if let Some(session) = &mut self.assistant_session {
+                    session.cancel();
+                }
+                self.assistant_session = None;
+                self.assistant_line = None;
+            }
+            Action::ChooseAssistantTool => {
+                let current = self.claude.clone().or_else(|| {
+                    self.prefs.assistant_tool().map(std::path::Path::to_path_buf)
+                });
+                self.dialogs.request(dialog::Request::AssistantTool { current });
+            }
             Action::OpenGuide => self.open_guide(),
         }
+    }
+
+    /// Change one game's cheat sidecar from the sheet, whether or not that game
+    /// is the one running.
+    ///
+    /// The file is the source of truth — it is read, edited and written back —
+    /// and the *running* console's list is refreshed from it when the sheet is
+    /// showing the game currently loaded, so a cheat ticked from the home
+    /// screen is in force the moment the player goes back in.
+    fn edit_cheats(&mut self, id: &str, edit: impl FnOnce(&mut crate::cheats::Cheats)) {
+        let Some(entry) = self.library.entries.iter().find(|e| e.id == id).cloned() else {
+            return;
+        };
+        let paths = self.sheet_paths(&entry);
+        let mut cheats = crate::cheats::Cheats::load(&paths);
+        edit(&mut cheats);
+        if let Err(e) = cheats.save(&paths) {
+            eprintln!("cheats: {e}");
+            return;
+        }
+        if self.paths.id() == id && self.current_rom_path == entry.path {
+            self.cheats = cheats;
+        }
+        // The sheet lists what is on disk; gather it again on the next frame.
+        self.library.sheet = SheetData::default();
     }
 
     /// Apply one option of the settings panel. Every arm goes through the same
@@ -1294,6 +1439,12 @@ impl App {
             Setting::Aspect(aspect) => self.set_aspect(aspect),
             Setting::Fullscreen(on) => self.set_fullscreen(on),
             Setting::ShowFps(on) => self.set_show_fps(on),
+            Setting::Assistant(on) => self.set_assistant(on),
+            Setting::AssistantPath(path) => self.set_assistant_path(path),
+            Setting::AssistantModel(model) => {
+                self.prefs.assistant_model = model;
+                self.prefs.save();
+            }
             Setting::Mute(on) => self.set_mute(on),
             Setting::Volume(volume) => self.set_volume(volume),
             Setting::FastForward(factor) => self.set_fast_forward_factor(factor),
@@ -1416,6 +1567,12 @@ impl App {
         }
         self.library.ui.sort = SortMode::from_pref(&self.prefs.library_sort);
         self.library.ui.tab = ui::Tab::from_pref(&self.prefs.library_tab);
+        // What earlier sessions already fetched. Read from disk, never from
+        // the network: opening the home screen must stay an offline act.
+        self.library.meta = crate::metadata::store_path()
+            .map(|p| crate::metadata::Store::read_from(&p))
+            .unwrap_or_default()
+            .games;
         match library::Worker::spawn() {
             Some(worker) => {
                 self.library.worker = Some(worker);
@@ -1477,9 +1634,33 @@ impl App {
                         self.library.textures.forget(path);
                     }
                 }
+                library::Update::Fetched { id, meta, remaining } => {
+                    self.library.fetching.remove(&id);
+                    // `None` is a fetch that produced nothing: the entry the
+                    // sheet is already showing stays exactly as it was.
+                    if let Some(meta) = meta {
+                        if let Some(path) = &meta.boxart {
+                            self.library.textures.forget(path);
+                        }
+                        self.library.meta.insert(id, meta);
+                    }
+                    if remaining == 0 {
+                        self.library.fetching.clear();
+                    }
+                }
+                library::Update::FetchFailed { error, .. } => {
+                    // Nothing was identified, so nothing changed. Said once,
+                    // where the scan error is said, rather than in a modal
+                    // over a sheet that is still perfectly readable.
+                    eprintln!("metadata: {error}");
+                    self.library.fetching.clear();
+                    self.library.ui.error =
+                        Some(crate::i18n::Msg::FetchFailed.text(self.prefs.lang()).to_string());
+                }
             }
         }
         if rescanned {
+            self.forget_stale_metadata();
             self.request_thumbnails();
         }
         self.refresh_thumbnails();
@@ -1512,9 +1693,57 @@ impl App {
         self.library.pending.extend(queued);
     }
 
+    /// Drop the fetched sheet of any game whose ROM file is no longer the dump
+    /// it was fetched for. A replaced file keeps its `game_id` when its header
+    /// is unchanged, but its CRC32 moves — and showing another dump's box art
+    /// and release date would be worse than showing none.
+    ///
+    /// Only the in-memory view is pruned: `metadata.json` still holds the
+    /// entry, and it comes back by itself if the original file does.
+    fn forget_stale_metadata(&mut self) {
+        let store = crate::metadata::Store {
+            version: crate::metadata::CACHE_VERSION,
+            games: std::mem::take(&mut self.library.meta),
+        };
+        self.library.meta = self
+            .library
+            .entries
+            .iter()
+            .filter_map(|e| store.get(&e.id, e.crc32).map(|m| (e.id.clone(), m.clone())))
+            .collect();
+    }
+
+    /// Ask the library thread to fill in these games' sheets from the
+    /// catalogues. **The only place in the application that starts a network
+    /// request**, reached from the sheet's own button or from the library
+    /// toolbar's catch-up — never from a scan, never from startup.
+    ///
+    /// Games already in flight are not queued twice, and a run with no worker
+    /// asks for nothing rather than pinning a progress line nobody will clear.
+    fn fill_sheets(&mut self, ids: &[String]) {
+        let Some(worker) = &self.library.worker else { return };
+        let mut games = Vec::with_capacity(ids.len());
+        for id in ids {
+            if self.library.fetching.contains(id) {
+                continue;
+            }
+            let Some(entry) = self.library.entries.iter().find(|e| &e.id == id) else { continue };
+            if entry.missing || entry.crc32 == 0 {
+                continue; // no image on disk, so no fingerprint to look up
+            }
+            games.push((entry.id.clone(), entry.crc32));
+        }
+        if games.is_empty() {
+            return;
+        }
+        self.library.ui.error = None;
+        self.library.fetching.extend(games.iter().map(|(id, _)| id.clone()));
+        worker.submit(library::Job::Fetch { games });
+    }
+
     /// Re-resolve the picture of every game: the promoted screenshot when the
-    /// player chose one and it still exists, else the generated thumbnail when
-    /// it has been produced.
+    /// player chose one and it still exists, else the downloaded box art, else
+    /// the generated thumbnail when it has been produced.
     fn refresh_thumbnails(&mut self) {
         let mut map = HashMap::with_capacity(self.library.entries.len());
         for entry in &self.library.entries {
@@ -1547,14 +1776,20 @@ impl App {
             Some(id) if self.library.sheet.id != id => {
                 let entry = self.library.entries.iter().find(|e| e.id == id).cloned();
                 self.library.sheet = match entry {
-                    Some(entry) => SheetData {
-                        states: library::save_states(&self.sheet_paths(&entry)),
-                        id,
-                        screenshots: library::screenshots(
-                            &library::screenshot_dir(&entry.path, &self.prefs),
-                            &entry.title,
-                        ),
-                    },
+                    Some(entry) => {
+                        let paths = self.sheet_paths(&entry);
+                        SheetData {
+                            states: library::save_states(&paths),
+                            id,
+                            screenshots: library::screenshots(
+                                &library::screenshot_dir(&entry.path, &self.prefs),
+                                &entry.title,
+                            ),
+                            // Read from disk like the states: an agent may have
+                            // written this file while the sheet was closed.
+                            cheats: crate::cheats::Cheats::load(&paths).list().to_vec(),
+                        }
+                    }
                     None => SheetData::default(),
                 };
             }
@@ -1646,6 +1881,7 @@ impl App {
         } else {
             (None, None)
         };
+        let assistant = self.assistant_line.clone().map(|line| (false, Some(line))).filter(|_| !home);
         // Resolved for the settings panel only, and only while it is up: the
         // library's own `dir` is still empty when a run went straight into a
         // game without ever showing the home screen.
@@ -1673,11 +1909,28 @@ impl App {
             JoypadState::default()
         };
         let lang = self.prefs.lang();
-        let Self { ui, pixels, library, prefs, settings, .. } = self;
+        let Self {
+            ui,
+            pixels,
+            library,
+            prefs,
+            settings,
+            wish,
+            assistant_line,
+            claude,
+            game_id,
+            session_frame,
+            ..
+        } = self;
+        let assistant_on = prefs.assistant && claude.is_some();
+        // A frame is worth showing only when a console actually drew one.
+        let has_frame = game_id.is_some();
         let (Some(ui), Some(pixels)) = (ui.as_mut(), pixels.as_ref()) else {
             return Action::None;
         };
-        let LibraryState { dir, entries, ui: view, textures, thumbs, pending, sheet, .. } = library;
+        let LibraryState {
+            dir, entries, ui: view, textures, thumbs, pending, fetching, meta, sheet, ..
+        } = library;
         let action = ui.run(&window, |ctx| {
             // One screen owns the window: the settings are a full-width view
             // now, not a modal over the library or over the game.
@@ -1685,6 +1938,7 @@ impl App {
                 crate::ui::settings::show(
                     ctx,
                     &mut SettingsModel {
+                        claude: self.claude.as_deref(),
                         app_name: APP_NAME,
                         version: VERSION,
                         prefs,
@@ -1701,6 +1955,14 @@ impl App {
                 crate::ui::home::show(
                     ctx,
                     &mut HomeModel {
+                        // The last frame the console drew, still in the buffer
+                        // the presenter fills — no copy, and no PNG written for
+                        // the sake of a picture that already exists in memory.
+                        session_frame: has_frame.then_some(session_frame.as_slice()),
+                        assistant: assistant_on,
+                        running: game_id.as_deref(),
+                        wish,
+                        assistant_says: assistant_line.as_deref(),
                         app_name: APP_NAME,
                         version: VERSION,
                         lang,
@@ -1712,15 +1974,19 @@ impl App {
                             dir,
                             thumbs,
                             pending,
+                            fetching,
                             state: &mut *view,
                             textures: &mut *textures,
                             lang,
                         },
                         sheet,
+                        meta,
                     },
                 )
             } else {
-                crate::ui::game::overlay(ctx, paused);
+                crate::ui::game::overlay(ctx, paused, assistant.as_ref().map(|(playing, says)| {
+                    crate::ui::game::Assistant { playing: *playing, says: says.as_deref() }
+                }), lang);
                 Action::None
             };
             // The quit confirmation sits over everything, including the
@@ -2013,6 +2279,9 @@ impl App {
             self.set_fast_forward(false);
             self.next_deadline = Instant::now() + self.frame_duration;
             match answer {
+                dialog::Answer::AssistantTool(path) => {
+                    self.set_assistant_path(path.display().to_string());
+                }
                 dialog::Answer::AddRom { path, replacing } => {
                     if let Some(old) = replacing {
                         // Dropped before the add, so relocating a game onto the
@@ -2164,6 +2433,9 @@ impl App {
                 // The slot's snapshot replaced `cart.sram` wholesale; see
                 // `resync_sram_baseline` (review point A).
                 self.resync_sram_baseline();
+                // The restored console no longer holds what a `once` cheat
+                // wrote, so it is owed another shot.
+                self.cheats.rearm();
                 self.set_status(status_slot(self.prefs.lang(), slot, SlotStatus::Loaded));
             }
             Err(e) => {
@@ -2272,6 +2544,7 @@ impl App {
                 }
                 self.set_status(Msg::StatusResumed.text(self.prefs.lang()));
                 self.resync_sram_baseline();
+                self.cheats.rearm();
             }
             Err(e) => {
                 eprintln!("resume: ignoring {} ({e})", path.display());
@@ -2368,6 +2641,101 @@ impl App {
     /// launch by `Prefs::load`.
     fn set_show_fps(&mut self, on: bool) {
         self.prefs.show_fps = on;
+        self.prefs.save();
+    }
+
+    /// Re-read the running game's cheats from disk: a search that succeeded
+    /// wrote its find there, in a process of its own.
+    fn refresh_cheats(&mut self) {
+        self.cheats = crate::cheats::Cheats::load(&self.paths);
+        self.library.sheet = SheetData::default();
+    }
+
+    /// Send the typed request off. The state it starts from is written first,
+    /// which is also the state to come back to: an assistant that plays must
+    /// never be the only copy of where the player was.
+    fn ask_assistant(&mut self, id: &str) {
+        let wish = self.wish.trim().to_string();
+        let Some(claude) = self.claude.clone() else { return };
+        let rom = self.current_rom_path.clone();
+        if wish.is_empty() || self.game_id.as_deref() != Some(id) {
+            return;
+        }
+        // A state of its own, not the session's `.resume`: that one is the
+        // player's way back and must not be overwritten by a request they may
+        // well cancel.
+        let state = self.paths.resume_write().with_extension("ask.state");
+        let Some(bytes) = self.snes.as_mut().map(|s| s.save_state()) else { return };
+        if let Err(e) = crate::atomic::write(&state, &bytes) {
+            self.status = Some((format!("{e}"), Instant::now()));
+            return;
+        }
+        let request = crate::assistant::Request {
+            task: crate::assistant::Task::Cheat,
+            wish,
+            emulator: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("prisme")),
+            rom,
+            state,
+            cheats: self.paths.cheats_write(),
+            model: self.prefs.assistant_model().map(str::to_owned),
+        };
+        match crate::assistant::Session::start(&claude, &request) {
+            Ok(session) => {
+                self.assistant_session = Some(session);
+                self.assistant_line = Some(String::new());
+                // The search drives a console of its own, so this one stops
+                // rather than running unattended while it takes its time.
+                self.paused = true;
+            }
+            Err(e) => self.status = Some((e, Instant::now())),
+        }
+    }
+
+    /// Drain what the assistant has to say, once per frame. A finished session
+    /// leaves its last line on screen and reloads the game's cheats, which is
+    /// where a successful search put its result.
+    fn poll_assistant(&mut self) {
+        let Some(session) = &mut self.assistant_session else { return };
+        for status in session.poll() {
+            match status {
+                crate::assistant::Status::Progress(line) => self.assistant_line = Some(line),
+                crate::assistant::Status::Done(line)
+                | crate::assistant::Status::Failed(line) => {
+                    self.status = Some((line, Instant::now()));
+                    self.assistant_line = None;
+                    self.assistant_session = None;
+                            self.refresh_cheats();
+                    return;
+                }
+            }
+        }
+        if session.finished() {
+            self.assistant_line = None;
+            self.assistant_session = None;
+            self.refresh_cheats();
+        }
+    }
+
+    /// Turning the assistant on is refused outright when `claude` was not
+    /// found. The settings row is already inert in that case, so this is the
+    /// second lock rather than the first: a preferences file edited by hand,
+    /// or copied from a machine that had the tool, must not switch on a
+    /// feature that can only fail here.
+    fn set_assistant(&mut self, on: bool) {
+        self.prefs.assistant = on && self.claude.is_some();
+        self.prefs.save();
+    }
+
+    /// Re-resolve the tool as soon as the path changes, so the settings screen
+    /// answers on the spot instead of at the next launch. A path that resolves
+    /// to nothing also switches the feature off: leaving it on would promise
+    /// something that can no longer run.
+    fn set_assistant_path(&mut self, path: String) {
+        self.prefs.assistant_path = path;
+        self.claude = crate::assistant::find_claude(self.prefs.assistant_tool());
+        if self.claude.is_none() {
+            self.prefs.assistant = false;
+        }
         self.prefs.save();
     }
 
@@ -2541,6 +2909,7 @@ impl App {
         self.title = window_title(&cart.title);
         self.frame_duration = Duration::from_secs_f64(1.0 / cart.region.frames_per_second());
         self.snes = Some(Snes::new(cart));
+        self.cheats = crate::cheats::Cheats::load(&game_paths);
         self.paths = game_paths;
         self.sram_baseline = sram_baseline;
         self.pad = JoypadState::default();
@@ -2638,9 +3007,18 @@ impl App {
 /// Picture to show for `id`, or `None` when the game still needs one (see
 /// `library::resolve_picture`). Both the display map and the generation queue
 /// go through this, so they can never disagree.
+///
+/// The box art is looked for on disk rather than in the fetched metadata: the
+/// file's presence *is* the answer, which keeps this a pure function of the
+/// preferences and the file system and leaves the two callers nothing to
+/// disagree about.
 fn picture_for(prefs: &Prefs, id: &str) -> Option<PathBuf> {
     let custom = prefs.games.get(id).and_then(|s| s.thumbnail.clone());
-    library::resolve_picture(custom.as_deref(), thumbs::thumb_path(id).as_deref())
+    library::resolve_picture(
+        custom.as_deref(),
+        crate::metadata::boxart_path(id).as_deref(),
+        thumbs::thumb_path(id).as_deref(),
+    )
 }
 
 /// What the `Entrées` section says after a binding was written. A plain
@@ -2761,28 +3139,56 @@ fn pace(deadline: &mut Instant, frame_duration: Duration) {
 // no effect on headless `--dump-frame`/`--dump-frame-every` output, which
 // reads straight from the core, nor on the F12 screenshot.
 //
-// Drawing after scaling (not before) is deliberate: at a `FONT_SCALE` fixed
-// in *output* pixels, the overlay's on-screen size stays constant regardless
-// of the window's zoom/size — a glyph drawn into the native 256x224 buffer
-// before scaling would instead have grown proportionally with zoom (e.g. 4x
-// too big at zoom x4, worse in a maximized/fullscreen window), which is what
-// made the previous native-resolution placement look oversized.
+// Drawing after scaling (not before) is deliberate: a glyph drawn into the
+// native 256x224 buffer would grow with the zoom (4x too big at zoom x4,
+// worse still maximized), which is what made the first placement oversized.
+// Its size then comes from `font_scale`, in points rather than in pixels —
+// see the reasoning there, which settles the opposite complaint.
 
 /// Glyph cell size before scaling: 3 columns x 5 rows.
 const GLYPH_W: usize = 3;
 const GLYPH_H: usize = 5;
-/// Each on-screen glyph pixel is drawn as a `FONT_SCALE`x`FONT_SCALE` block
-/// of *output* pixels (the overlay is drawn post-scale — see the module
-/// comment above), so 1x keeps the whole overlay small and unobtrusive at
-/// any window size instead of scaling up with zoom.
-const FONT_SCALE: usize = 1;
+/// Height of one glyph pixel, in *points* — the unit the display is actually
+/// read in. Five of them stack into a glyph, so the readout stands about 13
+/// points tall, the size of ordinary interface text.
+///
+/// This constant is the answer to two opposite reports. The overlay was once
+/// drawn into the native 256x224 buffer and scaled with the picture, so it
+/// ballooned at large zooms ("trop gros"); it was then pinned to one *output*
+/// pixel per glyph pixel, which fixed that and introduced the mirror defect
+/// ("beaucoup trop petit") — an output pixel is half a point on a HiDPI
+/// screen, so the readout shrank to two points and vanished. Neither unit was
+/// the right one: a thing meant to be read is sized in points, and converted
+/// to pixels through the monitor's own scale factor.
+const GLYPH_POINT_SIZE: f64 = 2.6;
+/// Bounds on the resulting glyph-pixel size, in output pixels.
+const FONT_SCALE_MIN: usize = 2;
+const FONT_SCALE_MAX: usize = 8;
+
+/// Glyph-pixel size in output pixels for a monitor of `scale_factor` pixels
+/// per point. Independent of the window size and of the zoom: the readout has
+/// no business growing when the picture does.
+fn font_scale(scale_factor: f64) -> usize {
+    let px = (GLYPH_POINT_SIZE * scale_factor).round();
+    (px as usize).clamp(FONT_SCALE_MIN, FONT_SCALE_MAX)
+}
+
 /// Horizontal distance (in output pixels) from one glyph's left edge to the
 /// next: glyph width + 1 column of inter-glyph spacing, both scaled.
-const CHAR_ADVANCE: usize = (GLYPH_W + 1) * FONT_SCALE;
-/// Gap between the framebuffer edge and the overlay's background box.
-const OVERLAY_MARGIN: usize = 3;
-/// Gap between the background box edge and the glyphs it contains.
-const OVERLAY_PAD: usize = 2;
+fn char_advance(scale: usize) -> usize {
+    (GLYPH_W + 1) * scale
+}
+
+/// Gap between the framebuffer edge and the overlay's background box, and
+/// between that box and its glyphs. Both follow the glyph scale: a box padded
+/// by two fixed pixels around 20-pixel glyphs reads as a mistake.
+fn overlay_margin(scale: usize) -> usize {
+    3 * scale
+}
+
+fn overlay_pad(scale: usize) -> usize {
+    2 * scale
+}
 
 /// 3x5 bitmap glyph for one overlay character. Each row is a `u8` using its
 /// low 3 bits as the left/middle/right pixel columns (bit 2 = leftmost, bit
@@ -2854,28 +3260,29 @@ fn fill_rect(frame: &mut [u8], buf_w: usize, buf_h: usize, x: usize, y: usize, w
 /// Paints `text` into the top-right corner of a `buf_w`x`buf_h` RGBA8 buffer
 /// over a solid black background box, so the overlay stays legible against
 /// any game content behind it.
-fn draw_overlay_text(frame: &mut [u8], buf_w: usize, buf_h: usize, text: &str, color: [u8; 4]) {
-    let Some((box_w, _)) = text_box_size(text, buf_w, buf_h) else { return };
-    draw_text_box(frame, buf_w, buf_h, buf_w.saturating_sub(OVERLAY_MARGIN + box_w), OVERLAY_MARGIN, text, color);
+fn draw_overlay_text(frame: &mut [u8], buf_w: usize, buf_h: usize, scale: usize, text: &str, color: [u8; 4]) {
+    let Some((box_w, _)) = text_box_size(text, buf_w, buf_h, scale) else { return };
+    let margin = overlay_margin(scale);
+    draw_text_box(frame, buf_w, buf_h, scale, buf_w.saturating_sub(margin + box_w), margin, text, color);
 }
 
 /// Paints `text` in the bottom-left corner: the transient status messages
 /// (screenshot taken, slot saved/loaded, SPC exported) go there so they never
 /// collide with the FPS readout in the opposite corner.
-fn draw_status_text(frame: &mut [u8], buf_w: usize, buf_h: usize, text: &str, color: [u8; 4]) {
-    let Some((_, box_h)) = text_box_size(text, buf_w, buf_h) else { return };
-    draw_text_box(frame, buf_w, buf_h, OVERLAY_MARGIN, buf_h.saturating_sub(OVERLAY_MARGIN + box_h), text, color);
+fn draw_status_text(frame: &mut [u8], buf_w: usize, buf_h: usize, scale: usize, text: &str, color: [u8; 4]) {
+    let Some((_, box_h)) = text_box_size(text, buf_w, buf_h, scale) else { return };
+    let margin = overlay_margin(scale);
+    draw_text_box(frame, buf_w, buf_h, scale, margin, buf_h.saturating_sub(margin + box_h), text, color);
 }
 
 /// Background-box size for `text` in a `buf_w`x`buf_h` buffer, or `None` when
 /// it cannot fit (the caller then skips drawing rather than doing
-/// out-of-bounds math). Independent of `buf_w`/`buf_h` except for that fit
-/// check: the box itself is always the same size in output pixels, at any
-/// window size (see the module comment above) — only whether it *fits* can
-/// depend on the buffer.
-fn text_box_size(text: &str, buf_w: usize, buf_h: usize) -> Option<(usize, usize)> {
-    let box_w = text.chars().count() * CHAR_ADVANCE + OVERLAY_PAD * 2;
-    let box_h = GLYPH_H * FONT_SCALE + OVERLAY_PAD * 2;
+/// out-of-bounds math). The box scales with the picture height (see
+/// `font_scale`), so both its size and whether it fits depend on the buffer.
+fn text_box_size(text: &str, buf_w: usize, buf_h: usize, scale: usize) -> Option<(usize, usize)> {
+    let pad = overlay_pad(scale);
+    let box_w = text.chars().count() * char_advance(scale) + pad * 2;
+    let box_h = GLYPH_H * scale + pad * 2;
     if box_w > buf_w || box_h > buf_h {
         return None;
     }
@@ -2883,25 +3290,25 @@ fn text_box_size(text: &str, buf_w: usize, buf_h: usize) -> Option<(usize, usize
 }
 
 /// Blits `text` at `(x0, y0)` over a solid black background box.
-fn draw_text_box(frame: &mut [u8], buf_w: usize, buf_h: usize, x0: usize, y0: usize, text: &str, color: [u8; 4]) {
-    let Some((box_w, box_h)) = text_box_size(text, buf_w, buf_h) else { return };
+fn draw_text_box(frame: &mut [u8], buf_w: usize, buf_h: usize, scale: usize, x0: usize, y0: usize, text: &str, color: [u8; 4]) {
+    let Some((box_w, box_h)) = text_box_size(text, buf_w, buf_h, scale) else { return };
 
     fill_rect(frame, buf_w, buf_h, x0, y0, box_w, box_h, [0, 0, 0, 255]);
 
-    let mut cx = x0 + OVERLAY_PAD;
-    let cy = y0 + OVERLAY_PAD;
+    let mut cx = x0 + overlay_pad(scale);
+    let cy = y0 + overlay_pad(scale);
     for ch in text.chars() {
         let rows = glyph(ch);
         for (row, bits) in rows.iter().enumerate() {
             for col in 0..GLYPH_W {
                 if bits & (1 << (GLYPH_W - 1 - col)) != 0 {
-                    let px = cx + col * FONT_SCALE;
-                    let py = cy + row * FONT_SCALE;
-                    fill_rect(frame, buf_w, buf_h, px, py, FONT_SCALE, FONT_SCALE, color);
+                    let px = cx + col * scale;
+                    let py = cy + row * scale;
+                    fill_rect(frame, buf_w, buf_h, px, py, scale, scale, color);
                 }
             }
         }
-        cx += CHAR_ADVANCE;
+        cx += char_advance(scale);
     }
 }
 
@@ -2941,13 +3348,14 @@ mod overlay_tests {
             "MANETTE 1 DECONNECTEE",
             "MANETTE 2 CONNECTEE",
             "MANETTE 2 DECONNECTEE",
+            "CANAL IA IMPOSSIBLE",
         ];
         for msg in messages {
             for c in msg.chars().filter(|c| *c != ' ') {
                 assert_ne!(glyph(c), [0; GLYPH_H], "no glyph for {c:?} in {msg:?}");
             }
             assert!(
-                text_box_size(msg, SCREEN_WIDTH, SCREEN_HEIGHT).is_some(),
+                text_box_size(msg, SCREEN_WIDTH, SCREEN_HEIGHT, FONT_SCALE_MIN).is_some(),
                 "{msg:?} does not fit in a 256x224 buffer"
             );
         }
@@ -2972,23 +3380,26 @@ mod overlay_tests {
     #[test]
     fn status_text_is_drawn_bottom_left_and_fps_top_right() {
         let mut frame = vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT * 4];
-        draw_status_text(&mut frame, SCREEN_WIDTH, SCREEN_HEIGHT, "SLOT 3 SAUVE", STATUS_COLOR);
-        let (_, box_h) = text_box_size("SLOT 3 SAUVE", SCREEN_WIDTH, SCREEN_HEIGHT).expect("fits");
+        let scale = FONT_SCALE_MIN;
+        draw_status_text(&mut frame, SCREEN_WIDTH, SCREEN_HEIGHT, scale, "SLOT 3 SAUVE", STATUS_COLOR);
+        let (_, box_h) =
+            text_box_size("SLOT 3 SAUVE", SCREEN_WIDTH, SCREEN_HEIGHT, scale).expect("fits");
         // Bottom-left corner of the box is the black background fill.
-        let y = SCREEN_HEIGHT - OVERLAY_MARGIN - box_h;
-        let idx = (y * SCREEN_WIDTH + OVERLAY_MARGIN) * 4;
+        let margin = overlay_margin(scale);
+        let y = SCREEN_HEIGHT - margin - box_h;
+        let idx = (y * SCREEN_WIDTH + margin) * 4;
         assert_eq!(&frame[idx..idx + 4], &[0, 0, 0, 255]);
         // The opposite corner (where the FPS overlay lives) is untouched.
-        let top_right = (OVERLAY_MARGIN * SCREEN_WIDTH + (SCREEN_WIDTH - OVERLAY_MARGIN - 1)) * 4;
+        let top_right = (margin * SCREEN_WIDTH + (SCREEN_WIDTH - margin - 1)) * 4;
         assert_eq!(&frame[top_right..top_right + 4], &[0, 0, 0, 0]);
         assert!(frame.chunks_exact(4).any(|p| p == STATUS_COLOR));
     }
 
     #[test]
     fn text_too_wide_for_the_buffer_is_skipped_instead_of_drawn() {
-        assert_eq!(text_box_size(&"W".repeat(64), SCREEN_WIDTH, SCREEN_HEIGHT), None);
+        assert_eq!(text_box_size(&"W".repeat(64), SCREEN_WIDTH, SCREEN_HEIGHT, FONT_SCALE_MIN), None);
         let mut frame = vec![7u8; SCREEN_WIDTH * SCREEN_HEIGHT * 4];
-        draw_status_text(&mut frame, SCREEN_WIDTH, SCREEN_HEIGHT, &"W".repeat(64), STATUS_COLOR);
+        draw_status_text(&mut frame, SCREEN_WIDTH, SCREEN_HEIGHT, FONT_SCALE_MIN, &"W".repeat(64), STATUS_COLOR);
         assert!(frame.iter().all(|&b| b == 7), "nothing should have been drawn");
     }
 
@@ -3027,9 +3438,11 @@ mod overlay_tests {
     fn draw_overlay_text_paints_top_right_box_and_leaves_rest_untouched() {
         let mut frame = vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT * 4];
         let text_color = [80, 255, 80, 255];
-        draw_overlay_text(&mut frame, SCREEN_WIDTH, SCREEN_HEIGHT, "FPS 60/50", text_color);
+        let scale = FONT_SCALE_MIN;
+        draw_overlay_text(&mut frame, SCREEN_WIDTH, SCREEN_HEIGHT, scale, "FPS 60/50", text_color);
         // Background box corner near the top-right edge is the black box fill.
-        let idx = (OVERLAY_MARGIN * SCREEN_WIDTH + (SCREEN_WIDTH - OVERLAY_MARGIN - 1)) * 4;
+        let margin = overlay_margin(scale);
+        let idx = (margin * SCREEN_WIDTH + (SCREEN_WIDTH - margin - 1)) * 4;
         assert_eq!(&frame[idx..idx + 4], &[0, 0, 0, 255]);
         // Top-left corner of the buffer is untouched by a top-right overlay.
         assert_eq!(&frame[0..4], &[0, 0, 0, 0]);
@@ -3046,21 +3459,35 @@ mod overlay_tests {
     /// get the exact same box in output pixels, not a scaled-up one.
     #[test]
     fn overlay_box_size_is_independent_of_the_buffer_size() {
-        let native = text_box_size("FPS 60/50", SCREEN_WIDTH, SCREEN_HEIGHT).expect("fits");
+        let scale = FONT_SCALE_MIN;
+        let native =
+            text_box_size("FPS 60/50", SCREEN_WIDTH, SCREEN_HEIGHT, scale).expect("fits");
         // A window several times larger than the native picture (e.g. zoom
         // x8 or a maximized 4K display).
-        let large = text_box_size("FPS 60/50", 3840, 2160).expect("fits");
+        let large = text_box_size("FPS 60/50", 3840, 2160, scale).expect("fits");
         assert_eq!(native, large);
     }
 
     #[test]
-    fn font_scale_is_1x_so_the_overlay_stays_small_in_output_pixels() {
-        // Regression guard for the "l'affichage des FPS est trop gros"
-        // report: each glyph pixel must draw as a single output pixel, not a
-        // multi-pixel block (drawing after scaling — see the module comment —
-        // already keeps the *apparent* size constant across window sizes;
-        // this keeps the *absolute* size small to begin with).
-        assert_eq!(FONT_SCALE, 1);
+    fn the_overlay_keeps_one_apparent_size_on_every_monitor() {
+        // This rule is the settlement of two opposite reports. The overlay
+        // once scaled with the picture ("trop gros" at high zoom), and was
+        // then pinned to one *output* pixel per glyph pixel — which is half a
+        // point on a HiDPI screen, hence "beaucoup trop petit". Points are the
+        // unit a reader cares about, so the size follows the monitor's scale
+        // factor and nothing else.
+        assert!(
+            font_scale(2.0) >= 2 * font_scale(1.0) - 1,
+            "a 2x monitor needs about twice the pixels for the same apparent size"
+        );
+        // The window and the zoom are not arguments: they cannot move it.
+        for factor in [0.5, 1.0, 1.5, 2.0, 3.0, 10.0] {
+            let scale = font_scale(factor);
+            assert!(
+                (FONT_SCALE_MIN..=FONT_SCALE_MAX).contains(&scale),
+                "scale factor {factor} gave {scale}"
+            );
+        }
     }
 }
 

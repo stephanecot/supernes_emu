@@ -42,6 +42,9 @@ pub enum Request {
     ScreenshotDir { current: PathBuf },
     /// Pick the folder battery saves and save states are written to.
     SaveDir { current: PathBuf },
+    /// Name the assistant's command-line tool by hand, when it is not on the
+    /// `PATH` the application was launched with.
+    AssistantTool { current: Option<PathBuf> },
 }
 
 /// What the player answered.
@@ -52,6 +55,7 @@ pub enum Answer {
     LibraryDir(PathBuf),
     ScreenshotDir(PathBuf),
     SaveDir(PathBuf),
+    AssistantTool(PathBuf),
     /// The panel was dismissed without a choice; the caller changes nothing but
     /// still restarts frame pacing, since an arbitrary amount of wall time
     /// passed.
@@ -149,6 +153,13 @@ fn run(request: Request, lang: crate::i18n::Lang) -> Answer {
         Request::SaveDir { current } => {
             match crate::picker::pick_dir(crate::i18n::Msg::SaveFolder.text(lang), &current) {
                 Some(dir) => Answer::SaveDir(dir),
+                None => Answer::Cancelled,
+            }
+        }
+        Request::AssistantTool { current } => {
+            let title = crate::i18n::Msg::AssistantLocate.text(lang);
+            match crate::picker::pick_executable(title, current.as_deref()) {
+                Some(path) => Answer::AssistantTool(path),
                 None => Answer::Cancelled,
             }
         }
@@ -260,6 +271,7 @@ mod tests {
         let answers = [
             Answer::Rom(PathBuf::from("/roms/a.sfc")),
             Answer::AddRom { path: PathBuf::from("/ailleurs/b.zip"), replacing: None },
+            Answer::AssistantTool(PathBuf::from("/usr/local/bin/claude")),
             Answer::LibraryDir(PathBuf::from("/roms")),
             Answer::ScreenshotDir(PathBuf::from("/shots")),
             Answer::SaveDir(PathBuf::from("/saves")),
@@ -271,6 +283,7 @@ mod tests {
             // without deciding here which of the two shapes it carries.
             match answer {
                 // A cartridge is a file, so it is named with an extension…
+                Answer::AssistantTool(p) => assert!(p.is_absolute() || p.parent().is_some()),
                 Answer::Rom(p) | Answer::AddRom { path: p, .. } => {
                     assert!(p.extension().is_some(), "{p:?}");
                 }

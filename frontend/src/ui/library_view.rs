@@ -38,6 +38,7 @@ use crate::i18n::{self, Lang, Msg};
 use crate::library::{self, GameEntry, SortMode};
 use crate::prefs::GameStats;
 
+use super::game_sheet;
 use super::icons::{self, Icon};
 use super::tabs::{Tab, TRANSITION};
 use super::textures::TextureStore;
@@ -83,6 +84,10 @@ pub struct LibraryUi {
     pub tab: Tab,
     /// `game_id` of the open game sheet; `None` shows the grid.
     pub selected: Option<String>,
+    /// Tab the open sheet shows. Kept for the length of a sheet and no longer:
+    /// opening another game starts on the first tab again, rather than on
+    /// `Triches` because that is where the last sheet was left three games ago.
+    pub sheet_tab: game_sheet::SheetTab,
     /// Save state the sheet is waiting for a confirmation to delete. Armed by
     /// the first click on `Supprimer`, cleared by anything else — deleting a
     /// slot is irreversible, so it never happens on a single click.
@@ -104,6 +109,8 @@ pub struct LibraryModel<'a> {
     pub thumbs: &'a HashMap<String, PathBuf>,
     /// Games whose thumbnail generation has been queued and not answered yet.
     pub pending: &'a HashSet<String>,
+    /// Games whose sheet is being fetched from the catalogues.
+    pub fetching: &'a HashSet<String>,
     pub state: &'a mut LibraryUi,
     pub textures: &'a mut TextureStore,
     /// Language every string of the grid is rendered in.
@@ -254,6 +261,17 @@ pub fn show(ui: &mut egui::Ui, model: &mut LibraryModel) -> Action {
             {
                 action = Action::ChooseLibraryDir;
             }
+            // The library-wide catch-up. Deliberately a plain button next to
+            // the others and never automatic: it is the only thing on this
+            // screen that talks to the internet, and it says so on hover.
+            if !model.entries.is_empty()
+                && ui
+                    .button(Msg::FillLibrary.text(lang))
+                    .on_hover_text(Msg::FillLibraryHint.text(lang))
+                    .clicked()
+            {
+                action = Action::FillLibrary;
+            }
             if ui.button(Msg::Refresh.text(lang)).clicked() {
                 action = Action::Rescan;
             }
@@ -264,7 +282,9 @@ pub fn show(ui: &mut egui::Ui, model: &mut LibraryModel) -> Action {
     // A status line only while something is actually happening. The game count
     // and the folder path used to sit here on every frame: a third band of
     // chrome, above every card, saying what the grid itself already shows.
-    if let Some(status) = activity(lang, model.state.scanning, model.pending.len()) {
+    if let Some(status) =
+        activity(lang, model.state.scanning, model.fetching.len(), model.pending.len())
+    {
         ui.add_space(6.0);
         ui.label(RichText::new(status).font(theme::font(theme::SIZE_SMALL)).color(theme::TEXT_DIM));
     }
@@ -322,9 +342,13 @@ pub fn show(ui: &mut egui::Ui, model: &mut LibraryModel) -> Action {
                     if hit.favorite {
                         action = Action::ToggleFavorite(entry.id.clone());
                     } else if hit.play {
-                        action = Action::Launch(entry.path.clone());
+                        action = Action::Launch { path: entry.path.clone(), resume: true };
                     } else if hit.open {
                         model.state.selected = Some(entry.id.clone());
+                        // A sheet always opens on the tab that says what the
+                        // game is; the previous sheet's tab belonged to the
+                        // previous game.
+                        model.state.sheet_tab = game_sheet::SheetTab::default();
                     }
                 }
             }
@@ -334,12 +358,19 @@ pub fn show(ui: &mut egui::Ui, model: &mut LibraryModel) -> Action {
 }
 
 /// The one line the toolbar shows while the library is working, or `None` when
-/// it is not: a scan in flight, or thumbnails still being emulated. Written out
-/// properly rather than with a parenthesised plural — this is prose, and the
-/// grid says how many games there are by showing them.
-pub fn activity(lang: Lang, scanning: bool, pending: usize) -> Option<String> {
+/// it is not: a scan in flight, sheets being fetched, or thumbnails still being
+/// emulated. Written out properly rather than with a parenthesised plural —
+/// this is prose, and the grid says how many games there are by showing them.
+///
+/// Fetching is announced before thumbnail generation because it is the one the
+/// player asked for by pressing a button, and because it is the one that is
+/// talking to somebody else's server.
+pub fn activity(lang: Lang, scanning: bool, fetching: usize, pending: usize) -> Option<String> {
     if scanning {
         return Some(Msg::ScanningFolder.text(lang).to_string());
+    }
+    if fetching > 0 {
+        return Some(i18n::sheets_pending(lang, fetching));
     }
     match pending {
         0 => None,
@@ -846,6 +877,7 @@ mod tests {
             fastrom: false,
             checksum: 1,
             checksum_valid: true,
+            crc32: 0x0000_0001,
             missing: false,
         }
     }
@@ -901,19 +933,24 @@ mod tests {
     /// carry the game count and the folder path above every single card.
     #[test]
     fn the_toolbar_speaks_only_while_the_library_is_working() {
-        assert_eq!(activity(Lang::Fr, false, 0), None);
-        assert_eq!(activity(Lang::Fr, true, 0).as_deref(), Some("Analyse du dossier…"));
+        assert_eq!(activity(Lang::Fr, false, 0, 0), None);
+        assert_eq!(activity(Lang::Fr, true, 0, 0).as_deref(), Some("Analyse du dossier…"));
         // A scan in flight wins: the count of queued thumbnails is not settled
         // until it ends.
-        assert_eq!(activity(Lang::Fr, true, 3).as_deref(), Some("Analyse du dossier…"));
-        assert_eq!(activity(Lang::Fr, false, 1).as_deref(), Some("1 miniature en cours…"));
-        assert_eq!(activity(Lang::Fr, false, 7).as_deref(), Some("7 miniatures en cours…"));
-        assert_eq!(activity(Lang::En, false, 1).as_deref(), Some("1 thumbnail being built…"));
-        assert_eq!(activity(Lang::En, false, 7).as_deref(), Some("7 thumbnails being built…"));
+        assert_eq!(activity(Lang::Fr, true, 0, 3).as_deref(), Some("Analyse du dossier…"));
+        assert_eq!(activity(Lang::Fr, false, 0, 1).as_deref(), Some("1 miniature en cours…"));
+        assert_eq!(activity(Lang::Fr, false, 0, 7).as_deref(), Some("7 miniatures en cours…"));
+        assert_eq!(activity(Lang::En, false, 0, 1).as_deref(), Some("1 thumbnail being built…"));
+        assert_eq!(activity(Lang::En, false, 0, 7).as_deref(), Some("7 thumbnails being built…"));
+        // A sheet the player asked for is announced ahead of the background
+        // thumbnails: it is the one that is talking to somebody else's server.
+        assert_eq!(activity(Lang::Fr, false, 2, 7).as_deref(), Some("2 fiches en cours…"));
+        assert_eq!(activity(Lang::En, false, 1, 7).as_deref(), Some("1 sheet being filled in…"));
+        assert_eq!(activity(Lang::Fr, true, 2, 7).as_deref(), Some("Analyse du dossier…"));
         // No parenthesised plural anywhere in the line, in either language.
         for lang in Lang::ALL {
             for n in 0..12 {
-                if let Some(line) = activity(lang, false, n) {
+                if let Some(line) = activity(lang, false, n, n) {
                     assert!(!line.contains("(s)"), "{line}");
                 }
             }
@@ -928,8 +965,60 @@ mod tests {
         assert_eq!(state.tab, Tab::Library);
         assert_eq!(state.selected, None);
         assert_eq!(state.confirm_delete, None);
+        assert_eq!(state.sheet_tab, game_sheet::SheetTab::About);
         assert!(!state.scanning);
         assert_eq!(state.error, None);
+    }
+
+    /// A sheet opens on what the game is, whatever tab the last one was left
+    /// on: reopening on `Triches` because that is where the player was three
+    /// games ago is the state the tab is deliberately *not* remembered in.
+    #[test]
+    fn opening_a_sheet_starts_on_the_tab_that_says_what_the_game_is() {
+        let e = entry();
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let mut textures = TextureStore::new();
+        // Left on the last game's tab, as the shell would have it.
+        let mut state = LibraryUi { sheet_tab: game_sheet::SheetTab::Cheats, ..Default::default() };
+        let card_id = egui::Id::new(("prisme-card", &e.id));
+        for pass in 0..4 {
+            // Opened from the keyboard, which is `hit.open` with neither the
+            // star nor `Jouer` under a pointer to compete with it.
+            let events = if pass == 3 {
+                vec![egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Default::default(),
+                }]
+            } else {
+                Vec::new()
+            };
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1024.0, 896.0),
+                )),
+                time: Some(pass as f64 * 0.5),
+                events,
+                ..Default::default()
+            };
+            ctx.memory_mut(|memory| memory.request_focus(card_id));
+            model_frame(
+                &ctx,
+                input,
+                std::slice::from_ref(&e),
+                &BTreeMap::new(),
+                &HashMap::new(),
+                &mut state,
+                &mut textures,
+                Lang::Fr,
+            );
+        }
+        assert_eq!(state.selected.as_deref(), Some("GAME-0001"), "the card never opened");
+        assert_eq!(state.sheet_tab, game_sheet::SheetTab::About);
     }
 
     /// The defect the brief opens with: a row must never be wider than the
@@ -1065,6 +1154,7 @@ mod tests {
         lang: Lang,
     ) -> egui::FullOutput {
         let pending = HashSet::new();
+        let fetching = HashSet::new();
         ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 show(
@@ -1075,6 +1165,7 @@ mod tests {
                         dir: Path::new("/roms"),
                         thumbs,
                         pending: &pending,
+                        fetching: &fetching,
                         state,
                         textures,
                         lang,

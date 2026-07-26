@@ -48,6 +48,22 @@ pub struct HomeModel<'a> {
     /// selection changed (never per frame — each field is a directory
     /// listing).
     pub sheet: &'a SheetData,
+    /// What the catalogues said, per game id — empty until the player asks for
+    /// any of it (`ui::Action::FillSheet` / `FillLibrary`).
+    pub meta: &'a std::collections::BTreeMap<String, crate::metadata::GameMeta>,
+    /// The assistant is switched on and its tool resolved.
+    pub assistant: bool,
+    /// `game_id` of the session currently loaded, if any: the assistant plays
+    /// from that session's state, so it can only play *this* game.
+    pub running: Option<&'a str>,
+    /// Last frame the suspended session drew, as RGBA — `None` when nothing
+    /// is loaded. Shown so that leaving a game for the menu never looks like
+    /// having closed it.
+    pub session_frame: Option<&'a [u8]>,
+    /// Edit buffer of the request being typed on the sheet.
+    pub wish: &'a mut String,
+    /// The assistant's latest line while one runs.
+    pub assistant_says: Option<&'a str>,
 }
 
 impl HomeModel<'_> {
@@ -136,12 +152,99 @@ pub fn show(ctx: &egui::Context, model: &mut HomeModel) -> Action {
 /// The lower band: the game grid, or the sheet of the selected game. A
 /// selection naming a game that is no longer in the library (folder changed,
 /// file deleted) falls back to the grid.
+/// Side of the suspended session's picture on the home screen, in points.
+const SESSION_PICTURE_W: f32 = 152.0;
+const SESSION_PICTURE_H: f32 = SESSION_PICTURE_W / library_view::PICTURE_RATIO;
+
+/// The band that shows a game is still there.
+///
+/// A green dot and a title said the session existed; nothing *showed* it, and
+/// "I left the menu open" and "I closed the game" looked alike. The picture is
+/// the frame the console stopped on — the game itself, held still — which
+/// needs no caption to be understood.
+fn session_band(ui: &mut egui::Ui, model: &mut HomeModel) -> Option<Action> {
+    let (Some(title), Some(frame)) = (model.game_title, model.session_frame) else {
+        return None;
+    };
+    let lang = model.lang;
+    let mut action = None;
+    egui::Frame::new()
+        .fill(theme::BG_CARD)
+        .stroke(Stroke::new(1.0, theme::STROKE))
+        .corner_radius(8.0)
+        .inner_margin(egui::Margin::same(10))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let (rect, _) = ui.allocate_exact_size(
+                    Vec2::new(SESSION_PICTURE_W, SESSION_PICTURE_H),
+                    Sense::hover(),
+                );
+                let key = Path::new(super::textures::TextureStore::SESSION_FRAME);
+                let size = [crate::SCREEN_WIDTH, crate::SCREEN_HEIGHT];
+                let texture = model
+                    .library
+                    .textures
+                    .frame(ui.ctx(), key, frame, size)
+                    .map(|texture| texture.id());
+                match texture {
+                    Some(id) => {
+                        ui.painter().image(
+                            id,
+                            rect,
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            Color32::WHITE,
+                        );
+                    }
+                    None => {
+                        ui.painter().rect_filled(rect, 4.0, theme::BG_DEEP);
+                    }
+                }
+                ui.add_space(14.0);
+                ui.vertical(|ui| {
+                    ui.label(
+                        RichText::new(Msg::SessionStillOn.text(lang))
+                            .font(theme::font(theme::SIZE_SMALL))
+                            .color(theme::GREEN),
+                    );
+                    ui.add_space(2.0);
+                    ui.label(
+                        RichText::new(elide(title, SESSION_TITLE_MAX_CHARS))
+                            .font(theme::strong(theme::SIZE_HEADING))
+                            .color(theme::TEXT),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(Msg::SessionStillOnHint.text(lang))
+                            .font(theme::font(theme::SIZE_SMALL))
+                            .color(theme::TEXT_DIM),
+                    );
+                    ui.add_space(10.0);
+                    if icons::primary_button(ui, Icon::Play, Msg::Resume.text(lang)).clicked() {
+                        action = Some(Action::ResumeGame);
+                    }
+                });
+            });
+        });
+    ui.add_space(12.0);
+    action
+}
+
 fn library(ui: &mut egui::Ui, model: &mut HomeModel) -> Action {
     let entries = model.library.entries;
     let games = model.library.games;
     let thumbs = model.library.thumbs;
     let pending = model.library.pending;
     let selected = model.library.state.selected.clone();
+
+    // Above the grid, not inside it: the grid is a list of games to start,
+    // and a game already started is a different kind of thing.
+    // On every library tab, not just the first: a game left running is still
+    // running while its owner browses their favourites.
+    if model.library.state.selected.is_none() {
+        if let Some(produced) = session_band(ui, model) {
+            return produced;
+        }
+    }
 
     if let Some(id) = selected {
         if let Some(entry) = entries.iter().find(|e| e.id == id) {
@@ -152,9 +255,21 @@ fn library(ui: &mut egui::Ui, model: &mut HomeModel) -> Action {
                 data: model.sheet,
                 picture: thumbs.get(&id).map(|p| p.as_path()),
                 pending: pending.contains(&id),
+                meta: model.meta.get(&id),
+                // Only for the game that *is* running: another game's sheet
+                // has no business showing this one's picture.
+                session_frame: (model.running == Some(id.as_str()))
+                    .then_some(model.session_frame)
+                    .flatten(),
+                assistant: model.assistant,
+                is_running: model.running == Some(id.as_str()),
+                wish: model.wish,
+                assistant_says: model.assistant_says,
+                fetching: model.library.fetching.contains(&id),
                 textures: model.library.textures,
                 selected: &mut model.library.state.selected,
                 confirm_delete: &mut model.library.state.confirm_delete,
+                tab: &mut model.library.state.sheet_tab,
                 lang: model.lang,
             };
             return game_sheet::show(ui, &mut sheet);
@@ -374,8 +489,46 @@ mod tests {
 
     /// One headless frame of the whole screen, returning what it asked for and
     /// every string it painted.
+    /// The band that says a game is still running must actually be painted.
+    /// It was reported missing twice, and each time the reasoning said it
+    /// should be there — so the code path is asserted rather than argued.
+    #[test]
+    fn a_suspended_session_is_shown_as_a_picture_not_only_as_a_chip() {
+        let mut state = super::super::library_view::LibraryUi::default();
+        let frame = vec![0u8; crate::SCREEN_WIDTH * crate::SCREEN_HEIGHT * 4];
+        let (_, text) = draw_with_frame(
+            Some("SUPER MARIOWORLD"),
+            Some(&frame),
+            &mut state,
+            egui::vec2(1100.0, 800.0),
+            Lang::Fr,
+        );
+        assert!(text.contains("Partie en cours"), "{text}");
+        assert!(text.contains("Reprendre"), "{text}");
+
+        // And nothing of it when no console is loaded.
+        let (_, none) = draw_with_frame(
+            None,
+            None,
+            &mut state,
+            egui::vec2(1100.0, 800.0),
+            Lang::Fr,
+        );
+        assert!(!none.contains("Partie en cours"), "{none}");
+    }
+
     fn draw(
         game_title: Option<&str>,
+        state: &mut super::super::library_view::LibraryUi,
+        size: egui::Vec2,
+        lang: Lang,
+    ) -> (Action, String) {
+        draw_with_frame(game_title, None, state, size, lang)
+    }
+
+    fn draw_with_frame(
+        game_title: Option<&str>,
+        session_frame: Option<&[u8]>,
         state: &mut super::super::library_view::LibraryUi,
         size: egui::Vec2,
         lang: Lang,
@@ -384,6 +537,8 @@ mod tests {
         let games = std::collections::BTreeMap::new();
         let thumbs = std::collections::HashMap::new();
         let pending = std::collections::HashSet::new();
+        let fetching = std::collections::HashSet::new();
+        let meta = std::collections::BTreeMap::new();
         let mut textures = super::super::textures::TextureStore::new();
         let sheet = SheetData::default();
         let ctx = egui::Context::default();
@@ -397,6 +552,11 @@ mod tests {
             produced = show(
                 ctx,
                 &mut HomeModel {
+                session_frame,
+                assistant: true,
+                running: None,
+                wish: &mut String::new(),
+                assistant_says: None,
                     app_name: "Prisme",
                     version: "0.0.0",
                     lang,
@@ -408,11 +568,13 @@ mod tests {
                         dir: Path::new("roms"),
                         thumbs: &thumbs,
                         pending: &pending,
+                        fetching: &fetching,
                         state,
                         textures: &mut textures,
                         lang,
                     },
                     sheet: &sheet,
+                    meta: &meta,
                 },
             );
         });
@@ -489,10 +651,17 @@ mod tests {
         let games = std::collections::BTreeMap::new();
         let thumbs = std::collections::HashMap::new();
         let pending = std::collections::HashSet::new();
+        let fetching = std::collections::HashSet::new();
+        let meta = std::collections::BTreeMap::new();
         let mut state = super::super::library_view::LibraryUi::default();
         let mut textures = super::super::textures::TextureStore::new();
         let sheet = SheetData::default();
         let mut m = HomeModel {
+                session_frame: None,
+                assistant: true,
+                running: None,
+                wish: &mut String::new(),
+                assistant_says: None,
             app_name: "Prisme",
             version: "0.0.0",
             lang: Lang::Fr,
@@ -504,11 +673,13 @@ mod tests {
                 dir: Path::new("roms"),
                 thumbs: &thumbs,
                 pending: &pending,
+                fetching: &fetching,
                 state: &mut state,
                 textures: &mut textures,
                 lang: Lang::Fr,
             },
             sheet: &sheet,
+            meta: &meta,
         };
         assert!(!m.has_session());
         m.game_title = Some("SUPER MARIOWORLD");

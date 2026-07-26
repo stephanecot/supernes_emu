@@ -207,6 +207,37 @@ pub struct Prefs {
     /// Folder the library screen scans for ROMs; `None` falls back to
     /// `last_rom_dir`, then to `roms/` (see `library::library_dir`).
     pub library_dir: Option<PathBuf>,
+    /// Let the assistant run (`assistant::Session`). Off until it is asked
+    /// for: it starts a process that reasons about the player's game, and
+    /// nothing of that shape should switch itself on.
+    ///
+    /// Stored independently of whether the tool is installed. The two are
+    /// different facts — "I want this" and "it is possible here" — and
+    /// conflating them would silently forget the choice of someone whose
+    /// `claude` is temporarily missing, then leave the feature off once it
+    /// came back.
+    pub assistant: bool,
+    /// Path of the assistant's command-line tool. Starts at this platform's
+    /// usual install location (`assistant::default_path`) rather than empty,
+    /// so the field shows what is being looked at instead of leaving someone
+    /// to guess; emptying it falls back to searching the `PATH`.
+    ///
+    /// It exists because a windowed application does not inherit a shell's
+    /// `PATH`: on macOS the Finder hands over a bare login environment, so a
+    /// tool in `~/.local/bin` is invisible to the bundle while working in a
+    /// terminal.
+    ///
+    /// Deliberately the only way to point at it: no list of likely install
+    /// directories is searched. Guessing works until it does not, and it hides
+    /// the one fact worth knowing when it fails — where the application looked.
+    pub assistant_path: String,
+    /// Model the assistant runs on, passed straight to the tool's `--model`.
+    /// Defaults to `assistant::DEFAULT_MODEL`; empty leaves the tool its own.
+    ///
+    /// Free text rather than a fixed list: model names change faster than this
+    /// emulator ships, and a hardcoded menu would go stale and start refusing
+    /// names that work.
+    pub assistant_model: String,
     /// Interface language: `fr`, `en`, or anything else — including the
     /// default `system` — to follow the host. Storing the fallback as an
     /// unrecognised string rather than as an absent key keeps the file
@@ -256,6 +287,9 @@ impl Default for Prefs {
             resume_on_launch: true,
             save_slot: 0,
             library_dir: None,
+            assistant: false,
+            assistant_path: crate::assistant::default_path(),
+            assistant_model: crate::assistant::DEFAULT_MODEL.to_string(),
             language: "system".to_string(),
             extra_roms: Vec::new(),
             library_sort: "title".to_string(),
@@ -410,6 +444,20 @@ impl Prefs {
             seen.push(p.clone());
             true
         });
+    }
+
+    /// The tool path the player named, or `None` to look on the `PATH`. Blank
+    /// and whitespace-only both mean "not set" — someone who clears the field
+    /// means the same thing as someone who never filled it.
+    pub fn assistant_tool(&self) -> Option<&Path> {
+        let trimmed = self.assistant_path.trim();
+        (!trimmed.is_empty()).then(|| Path::new(trimmed))
+    }
+
+    /// The model to run on, or `None` to leave the tool its own default.
+    pub fn assistant_model(&self) -> Option<&str> {
+        let trimmed = self.assistant_model.trim();
+        (!trimmed.is_empty()).then_some(trimmed)
     }
 
     /// Language the interface is drawn in: the stored choice, or the host's

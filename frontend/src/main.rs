@@ -1,14 +1,19 @@
 //! snes-frontend CLI. Contract lives in .claude/skills/snes-build-test/SKILL.md
 //! — keep the two in sync.
 
+mod agent;
+mod assistant;
 mod atomic;
 mod audio;
+mod cheats;
 mod dialog;
 mod guide;
 mod i18n;
 mod input;
 mod library;
 mod menu;
+mod metadata;
+mod net;
 mod pad;
 mod paths;
 mod picker;
@@ -46,6 +51,9 @@ struct Args {
     addr: Option<(u8, u16)>,
     count: u32,
     headless: bool,
+    /// `--agent`: serve the JSON control channel on stdin/stdout instead of
+    /// running a fixed number of frames. Headless by construction.
+    agent: bool,
     frames: u32,
     dump_frame: Option<PathBuf>,
     dump_frame_every: Option<u32>,
@@ -80,6 +88,20 @@ const USAGE: &str = "usage: prisme [rom.sfc|.smc|.zip] [flags]
   --info                                print header info and exit
   --disasm [--addr BB:AAAA] [--count N] disassemble and exit
   --headless --frames N                 emulate N frames without a window
+  --agent                               control channel for an external agent: one JSON
+                                        request per line on stdin, one JSON response per
+                                        line on stdout (no window, no audio). Commands:
+                                        step, press, screenshot, read-mem, write-mem,
+                                        save-state, load-state, cheat-list, cheat-add,
+                                        cheat-remove, cheat-enable, state, ping, help, quit;
+                                        send {\"cmd\":\"help\"} for the exact shapes.
+                                        Unnamed screenshots/states land in
+                                        target/debug-out/agent/. Honors --load-state to
+                                        seed the session; never writes the battery SRAM.
+                                        cheat-* read and write <game>.cheats.json beside
+                                        the save, and a frozen cheat is re-applied after
+                                        every frame here as in the window. The search that
+                                        finds an address is described in docs/CHEATS.md.
   --dump-frame PATH.png                 write final framebuffer as PNG on exit
   --dump-frame-every N --dump-dir DIR   write DIR/frame_XXXXX.png every N frames
   --trace PATH [--trace-start-frame A --trace-end-frame B]
@@ -97,7 +119,9 @@ const USAGE: &str = "usage: prisme [rom.sfc|.smc|.zip] [flags]
   --load-state FILE                     headless: load a save-state before frame 0
   --save-state-at FRAME FILE            headless: write a save-state after FRAME
   --ui-shot VIEW[@LANG] out.png         render a screen of the interface offscreen and exit
-                                        (VIEW: library, favorites, game-sheet, empty,
+                                        (VIEW: library, favorites, game-sheet,
+                                        game-sheet-states, game-sheet-cheats,
+                                        game-sheet-shots, game-sheet-empty, empty,
                                         library-hover, settings-display, settings-audio,
                                         settings-emulation, settings-inputs, settings-folders,
                                         settings-about; `settings` = settings-display.
@@ -172,6 +196,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             "--addr" => a.addr = Some(parse_bus_addr(&value(&mut it, "--addr")?)?),
             "--count" => a.count = parse_num(&value(&mut it, "--count")?)?,
             "--headless" => a.headless = true,
+            "--agent" => a.agent = true,
             "--frames" => a.frames = parse_num(&value(&mut it, "--frames")?)?,
             "--dump-frame" => a.dump_frame = Some(value(&mut it, "--dump-frame")?.into()),
             "--dump-frame-every" => {
@@ -223,7 +248,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
     // instead of failing here.
     // `--version` prints and exits before any cart is touched, so it is
     // exempt from that requirement.
-    if a.rom.is_none() && a.headless && !a.version {
+    if a.rom.is_none() && (a.headless || a.agent) && !a.version {
         return Err("no ROM path given".into());
     }
     // `--ui-shot` needs no cartridge, but it does need somewhere to write: its
@@ -238,8 +263,10 @@ fn parse_num(s: &str) -> Result<u32, String> {
     s.parse().map_err(|_| format!("invalid number: {s}"))
 }
 
-/// Parse `BB:AAAA` (hex bank : hex 16-bit address).
-fn parse_bus_addr(s: &str) -> Result<(u8, u16), String> {
+/// Parse `BB:AAAA` (hex bank : hex 16-bit address). Shared with the agent
+/// channel, whose `read-mem`/`write-mem` take the same address form as
+/// `--watch` so one notation covers the whole CLI.
+pub(crate) fn parse_bus_addr(s: &str) -> Result<(u8, u16), String> {
     let (bank, addr) = s.split_once(':').ok_or_else(|| format!("expected BB:AAAA, got {s}"))?;
     let bank = u8::from_str_radix(bank, 16).map_err(|_| format!("bad bank in {s}"))?;
     let addr = u16::from_str_radix(addr, 16).map_err(|_| format!("bad address in {s}"))?;
@@ -281,7 +308,7 @@ fn run(args: Args) -> Result<(), String> {
     // opens a window. `--info`/`--disasm` print and exit before that, so they
     // are excluded too. The one preference needed this early is `save_dir`,
     // which decides where the `.srm` loaded just below comes from.
-    let windowed = !args.headless && !args.info && !args.disasm;
+    let windowed = !args.headless && !args.agent && !args.info && !args.disasm;
     let prefs = windowed.then(|| prefs::Prefs::load(true));
 
     // Sidecar SRAM save: loaded before Snes::new so the game's own init code
@@ -311,17 +338,21 @@ fn run(args: Args) -> Result<(), String> {
     if args.disasm {
         return run_disasm(cart, &args);
     }
-    if args.trace_spc.is_some() && !args.headless {
+    // `--agent` is headless by construction (it owns stdin/stdout and opens no
+    // window), so every check below that asks "is there a window?" must treat
+    // it like `--headless`.
+    let headless = args.headless || args.agent;
+    if args.trace_spc.is_some() && !headless {
         eprintln!("--trace-spc requires --headless; ignoring");
     }
-    if args.trace_gsu.is_some() && !args.headless {
+    if args.trace_gsu.is_some() && !headless {
         eprintln!("--trace-gsu requires --headless; ignoring");
     }
-    if args.trace_sa1.is_some() && !args.headless {
+    if args.trace_sa1.is_some() && !headless {
         eprintln!("--trace-sa1 requires --headless; ignoring");
     }
 
-    if !args.headless {
+    if !headless {
         if args.dump_audio.is_some() {
             eprintln!("--dump-audio requires --headless; ignoring (windowed mode plays live)");
         }
@@ -358,6 +389,7 @@ fn run(args: Args) -> Result<(), String> {
         snes.load_state(&bytes)?;
         eprintln!("state: loaded {}", path.display());
     }
+
     if let Some(dir) = &args.dump_dir {
         std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     }
@@ -366,6 +398,17 @@ fn run(args: Args) -> Result<(), String> {
     snes.bus.debug.log_mmio = args.log_mmio;
     snes.bus.debug.watch =
         args.watch.iter().map(|&(b, a)| ((b as u32) << 16) | a as u32).collect();
+
+    // `--agent` hands the console to the JSON control channel: the frame loop
+    // below never runs, since an agent decides frame by frame how far to go.
+    // It comes after the debug taps so `--watch`/`--log-mmio` still work in a
+    // session (they write to stderr; stdout is the protocol). Nothing is
+    // written on exit either — a session that has been poking WRAM looking for
+    // a lives counter must not commit that to the player's `.srm`; what it
+    // wants to keep, it keeps with `save-state`.
+    if args.agent {
+        return agent::run(snes, rom_path, game_paths);
+    }
 
     let mut trace_writer = match &args.trace {
         Some(path) => Some(open_trace(path, "65C816")?),

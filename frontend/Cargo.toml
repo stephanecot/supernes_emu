@@ -1,6 +1,6 @@
 [package]
 name = "prisme"
-version = "1.2.0"
+version = "1.4.0"
 edition = "2021"
 
 [[bin]]
@@ -37,6 +37,14 @@ gilrs = "0.11"
 egui = "0.33"
 egui-wgpu = "0.33"
 egui-winit = { version = "0.33", default-features = false }
+# HTTP for the library metadata (`net`, `metadata`), and nothing else in the
+# tree. Blocking, because the caller is already a background thread and there
+# is nothing for an async runtime to overlap with; rustls rather than
+# native-tls, so there is no OpenSSL to find on three platforms. Default
+# features off: no cookies, no proxy, no JSON layer (`serde_json` is already
+# here), which keeps it to sixteen crates — `ring` the only one carrying C.
+# `gzip` is kept because the catalogue files are a megabyte of text each.
+ureq = { version = "3.3.0", default-features = false, features = ["rustls", "gzip"] }
 
 # Only for `localtime_r` (timezone/DST-aware timestamps in screenshot and .spc
 # file names); std has no timezone database. Already in the tree via cpal.

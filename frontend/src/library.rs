@@ -45,7 +45,10 @@ pub const CACHE_FILE: &str = "library.json";
 
 /// Layout version of `library.json`. Bump when a field's meaning changes; a
 /// file with any other version is discarded and rebuilt.
-pub const CACHE_VERSION: u32 = 1;
+///
+/// 2: entries carry `crc32`, the fingerprint every catalogue is keyed on
+/// (`metadata`). A version-1 file is dropped and one scan rebuilds it.
+pub const CACHE_VERSION: u32 = 2;
 
 /// Directory the library scans, in order of preference: the dedicated
 /// `library_dir` preference, then the last directory the ROM picker used
@@ -141,6 +144,17 @@ pub struct GameEntry {
     pub fastrom: bool,
     pub checksum: u16,
     pub checksum_valid: bool,
+    /// CRC32 of the de-headered image — the fingerprint No-Intro and every
+    /// `libretro-database` category are keyed on (`metadata`). Computed here
+    /// because the scan already holds the whole image in memory; it costs a
+    /// pass over a few megabytes and it is what makes the box-art and facts
+    /// lookup an identification rather than a guess on the file name.
+    ///
+    /// **Local work only** — computing it makes no network access, which
+    /// happens on a button and nowhere else. `0` in an entry read from an
+    /// older cache, which the version bump discards anyway.
+    #[serde(default)]
+    pub crc32: u32,
     /// Set on a game added by hand whose file is no longer where it was. A game
     /// that vanishes from the scanned folder is simply gone — it is not there
     /// any more — but one the player pointed at explicitly must not evaporate
@@ -205,6 +219,7 @@ fn entry_from_cart(path: &Path, file_size: u64, modified: i64, cart: &Cartridge)
         fastrom: cart.fastrom,
         checksum: cart.header_checksum,
         checksum_valid: cart.checksum_valid,
+        crc32: crate::metadata::crc32(&cart.rom),
         missing: false,
     }
 }
@@ -237,6 +252,7 @@ fn missing_entry(path: &Path, cache: &Cache) -> GameEntry {
         fastrom: false,
         checksum: 0,
         checksum_valid: false,
+        crc32: 0,
         missing: true,
     }
 }
@@ -706,19 +722,27 @@ pub fn screenshots(dir: &Path, title: &str) -> Vec<PathBuf> {
     found.into_iter().map(|(_, p)| p).collect()
 }
 
-/// Picture to display for a game: the screenshot the player promoted when it
-/// still exists on disk, else the generated thumbnail when it has been
-/// produced. `None` means "placeholder, and a thumbnail still has to be
-/// generated" — the single rule both the display and the generation queue
-/// read, so the grid can never show a placeholder for a game nobody will ever
-/// generate a picture for.
-pub fn resolve_picture(custom: Option<&Path>, generated: Option<&Path>) -> Option<PathBuf> {
-    if let Some(custom) = custom {
-        if custom.is_file() {
-            return Some(custom.to_path_buf());
+/// Picture to display for a game, in order of precedence: the screenshot the
+/// player promoted, the downloaded box art, then the generated thumbnail.
+/// `None` means "placeholder, and a thumbnail still has to be generated" — the
+/// single rule both the display and the generation queue read, so the grid can
+/// never show a placeholder for a game nobody will ever generate a picture for.
+///
+/// Box art is an *addition* to the existing ladder, not a replacement for it:
+/// the player's own choice still wins, and a game with no box art — or one
+/// whose box art was deleted — falls back to exactly the thumbnail it showed
+/// before. Nothing is ever removed from disk to make room for it.
+pub fn resolve_picture(
+    custom: Option<&Path>,
+    boxart: Option<&Path>,
+    generated: Option<&Path>,
+) -> Option<PathBuf> {
+    for candidate in [custom, boxart, generated].into_iter().flatten() {
+        if candidate.is_file() {
+            return Some(candidate.to_path_buf());
         }
     }
-    generated.filter(|p| p.is_file()).map(|p| p.to_path_buf())
+    None
 }
 
 // --- play-time accounting -------------------------------------------------
@@ -758,6 +782,11 @@ pub enum Job {
     Scan { dir: PathBuf, extra: Vec<PathBuf> },
     /// Generate the thumbnail of one game, unless its file already exists.
     Thumb { id: String, rom: PathBuf },
+    /// Fill in the sheets of these games from the network (`metadata`), by
+    /// `(game id, CRC32 of the de-headered image)`. **The only job of the three
+    /// that touches the network**, and it exists only because the player
+    /// pressed a button asking for it.
+    Fetch { games: Vec<(String, u32)> },
 }
 
 /// What the library thread reports back.
@@ -767,6 +796,13 @@ pub enum Update {
     /// `path` is the thumbnail PNG; `None` when generation failed (the game
     /// then keeps the placeholder and is not retried this run).
     Thumb { id: String, path: Option<PathBuf> },
+    /// One game's sheet was filled in. `meta` is `None` when nothing could be
+    /// fetched, in which case the entry the shell holds is left exactly as it
+    /// was. `remaining` is how many games of the same batch are still to come.
+    Fetched { id: String, meta: Option<crate::metadata::GameMeta>, remaining: usize },
+    /// The batch could not start at all: no catalogue, so no game can be
+    /// identified. Reported once, not once per game.
+    FetchFailed { error: String, remaining: usize },
 }
 
 /// The worker's job queue. Deliberately **not** a plain FIFO: a scan is what
@@ -777,9 +813,21 @@ pub enum Update {
 /// `request_thumbnails` re-submits whatever is still missing. A thumbnail run
 /// already in progress is not interrupted (it is a plain emulation loop), so a
 /// scan waits at most one thumbnail, not the whole backlog.
+///
+/// Fetches sit between the two: the player pressed a button for them, so they
+/// come before the background thumbnails, and a scan does **not** cancel them —
+/// unlike a thumbnail, a fetched sheet is keyed by game id and stays valid
+/// whatever folder is being listed, so dropping it would throw away work that
+/// is still wanted and cost the servers a second round of requests.
+///
+/// The bound this leaves: a batch already *running* is not interrupted either,
+/// so a rescan asked for during a library-wide fill waits for it. The interface
+/// stays live throughout (the batch reports every game as it lands), and the
+/// alternative — abandoning requests already paid for — is worse.
 #[derive(Debug, Default)]
 struct Queue {
     scans: VecDeque<(PathBuf, Vec<PathBuf>)>,
+    fetches: VecDeque<Vec<(String, u32)>>,
     thumbs: VecDeque<(String, PathBuf)>,
     /// Set when the handle is dropped: the thread returns instead of waiting.
     closed: bool,
@@ -810,6 +858,7 @@ impl Shared {
                     queue.scans.push_back((dir, extra));
                 }
                 Job::Thumb { id, rom } => queue.thumbs.push_back((id, rom)),
+                Job::Fetch { games } => queue.fetches.push_back(games),
             }
         }
         self.wake.notify_one();
@@ -824,6 +873,9 @@ impl Shared {
             }
             if let Some((dir, extra)) = queue.scans.pop_front() {
                 return Some(Job::Scan { dir, extra });
+            }
+            if let Some(games) = queue.fetches.pop_front() {
+                return Some(Job::Fetch { games });
             }
             if let Some((id, rom)) = queue.thumbs.pop_front() {
                 return Some(Job::Thumb { id, rom });
@@ -840,12 +892,12 @@ impl Shared {
         self.wake.notify_all();
     }
 
-    /// Queued (scans, thumbnails). Test-only: the UI reads its own `pending`
-    /// set, never the worker's queue.
+    /// Queued (scans, fetches, thumbnails). Test-only: the UI reads its own
+    /// `pending` set, never the worker's queue.
     #[cfg(test)]
-    fn queued(&self) -> (usize, usize) {
+    fn queued(&self) -> (usize, usize, usize) {
         let queue = lock(&self.queue);
-        (queue.scans.len(), queue.thumbs.len())
+        (queue.scans.len(), queue.fetches.len(), queue.thumbs.len())
     }
 }
 
@@ -900,11 +952,38 @@ impl Drop for Worker {
     }
 }
 
+/// Pause between two games of a `Fetch` batch. Filling a two-hundred-game
+/// library makes a few hundred requests to two public servers that owe this
+/// project nothing; spacing them is the decent way to use them, and a quarter
+/// of a second is invisible next to the round trip it follows.
+const FETCH_SPACING: Duration = Duration::from_millis(250);
+
 fn worker_loop(shared: &Arc<Shared>, updates: &Sender<Update>) {
     let cache_path = cache_path();
     let mut cache = cache_path.as_deref().map(Cache::read_from).unwrap_or_default();
+    // Both built on the first `Fetch` job and never before: a session that
+    // never presses the button opens no socket and reads no catalogue.
+    let mut catalog: Option<crate::metadata::Catalog> = None;
+    let mut http: Option<crate::net::Http> = None;
     while let Some(job) = shared.take() {
         match job {
+            Job::Fetch { games } => {
+                let net = http.get_or_insert_with(crate::net::Http::new);
+                match crate::metadata::catalog_dir() {
+                    Some(dir) => {
+                        fetch_batch(&dir, net, &mut catalog, &games, FETCH_SPACING, updates)
+                    }
+                    // No config directory: nowhere to cache the catalogue, so
+                    // the batch cannot even start. Answered rather than left
+                    // hanging, or the progress line would never clear.
+                    None => {
+                        let _ = updates.send(Update::FetchFailed {
+                            error: "no configuration directory for the catalogue".to_string(),
+                            remaining: 0,
+                        });
+                    }
+                }
+            }
             Job::Scan { dir, extra } => {
                 let (entries, error) = match scan(&dir, &extra, &mut cache) {
                     Ok(entries) => {
@@ -946,6 +1025,61 @@ fn worker_loop(shared: &Arc<Shared>, updates: &Sender<Update>) {
     }
 }
 
+/// Fill in one batch of sheets, reporting each game as it lands so the sheet
+/// the player is looking at fills in without waiting for the rest.
+///
+/// The catalogue is loaded at most once per session and then serves every
+/// game offline; the per-game store is written after each game, so a batch
+/// interrupted by a quit keeps what it had already found.
+fn fetch_batch(
+    dir: &Path,
+    net: &dyn crate::net::Fetch,
+    catalog: &mut Option<crate::metadata::Catalog>,
+    games: &[(String, u32)],
+    spacing: Duration,
+    updates: &Sender<Update>,
+) {
+    use crate::metadata;
+
+    if catalog.is_none() {
+        match metadata::Catalog::load(dir, net) {
+            Ok(loaded) => *catalog = Some(loaded),
+            Err(e) => {
+                // Nothing can be identified without it, so the whole batch is
+                // abandoned here rather than failing once per game — and, more
+                // to the point, nothing already stored is touched.
+                eprintln!("metadata: {e}");
+                let _ = updates.send(Update::FetchFailed { error: e, remaining: 0 });
+                return;
+            }
+        }
+    }
+    let catalog = catalog.as_ref().expect("the catalogue was just loaded");
+
+    // `dir` is `<config>/Catalog`, so its parent is the directory
+    // `library.json` and `prefs.json` already live in; taking the store's path
+    // from it rather than from `metadata::store_path` is what lets this whole
+    // function be run against a scratch directory in a test.
+    let store_path = dir.parent().map(|p| p.join(metadata::CACHE_FILE));
+    let mut store = store_path.as_deref().map(metadata::Store::read_from).unwrap_or_default();
+    for (index, (id, crc)) in games.iter().enumerate() {
+        let remaining = games.len() - index - 1;
+        if index > 0 {
+            std::thread::sleep(spacing);
+        }
+        let meta = metadata::fill(catalog, net, id, *crc);
+        store.games.insert(id.clone(), meta.clone());
+        if let Some(path) = &store_path {
+            if let Err(e) = store.write_to(path) {
+                eprintln!("metadata: {e}");
+            }
+        }
+        if updates.send(Update::Fetched { id: id.clone(), meta: Some(meta), remaining }).is_err() {
+            return;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -971,6 +1105,7 @@ mod tests {
             fastrom: false,
             checksum: 0x1234,
             checksum_valid: true,
+            crc32: 0xCAFE_D00D,
             missing: false,
         }
     }
@@ -1158,6 +1293,9 @@ mod tests {
                 crate::sanitize_file_stem(&e.title),
                 e.checksum
             )));
+            // The fingerprint every catalogue is keyed on is computed at scan
+            // time; a zero here would silently turn every lookup into a miss.
+            assert_ne!(e.crc32, 0, "{:?}", e.path);
         }
         // Every entry has its own identity (no two games collide on a key).
         let mut ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
@@ -1301,27 +1439,45 @@ mod tests {
     }
 
     #[test]
-    fn a_promoted_screenshot_wins_over_the_generated_thumbnail() {
+    fn a_promoted_screenshot_wins_over_the_box_art_and_the_generated_thumbnail() {
         let dir = scratch("picture");
         std::fs::create_dir_all(&dir).expect("mkdir");
         let custom = dir.join("promoted.png");
+        let boxart = dir.join("boxart.png");
         let generated = dir.join("generated.png");
         let missing = dir.join("gone.png");
 
         // Nothing on disk yet: placeholder, and generation is still needed.
-        assert_eq!(resolve_picture(None, Some(&generated)), None);
-        assert_eq!(resolve_picture(Some(&missing), Some(&missing)), None);
-        assert_eq!(resolve_picture(None, None), None);
+        assert_eq!(resolve_picture(None, None, Some(&generated)), None);
+        assert_eq!(resolve_picture(Some(&missing), Some(&missing), Some(&missing)), None);
+        assert_eq!(resolve_picture(None, None, None), None);
 
         std::fs::write(&generated, b"g").expect("write");
-        assert_eq!(resolve_picture(None, Some(&generated)), Some(generated.clone()));
-        // A promoted capture takes precedence…
+        assert_eq!(resolve_picture(None, None, Some(&generated)), Some(generated.clone()));
+        // Box art is an addition: it takes over from the generated thumbnail…
+        std::fs::write(&boxart, b"b").expect("write");
+        assert_eq!(
+            resolve_picture(None, Some(&boxart), Some(&generated)),
+            Some(boxart.clone())
+        );
+        // …but never from the player's own choice.
         std::fs::write(&custom, b"c").expect("write");
-        assert_eq!(resolve_picture(Some(&custom), Some(&generated)), Some(custom.clone()));
-        // …unless the player deleted it, in which case the generated one is
-        // used again rather than showing nothing.
+        assert_eq!(
+            resolve_picture(Some(&custom), Some(&boxart), Some(&generated)),
+            Some(custom.clone())
+        );
+        // Deleting either falls back down the ladder rather than showing
+        // nothing: the generated picture is never removed to make room.
         std::fs::remove_file(&custom).expect("rm");
-        assert_eq!(resolve_picture(Some(&custom), Some(&generated)), Some(generated));
+        assert_eq!(
+            resolve_picture(Some(&custom), Some(&boxart), Some(&generated)),
+            Some(boxart)
+        );
+        std::fs::remove_file(&dir.join("boxart.png")).expect("rm");
+        assert_eq!(
+            resolve_picture(Some(&custom), Some(&missing), Some(&generated)),
+            Some(generated)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1482,13 +1638,33 @@ mod tests {
         for id in ["A-0001", "B-0001", "C-0001"] {
             shared.push(Job::Thumb { id: id.to_string(), rom: PathBuf::from("/roms/x.sfc") });
         }
-        assert_eq!(shared.queued(), (0, 3));
+        assert_eq!(shared.queued(), (0, 0, 3));
         // Changing folder must not wait for three emulation runs, and the
         // thumbnails of the *old* folder must not be produced at all.
         shared.push(Job::Scan { dir: PathBuf::from("/games"), extra: Vec::new() });
-        assert_eq!(shared.queued(), (1, 0), "queued thumbnails belong to the old folder");
+        assert_eq!(shared.queued(), (1, 0, 0), "queued thumbnails belong to the old folder");
         assert_eq!(shared.take(), Some(Job::Scan { dir: PathBuf::from("/games"), extra: Vec::new() }));
-        assert_eq!(shared.queued(), (0, 0));
+        assert_eq!(shared.queued(), (0, 0, 0));
+    }
+
+    /// A sheet the player asked for comes before background thumbnails and
+    /// survives a rescan: it is keyed by game id, so it stays wanted whatever
+    /// folder is being listed, and re-fetching it would cost the servers a
+    /// second round of requests for nothing.
+    #[test]
+    fn a_requested_sheet_outranks_the_thumbnails_and_survives_a_rescan() {
+        let shared = Shared::new();
+        shared.push(Job::Thumb { id: "A".to_string(), rom: PathBuf::from("/a.sfc") });
+        let games = vec![("B-0001".to_string(), 0x5641_0E5Eu32)];
+        shared.push(Job::Fetch { games: games.clone() });
+        assert_eq!(shared.queued(), (0, 1, 1));
+        assert_eq!(shared.take(), Some(Job::Fetch { games: games.clone() }));
+
+        shared.push(Job::Fetch { games: games.clone() });
+        shared.push(Job::Scan { dir: PathBuf::from("/games"), extra: Vec::new() });
+        assert_eq!(shared.queued(), (1, 1, 0), "a scan must not cancel a requested sheet");
+        assert!(matches!(shared.take(), Some(Job::Scan { .. })));
+        assert_eq!(shared.take(), Some(Job::Fetch { games }));
     }
 
     #[test]
@@ -1504,6 +1680,97 @@ mod tests {
             shared.take(),
             Some(Job::Thumb { id: "B".to_string(), rom: PathBuf::from("/b.sfc") })
         );
+    }
+
+    /// A batch that reaches nothing must report once and change nothing: no
+    /// `Fetched` update (so the shell has nothing to apply), and `metadata.json`
+    /// byte-for-byte as it was. This is the rule the whole feature is judged on.
+    #[test]
+    fn a_fetch_that_reaches_nothing_leaves_every_stored_sheet_untouched() {
+        use crate::metadata;
+        let root = scratch("fetch-fails");
+        let catalog_dir = root.join(metadata::CATALOG_DIR);
+        std::fs::create_dir_all(&catalog_dir).expect("mkdir");
+        let store_path = root.join(metadata::CACHE_FILE);
+
+        let mut store = metadata::Store::default();
+        store.games.insert(
+            "SUPER_MARIOKART-BEEF".to_string(),
+            metadata::GameMeta {
+                crc32: 0x5641_0E5E,
+                name: "Super Mario Kart (Europe)".to_string(),
+                genre: Some("Racing".to_string()),
+                ..Default::default()
+            },
+        );
+        store.write_to(&store_path).expect("write");
+        let before = std::fs::read(&store_path).expect("read");
+
+        let (tx, rx) = channel::<Update>();
+        let mut catalog = None;
+        fetch_batch(
+            &catalog_dir,
+            &metadata::testing::FakeNet::dead(),
+            &mut catalog,
+            &[("SUPER_MARIOKART-BEEF".to_string(), 0x5641_0E5E)],
+            Duration::ZERO,
+            &tx,
+        );
+        let updates: Vec<Update> = rx.try_iter().collect();
+        assert_eq!(updates.len(), 1, "{updates:?}");
+        assert!(matches!(updates[0], Update::FetchFailed { .. }), "{updates:?}");
+        assert!(catalog.is_none(), "a failed load must not leave half a catalogue behind");
+        assert_eq!(std::fs::read(&store_path).expect("read"), before);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// …and one that reaches everything reports each game as it lands, with a
+    /// countdown the progress line can be driven from.
+    #[test]
+    fn a_batch_reports_each_game_as_it_lands() {
+        use crate::metadata;
+        let root = scratch("fetch-works");
+        let catalog_dir = root.join(metadata::CATALOG_DIR);
+        std::fs::create_dir_all(&catalog_dir).expect("mkdir");
+        // Two games, one of them absent from the catalogue: both must be
+        // reported, since "not in No-Intro" is an answer worth recording.
+        std::fs::write(
+            catalog_dir.join("no-intro.dat"),
+            "game (\n\tname \"Super Mario Kart (Europe)\"\n\trom ( name \"a.sfc\" size 524288 crc 56410E5E )\n)\n",
+        )
+        .expect("write");
+
+        let (tx, rx) = channel::<Update>();
+        let mut catalog = None;
+        fetch_batch(
+            &catalog_dir,
+            &metadata::testing::FakeNet::default(),
+            &mut catalog,
+            &[("SUPER_MARIOKART-BEEF".to_string(), 0x5641_0E5E), ("HOMEBREW-0000".to_string(), 1)],
+            Duration::ZERO,
+            &tx,
+        );
+        let updates: Vec<Update> = rx.try_iter().collect();
+        assert_eq!(updates.len(), 2, "{updates:?}");
+        match &updates[0] {
+            Update::Fetched { id, meta, remaining } => {
+                assert_eq!(id, "SUPER_MARIOKART-BEEF");
+                assert_eq!(*remaining, 1);
+                assert_eq!(meta.as_ref().map(|m| m.name.as_str()), Some("Super Mario Kart (Europe)"));
+            }
+            other => panic!("{other:?}"),
+        }
+        match &updates[1] {
+            Update::Fetched { meta, remaining, .. } => {
+                assert_eq!(*remaining, 0);
+                assert!(!meta.as_ref().expect("an answer").matched());
+            }
+            other => panic!("{other:?}"),
+        }
+        // Both are on disk, so a second visit costs no request at all.
+        let store = metadata::Store::read_from(&root.join(metadata::CACHE_FILE));
+        assert_eq!(store.games.len(), 2);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

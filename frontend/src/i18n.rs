@@ -147,6 +147,13 @@ messages! {
     AddGameHint       => "Ajouter un jeu situé hors du dossier — ou déposez son fichier sur la fenêtre"
                        / "Add a game from outside the folder — or drop its file on the window",
     Play              => "Jouer" / "Play",
+    Resume            => "Reprendre" / "Resume",
+    SessionStillOn    => "Partie en cours" / "Game still running",
+    SessionStillOnHint => "Elle n'a pas été arrêtée : la console est en pause, exactement là où vous l'avez laissée."
+                       / "It was not stopped: the console is paused, exactly where you left it.",
+    StartOver         => "Nouvelle partie" / "New game",
+    StartOverHint     => "Démarre la cartouche à zéro. La partie en cours est conservée et reste reprenable."
+                       / "Starts the cartridge from scratch. The suspended session is kept and stays resumable.",
     AddToFavorites    => "Ajouter aux favoris" / "Add to favourites",
     Favorite          => "Favori" / "Favourite",
     NoPicture         => "pas de miniature" / "no thumbnail",
@@ -179,6 +186,15 @@ messages! {
     ForgetHint        => "Le fichier lui-même n'est pas supprimé" / "The file itself is not deleted",
 
     // --- Game sheet -------------------------------------------------------
+    // The only tab of the sheet that had no name of its own: the three others
+    // are labelled by the headings they used to carry (`SaveStates`,
+    // `Cheats`, `Screenshots`), which is what keeps the tab and its content
+    // saying the same word.
+    SheetTabAbout     => "Présentation" / "Overview",
+    // Heading of the facts read off the cartridge itself, opposite the
+    // catalogue's claim about the same game: the two are read against each
+    // other, so each says where it comes from.
+    Cartridge         => "Cartouche" / "Cartridge",
     GeneratedThumbnail => "Vignette générée" / "Generated picture",
     GeneratedThumbnailHint => "Revenir à la miniature produite par l'émulateur"
                        / "Go back to the picture the emulator produced",
@@ -199,6 +215,29 @@ messages! {
     CurrentThumbnail  => "Vignette actuelle du jeu" / "The game's current picture",
     UseAsThumbnail    => "Utiliser comme vignette" / "Use as the game's picture",
 
+    // --- Cheats -----------------------------------------------------------
+    Cheats            => "Triches" / "Cheats",
+    NoCheats          => "Aucune triche pour ce jeu. Demandez-en une à l'assistant : il cherche l'adresse lui-même, en jouant."
+                       / "No cheat for this game. Ask the assistant for one: it finds the address itself, by playing.",
+    CheatsHint        => "Décochez-en une pour jouer sans, sans la perdre."
+                       / "Untick one to play without it, without losing it.",
+    CheatFrozen       => "figée" / "frozen",
+    CheatOnce         => "une fois" / "once",
+    CheatFrozenHint   => "Réécrite après chaque image : le jeu ne peut pas la reprendre."
+                       / "Rewritten after every frame: the game cannot take it back.",
+    CheatOnceHint     => "Écrite une seule fois, au démarrage de la partie."
+                       / "Written a single time, when the game starts.",
+    CheatEnabledHint  => "Active cette triche dans la prochaine partie — et tout de suite si le jeu tourne."
+                       / "Turns this cheat on for the next game — and right away if it is running.",
+    CheatRemove       => "Retirer" / "Remove",
+    CheatRemoveHint   => "Oublie cette triche. La partie et la sauvegarde ne sont pas touchées."
+                       / "Forgets this cheat. The game and its save are untouched.",
+    // A real cheat's name is written by whoever found it and is never
+    // translated. These two are the fake ones `--ui-shot` puts on the sheet,
+    // and a capture of the English interface must not show French names.
+    DemoCheatLives    => "Vies infinies" / "Infinite lives",
+    DemoCheatHearts   => "Cœurs au maximum" / "Full hearts",
+
     // --- Cartridge facts --------------------------------------------------
     FactRegion        => "Région" / "Region",
     FactMapping       => "Mapping" / "Mapping",
@@ -217,11 +256,52 @@ messages! {
     NeverPlayed       => "Jamais joué" / "Never played",
     LessThanAMinute   => "moins d'une minute" / "less than a minute",
 
+    // --- Catalogue facts (No-Intro + libretro-database) --------------------
+    Catalog           => "Catalogue" / "Catalogue",
+    FactGenre         => "Genre" / "Genre",
+    FactDeveloper     => "Développeur" / "Developer",
+    FactPublisher     => "Éditeur" / "Publisher",
+    FactPlayers       => "Joueurs" / "Players",
+    FactRelease       => "Sortie" / "Release",
+    FactFranchise     => "Série" / "Series",
+    FactEsrb          => "Classification" / "Age rating",
+    CatalogSource     => "Identifié par empreinte CRC32 · No-Intro et libretro-database"
+                       / "Identified by CRC32 fingerprint · No-Intro and libretro-database",
+    FillSheet         => "Compléter la fiche…" / "Fill in the sheet…",
+    FillSheetHint     => "Télécharge la jaquette et les faits de ce jeu. C'est le seul accès réseau de l'application, et il n'a lieu que sur ce bouton."
+                       / "Downloads this game's box art and facts. This is the application's only network access, and it happens on this button alone.",
+    FillLibrary       => "Compléter les fiches…" / "Fill in the sheets…",
+    FillLibraryHint   => "Télécharge jaquettes et faits pour les jeux qui n'en ont pas encore. Les catalogues ne sont téléchargés qu'une fois, puis relus hors ligne."
+                       / "Downloads box art and facts for the games that have none yet. The catalogues are downloaded once, then read offline.",
+    Filling           => "Recherche en cours…" / "Looking it up…",
+    CatalogRefetch    => "Actualiser la fiche" / "Refresh the sheet",
+    CatalogRefetchHint => "Redemander les faits et la jaquette de ce jeu."
+                       / "Ask for this game's facts and box art again.",
+    NoCatalogEntry    => "Aucune fiche pour l'instant. Le bouton ci-contre la télécharge."
+                       / "No sheet yet. The button on the left downloads one.",
+    NotInNoIntro      => "Cette copie n'est pas au catalogue No-Intro : dump modifié, traduction amateur ou homebrew. Les informations de la cartouche restent celles ci-dessus."
+                       / "This dump is not in the No-Intro catalogue: a modified dump, a fan translation or homebrew. The cartridge's own facts above still stand.",
+    NoBoxart          => "Pas de jaquette au catalogue" / "No box art in the catalogue",
+    FetchFailed       => "Rien n'a pu être téléchargé ; la fiche est inchangée."
+                       / "Nothing could be downloaded; the sheet is unchanged.",
+
+    // --- Description, and the reservations that come with it ---------------
+    Description       => "Description" / "Description",
+    // Named, not paraphrased: the licence asks for the attribution, and a
+    // wrong match has to be legible as one rather than as our own claim.
+    WikipediaCredit   => "Texte de Wikipédia (anglais), licence CC BY-SA — appariement par titre, donc à vérifier."
+                       / "Text from Wikipedia (English), CC BY-SA licence — matched by title, so worth checking.",
+    OpenArticle       => "Ouvrir l'article" / "Open the article",
+    EnglishOnly       => "Ce paragraphe est en anglais : Wikipédia n'en propose pas de version française sous ce titre."
+                       / "This paragraph is in English.",
+    NoDescription     => "Aucun article trouvé sous ce titre." / "No article found under that title.",
+
     // --- Settings sections ------------------------------------------------
     SectionDisplay    => "Affichage" / "Display",
     SectionAudio      => "Audio" / "Audio",
     SectionEmulation  => "Émulation" / "Emulation",
     SectionInputs     => "Entrées" / "Controls",
+    SectionAssistant  => "Assistant IA" / "AI assistant",
     SectionFolders    => "Dossiers" / "Folders",
     SectionAbout      => "À propos" / "About",
     SettingsFooter    => "Échap : revenir · chaque changement est enregistré aussitôt"
@@ -254,6 +334,50 @@ messages! {
     Volume            => "Volume" / "Volume",
     VolumeHint        => "Le son est coupé pendant l'accéléré ; le volume choisi ici revient à sa libération."
                        / "Sound is off while fast-forwarding; the volume set here comes back when the key is released.",
+
+    // --- Assistant ---------------------------------------------------------
+    AssistantEnable   => "Autoriser l'assistant" / "Allow the assistant",
+    AssistantOn       => "Activé" / "Enabled",
+    AssistantWhat     => "Demandez en français ce que vous voulez — trouver une triche, franchir un passage — et l'assistant pilote l'émulateur pour vous."
+                       / "Ask in your own words for what you want — find a cheat, get past a passage — and the assistant drives the emulator for you.",
+    AssistantFound    => "Claude Code est installé sur cette machine. Le raisonnement se fait ici, sans clé ni compte."
+                       / "Claude Code is installed on this machine. The reasoning happens here, with no key and no account.",
+    AssistantMissing  => "Claude Code est introuvable sur cette machine, l'assistant ne peut donc pas être activé."
+                       / "Claude Code was not found on this machine, so the assistant cannot be enabled.",
+    AssistantTool     => "Chemin de l'outil" / "Path to the tool",
+    AssistantLocate   => "Parcourir…" / "Browse…",
+    AssistantOnPath   => "Trouvé dans le PATH" / "Found on the PATH",
+    AssistantModel    => "Modèle" / "Model",
+    AssistantModelDef => "Défaut de l'outil" / "The tool's own default",
+    AssistantModelHint => "Laissez vide pour laisser Claude Code décider. Un alias (opus, sonnet, haiku) suit toujours la dernière version ; un nom complet fige une version précise."
+                       / "Leave empty to let Claude Code decide. An alias (opus, sonnet, haiku) always follows the latest version; a full name pins one.",
+    AssistantOk       => "Chemin valide" / "Path is valid",
+
+    // --- Asking the assistant ------------------------------------------------
+    AskHeading        => "Demander à l'IA" / "Ask the AI",
+    AskIntro          => "Deux choses très différentes : jouer un passage à votre place, ou chercher une triche. Dites laquelle."
+                       / "Two quite different things: play a passage for you, or find a cheat. Say which.",
+    AskPlaceholder    => "des vies infinies · passe-moi ce boss · de l'argent au maximum"
+                       / "infinite lives · get me past this boss · max out my money",
+    AskFindCheat      => "Chercher une triche" / "Find a cheat",
+    AskNeedsSession   => "Lancez ce jeu d'abord : la recherche part de l'état de votre partie."
+                       / "Start this game first: the search works from your session's state.",
+
+    AskStop           => "Arrêter" / "Stop",
+    AskWorking        => "L'assistant travaille…" / "The assistant is working…",
+    AskCheatHint      => "Cherche l'adresse mémoire et laisse une triche. Ne touche pas à votre partie."
+                       / "Finds the memory address and leaves a cheat behind. Your session is untouched.",
+
+    AskDisabled       => "Activez l'assistant dans Réglages → Assistant IA."
+                       / "Turn the assistant on in Settings → AI assistant.",
+
+    LiveDriving       => "L'IA joue · Échap pour reprendre la main"
+                       / "The AI is playing · Esc to take back control",
+    LiveThinking      => "L'IA réfléchit · la partie l'attend"
+                       / "The AI is thinking · the game is waiting for it",
+    AssistantPathHint => "Laissez vide pour chercher dans le PATH. Une application lancée depuis le Finder n'hérite pas du PATH de votre terminal : c'est là qu'il faut indiquer le chemin complet."
+                       / "Leave empty to look on the PATH. An application launched from the Finder does not inherit your terminal's PATH: that is when the full path belongs here.",
+    AssistantBadPath  => "Ce chemin ne désigne aucun exécutable." / "That path is not an executable.",
 
     // --- Controls ---------------------------------------------------------
     RebindHint        => "Cliquez sur une case — ou sur le bouton dessiné — pour la réaffecter."
@@ -448,6 +572,25 @@ pub fn thumbnails_pending(lang: Lang, count: usize) -> String {
     }
 }
 
+/// Games whose sheet is still being filled in from the network. Written out
+/// per count rather than with a parenthesised plural — this is prose.
+pub fn sheets_pending(lang: Lang, count: usize) -> String {
+    match (lang, count) {
+        (Lang::Fr, 1) => "1 fiche en cours…".to_string(),
+        (Lang::Fr, n) => format!("{n} fiches en cours…"),
+        (Lang::En, 1) => "1 sheet being filled in…".to_string(),
+        (Lang::En, n) => format!("{n} sheets being filled in…"),
+    }
+}
+
+/// The article a description was taken from, credited under it.
+pub fn wikipedia_article(lang: Lang, title: &str) -> String {
+    match lang {
+        Lang::Fr => format!("Article « {title} » sur Wikipédia"),
+        Lang::En => format!("Wikipedia article “{title}”"),
+    }
+}
+
 /// The expert entry of the window-size ladder, named for what it is. `dims` is
 /// the picture it produces and stays a machine value.
 pub fn native_size(lang: Lang, dims: &str) -> String {
@@ -492,8 +635,18 @@ pub fn cannot_open(lang: Lang, error: &str) -> String {
 /// Waiting for a key or a pad button to bind to `button`.
 ///
 /// Written out per language rather than assembled: French puts the button after
-/// the verb phrase, English fronts it, and a shared template would force one of
-/// them into the other's word order.
+/// When the session being offered was left. `when` is already localised.
+pub fn resume_from(lang: Lang, when: &str) -> String {
+    match lang {
+        Lang::Fr => format!("Reprendre la partie laissée le {when}"),
+        Lang::En => format!("Pick up the session left on {when}"),
+    }
+}
+
+/// Waiting for a key or a pad button to bind to `button`. Written out per
+/// language rather than assembled: French puts the button after the verb
+/// phrase, English fronts it, and a shared template would force one of them
+/// into the other's word order.
 pub fn press_a_key_for(lang: Lang, button: &str) -> String {
     match lang {
         Lang::Fr => format!("Appuyez sur une touche pour {button} — Échap pour annuler."),
@@ -734,7 +887,9 @@ mod tests {
     /// per-screen assertions in the screens' own tests as well.
     #[test]
     fn no_screen_of_the_shell_holds_a_french_string_of_its_own() {
-        const SOURCES: [(&str, &str); 13] = [
+        const SOURCES: [(&str, &str); 15] = [
+            ("metadata.rs", include_str!("metadata.rs")),
+            ("net.rs", include_str!("net.rs")),
             ("ui/home.rs", include_str!("ui/home.rs")),
             ("ui/library_view.rs", include_str!("ui/library_view.rs")),
             ("ui/game_sheet.rs", include_str!("ui/game_sheet.rs")),

@@ -10,7 +10,7 @@ description: Build, test, lint and run the SNES emulator (Rust workspace) — ru
 - `cargo check --workspace` — fast gate; must be error-free before any agent returns.
 - `cargo test -p snes-core` — unit tests on pure logic.
 - `cargo build --release -p prisme` — release build (use `--release` for any run beyond a few frames; debug builds are ~20× too slow for full-speed emulation).
-- `cargo clippy --workspace` — final-pass lint only, not a per-change gate.
+- `cargo clippy --workspace` — final-pass lint only, not a per-change gate. **Not installed on this machine** (`error: no such command: clippy`); skip the gate and say so rather than installing it.
 
 # Frontend CLI contract
 
@@ -24,6 +24,7 @@ description: Build, test, lint and run the SNES emulator (Rust workspace) — ru
 | `--info` | Print parsed header (title, mapping LoROM/HiROM, region, ROM/SRAM size, checksum), then exit |
 | `--disasm [--addr BB:AAAA] [--count N]` | Disassemble N instructions (default 30) from address (default: reset vector), then exit |
 | `--headless --frames N` | No window, no audio; emulate N frames, then exit 0 |
+| `--agent` | JSON control channel on stdin/stdout, one object per line, one response per line, `id` echoed, errors as values (`{"error":"…"}`) — the channel never goes silent and never exits except on `quit` or EOF. Headless by construction, honors `--load-state`, and **never writes the battery SRAM**. Commands: `step`, `press`, `screenshot`, `read-mem`, `write-mem`, `save-state`, `load-state`, `cheat-list`, `cheat-add`, `cheat-remove`, `cheat-enable`, `state`, `ping`, `help`, `quit`. `read-mem`/`write-mem` cap at 4096 bytes and refuse `$2000-$5FFF` of the system banks (MMIO). Unnamed screenshots/states land in `target/debug-out/agent/`. |
 | `--dump-frame PATH.png` | Write the final framebuffer as PNG on exit (with `--headless`) |
 | `--dump-frame-every N --dump-dir DIR` | Write DIR/frame_XXXXX.png every N frames |
 | `--trace PATH --trace-start-frame A --trace-end-frame B` | Mesen2-format 65C816 trace for frames A..B (unbounded traces are gigabytes — always bound) |
@@ -44,7 +45,7 @@ relative PATH under `target/debug-out/` (traces can reach gigabytes — this is 
 rule below). Every other output flag — `--dump-frame`, `--dump-frame-every`/`--dump-dir`,
 `--dump-state`, `--dump-spc`, `--dump-audio`, `--save-state-at` — honors PATH exactly as given,
 relative to the current directory; agents should pass an explicit `target/debug-out/...` path for
-those themselves if they want the same hygiene. `.srm`/`.state*`/`.resume` sidecars sit **beside the ROM** by default; a windowed run puts them in
+those themselves if they want the same hygiene. `.srm`/`.state*`/`.resume`/`.cheats.json` sidecars sit **beside the ROM** by default; a windowed run puts them in
 the `save_dir` preference's folder instead when the player set one (`Réglages > Dossiers`), named
 after the *game* there (`library::game_id` = cartridge title + header checksum, e.g.
 `SUPER_MARIOWORLD-A0DA.srm`) so two ROM files of the same name cannot share one save, and still
@@ -57,6 +58,32 @@ optional at load and deleted with its slot. Those writes (battery saves,
 save states, prefs) are atomic (temp file + `rename`); a `.srm` whose size doesn't exactly match
 the cart's declared SRAM is rejected at load (fresh SRAM is used instead), so don't hand-edit a
 `.srm` to a different length when testing.
+
+# Cheats (`cheat-*` on the agent channel)
+
+No Game Genie codes: a cheat is the *result* of a memory search an agent runs
+through this channel. The full procedure — intersection method, how many rounds,
+how to tell the counter from its display mirror — is `docs/CHEATS.md`; read it
+before searching for an address.
+
+```json
+{"cmd":"cheat-add","name":"Vies infinies","addr":"7E:0DBE","hex":"63","kind":"freeze","enabled":true}
+{"cmd":"cheat-list"}
+{"cmd":"cheat-enable","name":"Vies infinies","enabled":false}
+{"cmd":"cheat-remove","name":"Vies infinies"}
+```
+
+`kind` is `freeze` (rewritten after every emulated frame, the default) or `once`
+(written a single time; rearmed by `load-state`). `addr` takes `BB:AAAA` or bare
+hex and refuses MMIO; the payload goes in `hex` or `bytes`, 1..=64 bytes. `name`
+is the identity — adding the same name replaces that cheat. Every cheat response
+carries the whole list, its `count` and the `path` written.
+
+They persist in `<game>.cheats.json`, a sidecar beside the `.srm`/`.state`
+(**not** in `prefs.json`: a headless run must never write the player's
+preferences). The windowed application reads it when the game loads, applies the
+frozen ones after every frame exactly as the channel does, and lists them on the
+game sheet where the player can untick or remove one.
 
 # ROMs (all PAL — the emulator must run them at 50 Hz)
 

@@ -31,7 +31,7 @@ use crate::i18n::Lang;
 use crate::library::{GameEntry, StateFile};
 use crate::prefs::{GameStats, Prefs};
 
-use super::game_sheet::SheetData;
+use super::game_sheet::{SheetData, SheetTab};
 use super::home::HomeModel;
 use super::library_view::{LibraryModel, LibraryUi};
 use super::settings::{Section, SettingsModel, SettingsUi};
@@ -47,8 +47,15 @@ pub enum View {
     /// The same grid on the `Favoris` tab, which is also how the tab bar's
     /// other states are looked at.
     Favorites,
-    /// Home screen with a game's sheet open.
-    GameSheet,
+    /// Home screen with a game's sheet open, on one of its tabs. One view per
+    /// tab, for the same reason the settings panel has one per section: the
+    /// sheet shows a single tab at a time, and a tab nobody can capture is a
+    /// tab nobody will look at.
+    GameSheet(SheetTab),
+    /// The sheet of a game with no state, no cheat and no capture, opened on
+    /// `Sauvegardes`: the tab that is empty says so instead of disappearing,
+    /// and that is the half of the bar the full fixture can never show.
+    EmptySheet,
     /// The settings view, which owns the whole window as the library does,
     /// opened on one section. One view per section: it shows a single section
     /// at a time, so a capture of only the first one leaves the five others —
@@ -89,16 +96,21 @@ impl View {
     /// Names accepted on the command line, in the order `--help` lists them.
     /// One name per screen the shell can show, the settings panel counting one
     /// per section since that is what it draws at a time.
-    pub const ALL: [(&'static str, View); 13] = [
+    pub const ALL: [(&'static str, View); 18] = [
         ("library", View::Library),
         ("favorites", View::Favorites),
-        ("game-sheet", View::GameSheet),
+        ("game-sheet", View::GameSheet(SheetTab::About)),
+        ("game-sheet-states", View::GameSheet(SheetTab::States)),
+        ("game-sheet-cheats", View::GameSheet(SheetTab::Cheats)),
+        ("game-sheet-shots", View::GameSheet(SheetTab::Shots)),
+        ("game-sheet-empty", View::EmptySheet),
         ("settings-display", View::Settings(Section::Display)),
         ("settings-audio", View::Settings(Section::Audio)),
         ("settings-emulation", View::Settings(Section::Emulation)),
         ("settings-inputs", View::Settings(Section::Inputs)),
         ("settings-inputs-capture", View::InputsCapture),
         ("settings-inputs-pressed", View::InputsPressed),
+        ("settings-assistant", View::Settings(Section::Assistant)),
         ("settings-folders", View::Settings(Section::Folders)),
         ("settings-about", View::Settings(Section::About)),
         ("empty", View::Empty),
@@ -110,6 +122,15 @@ impl View {
     /// section, so a command line written before them keeps working.
     pub const ALIASES: [(&'static str, View); 1] =
         [("settings", View::Settings(Section::Display))];
+
+    /// Whether this view opens a game sheet, and on which tab.
+    fn sheet_tab(self) -> Option<SheetTab> {
+        match self {
+            View::GameSheet(tab) => Some(tab),
+            View::EmptySheet => Some(SheetTab::States),
+            _ => None,
+        }
+    }
 
     /// Parse a `--ui-shot` argument: a view name, optionally suffixed with the
     /// language to render it in (`settings-display@en`).
@@ -727,6 +748,14 @@ pub struct Fixture {
     /// is no thumbnail in flight either.
     no_pending: HashSet<String>,
     sheet: SheetData,
+    /// A filled-in sheet for the game `game-sheet` opens on, so the capture
+    /// shows the catalogue block and the attributed description rather than
+    /// the "nothing fetched yet" state — the layout only has to be judged
+    /// where there is something to lay out.
+    meta: BTreeMap<String, crate::metadata::GameMeta>,
+    /// Nothing is ever in flight in a capture: a spinner would be a different
+    /// picture every run.
+    no_fetching: HashSet<String>,
     library_ui: LibraryUi,
     settings_ui: SettingsUi,
     textures: TextureStore,
@@ -763,6 +792,7 @@ impl Fixture {
                 fastrom: game.fastrom,
                 checksum: 0x1234u16.wrapping_add((i as u16) << 8),
                 checksum_valid: game.checksum_valid,
+                crc32: 0x5641_0E5E ^ (i as u32),
                 missing: false,
             });
             games.insert(
@@ -803,6 +833,7 @@ impl Fixture {
             fastrom: false,
             checksum: 0,
             checksum_valid: false,
+            crc32: 0,
         });
 
         // Save slots and screenshots of the game the sheet opens on. Three of
@@ -838,6 +869,63 @@ impl Fixture {
             write_fake_picture(&path, FAKE_GAMES.len() + i)?;
             screenshots.push(path);
         }
+        // Two cheats of the kind an agent's search produces: one held every
+        // frame, one applied a single time and currently turned off.
+        let cheats = vec![
+            crate::cheats::Cheat::new(
+                crate::i18n::Msg::DemoCheatLives.text(lang).to_string(),
+                "7E:0DBE",
+                "63",
+                crate::cheats::Kind::Freeze,
+                true,
+            )?,
+            crate::cheats::Cheat::new(
+                crate::i18n::Msg::DemoCheatHearts.text(lang).to_string(),
+                "7E:0D23",
+                "A0",
+                crate::cheats::Kind::Once,
+                false,
+            )?,
+        ];
+
+        // A filled-in sheet for the game the `game-sheet` view opens on. The
+        // description is a real Wikipedia extract, at its real length: a
+        // capture is only worth looking at if it shows what a long paragraph
+        // does to the layout.
+        let boxart = dir.join("boxart.png");
+        write_fake_boxart(&boxart)?;
+        thumbs.insert(sheet_id.clone(), boxart.clone());
+        let mut meta = BTreeMap::new();
+        meta.insert(
+            sheet_id.clone(),
+            crate::metadata::GameMeta {
+                crc32: 0x777A_EBB4,
+                name: "Legend of Zelda, The - A Link to the Past (Europe) (Rev 1)".to_string(),
+                genre: Some("Action Adventure".to_string()),
+                developer: Some("Nintendo EAD".to_string()),
+                publisher: Some("Nintendo".to_string()),
+                players: Some("1".to_string()),
+                year: Some("1992".to_string()),
+                month: Some("9".to_string()),
+                franchise: Some("The Legend of Zelda".to_string()),
+                esrb: Some("E".to_string()),
+                description: Some(crate::metadata::Description {
+                    text: "The Legend of Zelda: A Link to the Past is an action-adventure game \
+                           developed and published by Nintendo for the Super Nintendo \
+                           Entertainment System. It is the third installment in The Legend of \
+                           Zelda series and was released in 1991 in Japan and 1992 in North \
+                           America and Europe. The game's story is set many years before the \
+                           events of the first two games, and tells of Link's quest to defeat \
+                           the evil Ganon and rescue the descendants of the Seven Sages."
+                        .to_string(),
+                    title: "The Legend of Zelda: A Link to the Past".to_string(),
+                    url: "https://en.wikipedia.org/wiki/The_Legend_of_Zelda:_A_Link_to_the_Past"
+                        .to_string(),
+                }),
+                boxart: Some(boxart),
+                fetched: FIXTURE_NOW,
+            },
+        );
 
         Ok(Self {
             view,
@@ -848,9 +936,18 @@ impl Fixture {
             thumbs,
             pending,
             no_pending: HashSet::new(),
-            sheet: SheetData { id: sheet_id.clone(), states, screenshots },
+            meta,
+            no_fetching: HashSet::new(),
+            // The empty sheet is the same game with nothing saved for it: a
+            // game whose sheet is worth capturing precisely because every one
+            // of its tabs has to say so rather than vanish.
+            sheet: match view {
+                View::EmptySheet => SheetData { id: sheet_id.clone(), ..Default::default() },
+                _ => SheetData { id: sheet_id.clone(), states, screenshots, cheats },
+            },
             library_ui: LibraryUi {
-                selected: (view == View::GameSheet).then_some(sheet_id),
+                selected: view.sheet_tab().map(|_| sheet_id),
+                sheet_tab: view.sheet_tab().unwrap_or_default(),
                 tab: if view == View::Favorites { Tab::Favorites } else { Tab::Library },
                 ..Default::default()
             },
@@ -889,6 +986,9 @@ impl Fixture {
             super::settings::show(
                 ctx,
                 &mut SettingsModel {
+                    // The fixture claims the tool is there: the interesting capture is
+                    // the row live, not greyed.
+                    claude: Some(Path::new("/Users/vous/.local/bin/claude")),
                     app_name: crate::APP_NAME,
                     version: crate::VERSION,
                     prefs: &self.prefs,
@@ -909,10 +1009,36 @@ impl Fixture {
         // library, not a different code path.
         let empty = self.view == View::Empty;
         let entries: &[GameEntry] = if empty { &[] } else { self.entries.as_slice() };
+        // The fixture shows the assistant available on the game whose sheet is
+        // open: the capture worth looking at is the one carrying the field.
+        let running = self.library_ui.selected.clone();
+        let mut wish = String::new();
+        // A plausible held frame: a sky gradient over ground, in the console's
+        // own 256x224 RGBA.
+        let session_frame: Vec<u8> = (0..crate::SCREEN_HEIGHT)
+            .flat_map(|y| {
+                (0..crate::SCREEN_WIDTH).flat_map(move |x| {
+                    let ground = y > crate::SCREEN_HEIGHT * 3 / 4;
+                    let shade = (x * 255 / crate::SCREEN_WIDTH) as u8;
+                    if ground {
+                        [40, 120 + shade / 4, 60, 255]
+                    } else {
+                        [70 + shade / 3, 110 + shade / 4, 200, 255]
+                    }
+                })
+            })
+            .collect();
         let pending: &HashSet<String> = if empty { &self.no_pending } else { &self.pending };
         super::home::show(
             ctx,
             &mut HomeModel {
+                // A frame the fixture draws itself: without one, the band that
+                // shows a game is still running could not be looked at at all.
+                session_frame: Some(&session_frame),
+                assistant: true,
+                running: running.as_deref(),
+                wish: &mut wish,
+                assistant_says: None,
                 app_name: crate::APP_NAME,
                 version: crate::VERSION,
                 lang: self.lang,
@@ -924,11 +1050,13 @@ impl Fixture {
                     dir: &self.rom_dir,
                     thumbs: &self.thumbs,
                     pending,
+                    fetching: &self.no_fetching,
                     state: &mut self.library_ui,
                     textures: &mut self.textures,
                     lang: self.lang,
                 },
                 sheet: &self.sheet,
+                meta: &self.meta,
             },
         );
     }
@@ -975,6 +1103,40 @@ fn write_fake_picture(path: &Path, seed: usize) -> Result<(), String> {
     crate::write_new_file(path, &png)
 }
 
+/// A stand-in for a downloaded box art, at the shape the real ones have:
+/// `libretro-thumbnails` serves the SNES boxes at 512x352, which is *wider*
+/// than the 8:7 frame every picture box of this interface is cut to. Its whole
+/// job here is to make that mismatch visible in a capture, so the letterboxing
+/// is judged rather than assumed.
+fn write_fake_boxart(path: &Path) -> Result<(), String> {
+    const W: u32 = 512;
+    const H: u32 = 352;
+    let mut rgba = Vec::with_capacity((W * H * 4) as usize);
+    for y in 0..H {
+        for x in 0..W {
+            // A framed plate: a border, then two accents split on a diagonal,
+            // which reads as artwork at thumbnail size without being one.
+            let border = x < 18 || y < 18 || x >= W - 18 || y >= H - 18;
+            let base = if border {
+                theme::accent(3)
+            } else if (x as f32 / W as f32) + (y as f32 / H as f32) < 1.0 {
+                theme::accent(0)
+            } else {
+                theme::accent(1)
+            };
+            let k = if border { 0.55 } else { 0.35 + 0.65 * (y as f32 / H as f32) };
+            rgba.extend_from_slice(&[
+                (base.r() as f32 * k) as u8,
+                (base.g() as f32 * k) as u8,
+                (base.b() as f32 * k) as u8,
+                255,
+            ]);
+        }
+    }
+    let png = crate::encode_rgba_png(&rgba, W, H)?;
+    crate::write_new_file(path, &png)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -983,7 +1145,7 @@ mod tests {
     fn every_view_is_named_on_the_command_line() {
         assert_eq!(View::parse("library"), Ok(View::Library));
         assert_eq!(View::parse("favorites"), Ok(View::Favorites));
-        assert_eq!(View::parse("game-sheet"), Ok(View::GameSheet));
+        assert_eq!(View::parse("game-sheet"), Ok(View::GameSheet(SheetTab::About)));
         assert_eq!(View::parse("empty"), Ok(View::Empty));
         assert_eq!(View::parse("library-hover"), Ok(View::Hover));
         // Only the two views that exist to show a hover state carry a pointer,
@@ -1046,6 +1208,28 @@ mod tests {
         // section the panel opens on.
         assert_eq!(View::parse("settings"), Ok(View::Settings(Section::default())));
         assert_eq!(View::Settings(Section::Display).name(), "settings-display");
+    }
+
+    /// Every tab of the sheet has a capture of its own, plus the one state the
+    /// full fixture cannot show: a tab with nothing in it.
+    #[test]
+    fn each_tab_of_the_game_sheet_has_its_own_view() {
+        for tab in SheetTab::ALL {
+            let view = View::GameSheet(tab);
+            assert_eq!(View::parse(view.name()), Ok(view), "{tab:?}");
+            assert_eq!(view.sheet_tab(), Some(tab));
+        }
+        assert_eq!(View::parse("game-sheet-empty"), Ok(View::EmptySheet));
+        assert_eq!(View::Library.sheet_tab(), None);
+        // The plain name still opens the tab a sheet opens on, so a command
+        // line written before the tabs existed keeps meaning what it meant.
+        assert_eq!(View::parse("game-sheet"), Ok(View::GameSheet(SheetTab::default())));
+        // …and the empty one is empty on every tab, not only the one it opens.
+        let fixture = Fixture::new(View::EmptySheet, Lang::Fr).expect("fixture");
+        assert!(fixture.sheet.states.is_empty());
+        assert!(fixture.sheet.cheats.is_empty());
+        assert!(fixture.sheet.screenshots.is_empty());
+        assert!(!fixture.sheet.id.is_empty(), "an empty sheet is still a game's sheet");
     }
 
     #[test]

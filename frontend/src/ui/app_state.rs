@@ -24,7 +24,10 @@ pub enum Screen {
 /// loop through the very same `App::set_*` methods the keyboard hotkeys and
 /// the native menu use, so the three entry points can never write different
 /// values into `prefs`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Not `Copy`: one variant carries a path. Cloning a settings change once per
+/// click is not a cost worth designing around.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Setting {
     /// Interface language, or `None` to follow the host's
     /// (`i18n::system_lang`). Applied on the next frame — the shell is rebuilt
@@ -47,6 +50,15 @@ pub enum Setting {
     ConfirmOnQuit(bool),
     /// Save-state slot F5/F9 act on, 0..=9.
     Slot(u8),
+    /// Let the assistant be summoned. Only settable when `claude` was actually
+    /// found: the row is inert otherwise, so this can never be turned on for a
+    /// feature the machine cannot run.
+    Assistant(bool),
+    /// Where the assistant's tool lives, typed or picked by the player. Empty
+    /// goes back to looking on the `PATH`.
+    AssistantPath(String),
+    /// Model the assistant runs on. Empty leaves the tool its own default.
+    AssistantModel(String),
     /// Drop every keyboard and controller binding the player made, back to the
     /// built-in `input::DEFAULT_KEYMAP` / `pad::DEFAULT_PAD_MAP`.
     ResetInputs,
@@ -70,8 +82,10 @@ pub enum Action {
     /// …or no: dismiss the modal and restore the previous pause state.
     CancelQuit,
     /// Start the library game at this path (the `Jouer` button / a double
-    /// click on a grid card).
-    Launch(std::path::PathBuf),
+    /// click on a grid card). `resume` picks up the automatic session state
+    /// when there is one; `false` starts the cartridge from power-on without
+    /// touching it, so the suspended session is still there afterwards.
+    Launch { path: std::path::PathBuf, resume: bool },
     /// Pin or unpin a game, by `library::game_id`.
     ToggleFavorite(String),
     /// Promote one of the game's own screenshots as its thumbnail, replacing
@@ -116,8 +130,35 @@ pub enum Action {
     ChooseSaveDir,
     /// Back to the default save location (beside the ROM).
     ResetSaveDir,
+    /// Turn one of a game's cheats on or off. `id` is the `library::game_id`
+    /// the sheet is showing, `name` the cheat's own identity in its sidecar.
+    /// Applies to the running console immediately when that game is the one
+    /// loaded.
+    ToggleCheat { id: String, name: String, enabled: bool },
+    /// Drop one cheat from a game's sidecar. Nothing else is touched — a cheat
+    /// is a note about an address, not a change to the save.
+    RemoveCheat { id: String, name: String },
+    /// Send what the player typed to the assistant: find the address behind
+    /// it and leave a cheat. Playing a passage was removed — an assistant that
+    /// looks at a screenshot before every decision is slow by construction.
+    AskAssistant { id: String },
+    /// Stop the assistant now. The player stays in charge of a thing that
+    /// looks at every frame and is therefore slow.
+    StopAssistant,
+    /// Name the assistant's tool with the native file dialog.
+    ChooseAssistantTool,
     /// Open the pedagogical PDF in the platform's document reader.
     OpenGuide,
+    /// Fill one game's sheet in from the catalogues (`metadata`). One of the
+    /// **two** requests in the whole application that reach the network, and
+    /// both are a button the player pressed — nothing at scan time, nothing at
+    /// startup. A failure leaves the sheet exactly as it was.
+    FillSheet(String),
+    /// The same for every game of the library that has no sheet yet.
+    FillLibrary,
+    /// Open a page in the platform's browser: the Wikipedia article a
+    /// description was taken from, which the licence requires be reachable.
+    OpenUrl(String),
 }
 
 /// What the Escape key does, resolved from the current context.
